@@ -75,7 +75,7 @@ automate these):
 - **Item numbers are permanent and file-global.** Never renumber or reuse one —
   the repo has ~176 internal "item N" cross-refs plus CLAUDE.md and test
   references that must keep resolving. A new item takes the next unused number
-  (check the highest `### N` heading in TODO.md; currently 193 — note 98 was
+  (check the highest `### N` heading in TODO.md; currently 195 — note 98 was
   never allocated and is deliberately left unused).
 - **When an item ships fully** (its `###` heading ends in exactly `✅ DONE`, no
   trailing qualifier): move its full body to `docs/TODO_ARCHIVE.md` in numeric
@@ -543,6 +543,51 @@ without an estimator returns None (proceeds under the reactive guardrails).
   never awaited` means you missed one), and extend the `tests/conftest.py`
   reset fixture to clear the new state — the same discipline the
   `in_process_limiter()` gotcha above documents for concurrency.
+  **Better still: define a new store's Protocol `async` from the start**, even
+  when the in-process implementation needs no `await` — then there is no later
+  conversion to get wrong. `admin/observed_shapes.py` (item 195) does this
+  deliberately and says so in its docstring.
+- **`ZPOPMIN`'s Lua reply shape is not portable — do not use it in a Redis
+  script.** Real Redis returns a flat `{member, score}` (so `reply[1]` is the
+  member); fakeredis returns a *nested* table, so `reply[1]` is a table and any
+  `HDEL`/`ZREM` keyed off it raises `Lua redis lib command arguments must be
+  strings or integers` mid-script — which a **fail-open** wrapper swallows, so it
+  presents as "the bound is cosmetic and every eviction is lost" rather than as an
+  error. (In a fail-closed script, e.g. the disclosure budget's, the same bug
+  would surface as a hard error instead — do not go looking for a silent
+  failure.) Item 195 phase 2 hit this building the observed-shape store's
+  eviction loop: measured 10 entries retained against a bound of 3, zero
+  evictions counted.
+  Use `ZRANGE key 0 0` followed by `ZREM` — both have stable flat replies on
+  every implementation. `lupa` must be installed for fakeredis to execute Lua at
+  all (it is a dev dependency); without it every scripted test fails with
+  `unknown command 'evalsha'`, which reads like a store bug and is not one.
+- **A Redis Lua script must declare every key it touches in `KEYS`, and those
+  keys must share a hash slot.** Reaching a key built inside the script via
+  `redis.call` is what Redis Cluster forbids — it is not a way to avoid
+  `CROSSSLOT`, it is a worse version of the same bug. **Neither fakeredis nor a
+  single-node Redis can detect it** — fakeredis executes undeclared-key access
+  happily and models no slots at all (which is what item 192's own write-up
+  says), so no behavioural test will catch this class. That is precisely why the
+  guard is a *source-level* assertion:
+  `test_every_key_the_script_touches_shares_one_hash_slot`. Give every key one
+  shared hash tag (`admin/redis_observed_shapes.py` uses `{qgshapes}`) and
+  declare them all. `TODO.md` item 192 is this defect still open in the
+  disclosure budget's script; item 195 phase 2 nearly repeated it, and was caught
+  by review, not by a test.
+- **Never round-trip a JSON document through Lua `cjson` in a Redis script.**
+  Lua has one table type, so `cjson.decode` + `cjson.encode` turns every empty
+  JSON **array** into an empty **object** — on real Redis but *not* under
+  fakeredis, whose Lua bridge preserves the distinction. Item 195 phase 2 shipped
+  this into review: every `joins: []`/`group_by: []`/`ctes: []` in a stored query
+  skeleton came back as `{}`, so every draft built from the durable backend failed
+  validation with five `Input should be a valid list` errors, with a fully green
+  suite. It is the mirror image of the `ZPOPMIN` entry above — same
+  fakeredis/real-Redis divergence class, opposite direction. Structure around it
+  rather than encoding carefully: keep the document **opaque** (write once with
+  `HSETNX`, never decode) and hold every mutable field in its own Redis structure
+  the script can update with an integer/string primitive (`HINCRBY`, `HSETNX`, a
+  ZSET score).
 
 ### What's archived, not active
 

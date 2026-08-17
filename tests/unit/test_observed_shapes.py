@@ -317,40 +317,43 @@ def test_a_value_shape_no_template_slot_can_express_is_refused():
 # ---------------------------------------------------------------------------
 
 
-def test_the_same_shape_with_different_values_is_one_entry():
+@pytest.mark.asyncio
+async def test_the_same_shape_with_different_values_is_one_entry():
     """The point of recording shapes rather than queries: a filter walked over
     a thousand values is one promotable template, not a thousand.
     """
     store = InProcessObservedShapeStore(enabled=True)
     for value in ("completed", "pending", "cancelled"):
-        store.record(
+        await store.record(
             _query(where=Predicate(col="orders.status", op="eq", value=value)),
             connection_id="demo",
             principal_id="agent",
         )
-    shapes = store.list_shapes()
+    shapes = await store.list_shapes()
     assert len(shapes) == 1
     assert shapes[0].occurrences == 3
 
 
-def test_a_different_shape_is_a_different_entry():
+@pytest.mark.asyncio
+async def test_a_different_shape_is_a_different_entry():
     store = InProcessObservedShapeStore(enabled=True)
-    store.record(_query(), connection_id="demo", principal_id="agent")
-    store.record(
+    await store.record(_query(), connection_id="demo", principal_id="agent")
+    await store.record(
         _query(select=["orders.id", "orders.status"]), connection_id="demo", principal_id="agent"
     )
-    assert len(store.list_shapes()) == 2
+    assert len(await store.list_shapes()) == 2
 
 
-def test_one_shape_run_by_two_principals_stays_separable():
+@pytest.mark.asyncio
+async def test_one_shape_run_by_two_principals_stays_separable():
     """Promotion is a per-principal decision ("may THIS agent be narrowed to
     these templates?"), so the records cannot be merged across principals.
     """
     store = InProcessObservedShapeStore(enabled=True)
-    store.record(_query(), connection_id="demo", principal_id="agent-a")
-    store.record(_query(), connection_id="demo", principal_id="agent-b")
-    assert len(store.list_shapes()) == 2
-    assert len(store.list_shapes(principal_id="agent-a")) == 1
+    await store.record(_query(), connection_id="demo", principal_id="agent-a")
+    await store.record(_query(), connection_id="demo", principal_id="agent-b")
+    assert len(await store.list_shapes()) == 2
+    assert len(await store.list_shapes(principal_id="agent-a")) == 1
 
 
 def test_shape_hash_is_stable_across_recordings():
@@ -359,7 +362,8 @@ def test_shape_hash_is_stable_across_recordings():
     assert shape_hash(first) == shape_hash(second)
 
 
-def test_a_shape_that_cannot_be_skeletonized_is_counted_not_silently_dropped():
+@pytest.mark.asyncio
+async def test_a_shape_that_cannot_be_skeletonized_is_counted_not_silently_dropped():
     """The second way the discovery list can be incomplete. It is swallowed on
     the query path by design (a query that already succeeded must not fail for
     an operator convenience), so the only way an operator learns the list is
@@ -370,16 +374,18 @@ def test_a_shape_that_cannot_be_skeletonized_is_counted_not_silently_dropped():
     store = InProcessObservedShapeStore(enabled=True)
     assert store.skeletonization_failures == 0
     with pytest.raises(SkeletonizationError):
-        store.record(
+        await store.record(
             _query(where=Predicate(col="orders.meta", op="eq", value={"nested": 1})),
             connection_id="demo",
             principal_id="agent",
         )
     assert store.skeletonization_failures == 1
-    assert build_observed_shape_report(store=store).skeletonization_failures == 1
+    report = await build_observed_shape_report(store=store)
+    assert report.skeletonization_failures == 1
 
 
-def test_the_store_is_bounded_and_reports_evictions():
+@pytest.mark.asyncio
+async def test_the_store_is_bounded_and_reports_evictions():
     """Shapes are caller-authored, so an unbounded store is a memory leak an
     adversarial caller controls. The ceiling must hold and be visible.
     """
@@ -388,7 +394,7 @@ def test_the_store_is_bounded_and_reports_evictions():
     # literal) deliberately no longer produces new entries, so the bound has to
     # be exercised with real structural variety.
     for index in range(10):
-        store.record(
+        await store.record(
             (
                 _query(select=["orders.id"] + [f"orders.status"] * 0, group_by=[], joins=[])
                 if index == 0
@@ -397,33 +403,39 @@ def test_the_store_is_bounded_and_reports_evictions():
             connection_id="demo",
             principal_id="agent",
         )
-    assert len(store.list_shapes()) <= 3
+    assert len(await store.list_shapes()) <= 3
     assert store.evicted_total > 0
 
 
-def test_shapes_are_ranked_most_used_first():
+@pytest.mark.asyncio
+async def test_shapes_are_ranked_most_used_first():
     store = InProcessObservedShapeStore(enabled=True)
-    store.record(_query(group_by=["orders.status"]), connection_id="demo", principal_id="agent")
+    await store.record(
+        _query(group_by=["orders.status"]), connection_id="demo", principal_id="agent"
+    )
     for _ in range(3):
-        store.record(_query(), connection_id="demo", principal_id="agent")
-    assert store.list_shapes()[0].occurrences == 3
+        await store.record(_query(), connection_id="demo", principal_id="agent")
+    ranked = await store.list_shapes()
+    assert ranked[0].occurrences == 3
 
 
-def test_report_reports_nothing_when_recording_is_disabled():
+@pytest.mark.asyncio
+async def test_report_reports_nothing_when_recording_is_disabled():
     """An operator reading an empty list must be able to tell "recording is
     off" from "nothing ran" — narrowing a connection on the strength of the
     second when it was really the first would break the agent.
     """
     store = InProcessObservedShapeStore(enabled=True)
-    store.record(_query(), connection_id="demo", principal_id="agent")
+    await store.record(_query(), connection_id="demo", principal_id="agent")
     store.enabled = False
-    report = build_observed_shape_report(store=store)
+    report = await build_observed_shape_report(store=store)
     assert report.enabled is False
     assert report.shapes == []
 
 
-def test_report_is_honest_about_being_process_local_and_volatile():
-    report = build_observed_shape_report(store=InProcessObservedShapeStore(enabled=True))
+@pytest.mark.asyncio
+async def test_report_is_honest_about_being_process_local_and_volatile():
+    report = await build_observed_shape_report(store=InProcessObservedShapeStore(enabled=True))
     assert report.scope == "process-local-volatile"
 
 
@@ -432,14 +444,15 @@ def test_report_is_honest_about_being_process_local_and_volatile():
 # ---------------------------------------------------------------------------
 
 
-def test_a_drafted_template_binds_back_into_a_valid_query():
+@pytest.mark.asyncio
+async def test_a_drafted_template_binds_back_into_a_valid_query():
     """The end-to-end property the whole feature rests on: observe a query,
     draft a template from its shape, bind a value, get a real StructuredQuery
     back. If this breaks, every drafted template is a landmine an operator
     discovers in production.
     """
     store = InProcessObservedShapeStore(enabled=True)
-    observed = store.record(_query(), connection_id="demo", principal_id="agent")
+    observed = await store.record(_query(), connection_id="demo", principal_id="agent")
     assert observed is not None
 
     template = observed.to_template_draft("orders_by_status")
@@ -451,9 +464,10 @@ def test_a_drafted_template_binds_back_into_a_valid_query():
     assert bound.where.value == "shipped"
 
 
-def test_a_drafted_template_targets_the_observed_connection():
+@pytest.mark.asyncio
+async def test_a_drafted_template_targets_the_observed_connection():
     store = InProcessObservedShapeStore(enabled=True)
-    observed = store.record(_query(), connection_id="analytics", principal_id="agent")
+    observed = await store.record(_query(), connection_id="analytics", principal_id="agent")
     assert observed.to_template_draft("orders_by_status").connection == "analytics"
 
 
@@ -513,13 +527,13 @@ async def test_recording_is_off_by_default():
     silently start retaining a new class of record.
     """
     await _run(_query(), enabled=False)
-    assert observed_shape_store().list_shapes() == []
+    assert await observed_shape_store().list_shapes() == []
 
 
 @pytest.mark.asyncio
 async def test_an_allowed_query_is_recorded_when_enabled():
     await _run(_query(), enabled=True)
-    shapes = observed_shape_store().list_shapes()
+    shapes = await observed_shape_store().list_shapes()
     assert len(shapes) == 1
     assert shapes[0].connection_id == "demo"
 
@@ -533,7 +547,7 @@ async def test_a_rejected_query_is_not_recorded():
     set_policy_store(PolicyStore(default=Policy(denied_tables=["orders"]), overrides={}))
     with pytest.raises(PolicyViolationError):
         await _run(_query(), enabled=True)
-    assert observed_shape_store().list_shapes() == []
+    assert await observed_shape_store().list_shapes() == []
 
 
 @pytest.mark.asyncio

@@ -471,3 +471,8 @@ dialog form > small { display: block; margin-top: 15px; text-align: center; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+/* Read-only rendered output (item 195's template draft) — monospace, scrollable,
+   never an editable field: this is something to copy into a config file, not a
+   form the control plane will act on. */
+.code-block { margin: 0; padding: 12px 14px; max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); font: 11px/1.6 var(--font-mono); white-space: pre; }

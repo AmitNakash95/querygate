@@ -23,7 +23,10 @@ from querygate.api.catalog_governance_routes import build_catalog_governance_rou
 from querygate.api.help_routes import build_help_router
 from querygate.api.routes import build_router
 from querygate.audit.ledger import resolve_ledger_key
-from querygate.admin.observed_shapes import configure_observed_shape_store
+from querygate.admin.observed_shapes import (
+    clear_redis_observed_shape_store,
+    configure_observed_shape_store,
+)
 from querygate.audit.sinks import configure_audit_sink, reset_audit_sink
 from querygate.catalog.refresh import CatalogRefreshMonitor
 from querygate.catalog.usage import CatalogUsageLearningMonitor
@@ -166,6 +169,28 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
             # prober N× the probes the operator configured against a k-anonymity
             # floor they believe is defended.
             init_redis_disclosure_budget_limiter(RedisDisclosureBudgetLimiter(redis_client))
+            # ...and item 195's observed-shape store, which needs it for a
+            # different reason than the three above: not to stop a per-replica
+            # budget multiplying, but because a discovery window split across
+            # replicas is INCOMPLETE, and narrowing a connection from an
+            # incomplete list breaks the shapes the other replicas saw. Shared
+            # and durable, so the window also survives a rolling deploy.
+            if conf.observed_shapes_enabled:
+                from querygate.admin.observed_shapes import (
+                    init_redis_observed_shape_store,
+                )
+                from querygate.admin.redis_observed_shapes import (
+                    RedisObservedShapeStore,
+                )
+
+                init_redis_observed_shape_store(
+                    RedisObservedShapeStore(
+                        redis_client,
+                        max_entries=conf.observed_shapes_max_entries,
+                        ttl_seconds=conf.observed_shapes_ttl_seconds,
+                        enabled=True,
+                    )
+                )
 
         try:
             if conf.mcp_enabled:
@@ -209,6 +234,12 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
                 clear_redis_limiter()
                 clear_redis_quota_limiter()
                 clear_redis_disclosure_budget_limiter()
+                # item 195 phase 2: the observed-shape store is a module-global
+                # this app installed too, and the comment above says "every".
+                # Omitting it left a second in-process app recording into and
+                # reading from the previous deployment's Redis keys while
+                # reporting a `shared-durable` scope it never configured.
+                clear_redis_observed_shape_store()
                 await redis_client.aclose()
 
     application = FastAPI(

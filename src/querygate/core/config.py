@@ -193,10 +193,22 @@ class AppConfig(BaseSettings):
     # (`Policy.templates_only`). Opt-in and off by default, the same posture
     # as the usage signals above and the `min_group_size`/disclosure-budget
     # guardrails — a deployment that never intends to narrow a connection
-    # should not pay for the recording. The store is bounded and per serving
-    # process; see `admin/observed_shapes.py` for both limits.
+    # should not pay for the recording. The store is always bounded; its SCOPE
+    # depends on `concurrency_backend`: with `redis` it is shared across every
+    # replica and durable across restarts (`admin/redis_observed_shapes.py`),
+    # otherwise per serving process and volatile
+    # (`admin/observed_shapes.py`). The report states which.
     observed_shapes_enabled: bool = pyd.Field(default=False)
     observed_shapes_max_entries: int = pyd.Field(default=500, ge=1, le=100_000)
+    # TTL on the Redis-backed store's keys, refreshed on every write (30 days).
+    # It bounds how long an *idle* window survives, so a deployment that stops
+    # recording releases the memory. It does NOT expire an actively-written
+    # window, however long — the refresh is unconditional on every record — so
+    # this is not a cap on total discovery duration. Ignored by the in-process
+    # store, which is volatile by nature. Upper bound is a year: a discovery
+    # window is a cutover activity, and a longer retention is a job for an
+    # audit sink, not this store.
+    observed_shapes_ttl_seconds: int = pyd.Field(default=2_592_000, ge=60, le=31_536_000)
 
     # REST and MCP share one API-key authenticator (see core/auth.py). Both
     # allow an anonymous dev-bypass outside production when no keys are set.
