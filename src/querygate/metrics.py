@@ -23,6 +23,7 @@ from prometheus_client import (
 )
 
 from querygate.core.exceptions import (
+    AdHocQueryNotPermittedError,
     ConcurrencyLimitError,
     ApprovalRequiredError,
     CostEstimateExceededError,
@@ -392,6 +393,13 @@ def classify_rejection(exc: BaseException) -> str:
     # a distinct signal from a hard allow/deny rejection.
     if isinstance(exc, ApprovalRequiredError):
         return "approval_required"
+    # Also before PolicyViolationError (item 195): "this principal is narrowed
+    # to curated templates and something submitted a free-form query" is the
+    # signal an operator watches during a templates-only cutover, and it is
+    # unactionable if it is indistinguishable from a denied table or an
+    # exceeded cap. Low cardinality — one more fixed label value.
+    if isinstance(exc, AdHocQueryNotPermittedError):
+        return "templates_only"
     if isinstance(exc, PolicyViolationError):
         return "policy"
     if isinstance(exc, ValueError):

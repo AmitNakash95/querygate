@@ -225,6 +225,7 @@ order-of-magnitude, not commitments.
 | 192 | The disclosure budget's Redis script passes multiple KEYS, which fails CROSSSLOT on Redis Cluster — turning a fail-closed control into an outage on the queries it protects | S | 179 |
 | 193 | `docs/product-guide.html` has no freshness gate against `docs/PRODUCT_GUIDE.md`, so the generated copy most likely to be shared goes stale silently | S | — |
 | 194 | Three crafted-or-corrupt WORM lines still escape `search_worm_archive` as a masked 500: a non-ASCII `hash` (reachable by ordinary corruption) and two unbounded recursions | S–M | 134 |
+| 195 | ✅ Narrow a principal from the general query surface to reviewed templates: `Policy.templates_only` enforcement plus an opt-in, redaction-safe observed-shape recorder that drafts a template from real traffic | M | 48 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -3496,3 +3497,19 @@ regression test, then restore the absolute form of the module docstring's
 standing-contract sentence.
 
 **Effort:** S–M. **Depends on:** 134 (shipped).
+### 195. The narrowing path: `Policy.templates_only` enforcement plus an observed-shape recorder that drafts a template from real traffic ✅ DONE
+
+Shipped the discovery→narrowing bridge between the general `StructuredQuery`
+surface and item 48's curated query templates: `Policy.templates_only`
+(off by default) refuses an ad-hoc AST on execute/explain/verdict/batch at the
+single `_validate_and_compile` choke point, exempting only a server-set
+`template_id`; an opt-in, bounded, per-process recorder captures the
+redaction-safe *skeleton* of each allowed query (every literal replaced by a
+typed parameter slot, `intent` dropped); and a scope-gated
+(`admin:shapes:read`) REST read plus a `querygate-shapes` CLI turn a recorded
+shape into a reviewable `QueryTemplate` draft that is never auto-installed.
+Also corrected `docs/INFERENCE_RISKS.md`'s stale Class A exhaustiveness
+argument. An admin-UI panel over the recorder was deliberately left out of
+scope.
+
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 195).

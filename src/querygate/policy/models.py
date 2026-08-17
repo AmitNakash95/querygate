@@ -662,6 +662,25 @@ class Policy(pyd.BaseModel):
     # accepted tradeoff for this connection's callers.
     verdict_include_plan: bool = pyd.Field(default=False)
 
+    # Narrow this principal/connection from the general structured-query
+    # surface to a finite, reviewed set of curated query templates (TODO.md
+    # item 195). When true, an ad-hoc `StructuredQuery` is refused — execute,
+    # explain, batch and verdict alike — and the caller may only invoke a
+    # published template by id; the bound query then passes through the
+    # unchanged policy/schema/guardrail pipeline, so a template can still
+    # never exceed policy.
+    #
+    # The signal that a query came from a template is set by the server (the
+    # template route/tool constructs the service with `template_id`), never
+    # read from the request body — a caller cannot assert its own exemption.
+    #
+    # Scope, stated precisely rather than implied by the name: this governs
+    # the READ structured-query surface. Governed writes are gated
+    # independently and deny-by-default by `WritePolicy` (which has no
+    # template concept at all), and schema discovery stays available so an
+    # agent can still describe what it is permitted to see.
+    templates_only: bool = pyd.Field(default=False)
+
     # Cross-connection joins: two connections may be joined in one query only
     # when they resolve to the same join_group (defaults to the connection's
     # own id, i.e. no cross-connection joins unless explicitly configured).
@@ -928,8 +947,16 @@ GUARDRAIL_FIELDS: tuple[str, ...] = tuple(
 # `disclosure_budget_window_seconds`: identical reasoning (item 179) — the same
 # probe budget spread over a longer window is a lower sustained probe rate, so
 # LENGTHENING it is the tighter posture.
+# `templates_only`: True narrows the caller from the whole structured-query
+# surface to a finite reviewed set, so the higher (True) value is the tighter
+# posture (item 195).
 INVERTED_GUARDRAIL_FIELDS = frozenset(
-    {"min_group_size", "quota_window_seconds", "disclosure_budget_window_seconds"}
+    {
+        "min_group_size",
+        "quota_window_seconds",
+        "disclosure_budget_window_seconds",
+        "templates_only",
+    }
 )
 
 # Deriving the field set fixes "a new cap is invisible", but a new cap could
@@ -960,6 +987,11 @@ _DIRECTION_REVIEWED_GUARDRAILS = frozenset(
         # Same "allow_* does not read as a ceiling" reasoning as allow_cross_join
         # — permitting cancellation is the looser posture (item 35 phase 3).
         "allow_query_cancellation",
+        # INVERTED (item 195): unlike every allow_*/max_* entry here, turning
+        # templates_only ON restricts — it refuses ad-hoc structured queries and
+        # leaves only curated templates. Stated because a bare "*_only" name
+        # says nothing about which direction is looser.
+        "templates_only",
         # Approval thresholds, not caps: a HIGHER threshold means fewer queries
         # are stopped for a human, so higher is looser — the normal direction,
         # but stated because "approval_max_*" does not read like a ceiling on

@@ -27,6 +27,20 @@ class PolicyViolationError(ValueError):
     """
 
 
+class AdHocQueryNotPermittedError(PolicyViolationError):
+    """Raised when `Policy.templates_only` is set and the caller submitted an
+    ad-hoc `StructuredQuery` instead of invoking a curated template (TODO.md
+    item 195).
+
+    Its own type, rather than a bare `PolicyViolationError`, so the rejection
+    is separable in metrics and in the audit stream: "this principal is
+    narrowed to templates and something tried a free-form query" is an
+    operationally distinct signal from "this query exceeded a cap", and an
+    operator flipping a connection to templates-only needs to see exactly that
+    during the cutover.
+    """
+
+
 class ConcurrencyLimitError(ValueError):
     """Raised when a connection's concurrency slot can't be acquired within
     `concurrency_wait_seconds`. Subclasses ValueError for the same reason as
