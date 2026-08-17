@@ -14044,3 +14044,221 @@ walk needed to learn about co-required fields.
 security 480 — all passing.
 
 **Effort:** L. **Depends on:** 88, 145 (both shipped).
+### 195. The narrowing path: `Policy.templates_only` enforcement plus an observed-shape recorder that drafts a template from real traffic ✅ DONE
+
+**Why.** QueryGate's read AST is deliberately expressive (items 99–106), so a
+connection opened to the general `StructuredQuery` surface can express far more
+shapes than any one agent needs. Item 48 shipped curated query templates — a
+finite, reviewed, parameterized set — but nothing connected the two: an
+operator could not *narrow* a principal to templates, and had no way to learn
+which templates that principal actually needs. Guessing the list up front is
+exactly what makes hand-authored tool catalogues wrong. This item shipped both
+halves.
+
+**Enforcement half — `Policy.templates_only`.**
+
+- New `Policy.templates_only: bool = False` (off by default, so no existing
+  deployment has its surface narrowed by an upgrade).
+- Enforced in `StructuredQueryService._reject_ad_hoc_query_when_templates_only`,
+  called at the top of `_validate_and_compile` — the single choke point
+  `execute()`, `explain()`, `verdict()` and batch (which funnels through
+  `execute()`) all pass through, so there is no unnarrowed fourth way in.
+- Raises the new `AdHocQueryNotPermittedError` (a `PolicyViolationError`, so
+  existing REST/MCP error mapping applies unchanged), classified as its own
+  `reason="templates_only"` label by `metrics.classify_rejection` so an
+  operator can watch a cutover without confusing "an agent is still sending
+  free-form queries" with "an agent tripped a cap". **The first cut of this
+  claim was false** — the type fell through to the generic `"policy"` bucket
+  and was observable only to a Python `except` clause
+  (`security-invariant-reviewer`, 2026-08-17); the metrics branch and
+  `test_the_refusal_is_separable_in_metrics` were added in response. The
+  *persisted audit event* still records `error_category="policy"`: the
+  exception type is deliberately not persisted (non-negotiable 3).
+- **The exemption is server-set.** The guard is a positive check on
+  `self._template_id`, which only `api/routes.py`'s `run_query_template` and
+  `mcp/tools/templates.py` populate; nothing reads it from a request body, so a
+  caller cannot assert its own exemption. Regression-tested with an `intent`
+  field naming a template.
+- **The refusal comes first**, before structural caps, policy validation and
+  schema validation, so the refusal is *uniform* — it never depends on which
+  rule the query happened to trip. Pinned by
+  `test_refusal_precedes_the_cheap_structural_caps` (`max_cte_count`, the
+  tightest boundary), `test_refusal_precedes_the_policy_caps` (`max_joins`),
+  `..._precedes_identifier_validation` and `..._precedes_schema_validation`.
+  **Two corrections from the 2026-08-17 review:** the original rationale
+  claimed this stopped a narrowed caller mining rejection reasons as an
+  *oracle* for cap values and schema existence — it does not, because
+  `/help/my-access` and MCP `describe_my_querygate_access` hand every cap value
+  to any authenticated caller by design, and schema discovery stays open. The
+  ordering is worth having for consistency, not confidentiality. And the
+  original test set pinned only the `validate_policy` boundary: moving the
+  guard one line down (below `validate_structural_caps`) left the entire suite
+  green while leaking `ctes exceeds max of 0`. The `max_cte_count` test closes
+  that gap.
+- Scope stated rather than implied by the name: this governs the READ
+  structured-query surface. Governed writes stay gated independently and
+  deny-by-default by `WritePolicy`; schema discovery stays available.
+
+**Discovery half — `admin/observed_shapes.py`.**
+
+- `skeletonize(query)` reduces a query to its promotable *skeleton*: the AST
+  with every caller-supplied **value** replaced by a `{"param": name}`
+  placeholder and `intent` dropped. The rule for classifying a field, so the
+  next one is decided rather than guessed: *a bare scalar whose content the
+  caller chooses is a value; a bare scalar drawn from a fixed vocabulary (a
+  table/column name, an operator, a flag) is structure.* That is exactly the shape
+  `QueryTemplate.query` stores, so a recorded shape round-trips through
+  `bind_template` into a real `StructuredQuery` — pinned by
+  `test_a_drafted_template_binds_back_into_a_valid_query`.
+- **The walk is generic over the dumped AST, not an enumeration of node
+  types** — deliberately, because an enumeration is the drift failure mode
+  item 96 exists to prevent. `_LITERAL_KEYS` is the single place the guarantee
+  is maintained, and `test_every_bare_scalar_ast_field_is_classified` reflects
+  over every read-AST model, failing on **any** bare-scalar field that is not
+  explicitly classified as a value, as structure
+  (`_STRUCTURAL_SCALAR_KEYS`, each entry justified), or as dropped.
+  **This lock was too weak on the first cut and a real leak got through it.**
+  It originally flagged only `Any`-typed and multi-scalar-union fields, so
+  every plain `str`/`int` field was invisible — and
+  `security-invariant-reviewer` (2026-08-17) proved a credit-card number
+  reaching the admin API through `StringAggSelectItem.delimiter`, an unbounded
+  caller-supplied string that `normalize_query_shape` drops entirely. Four
+  caller-supplied numbers (`DateAddExpr.amount`, `WindowBound.offset`,
+  `WindowCall.offset`/`buckets`, `PercentileContSelectItem.fraction`) leaked
+  the same way. All are now parameterized, and the lock was widened to catch
+  the class rather than the instance.
+- `_assert_no_literal_survived` is a **runtime** fail-closed check, not only a
+  test: `skeletonize` refuses to return a skeleton still carrying a value.
+  Mutation-verified by neutralizing `_walk` and asserting `skeletonize` raises.
+- The record therefore carries the same redaction guarantee as a persisted
+  audit event (CLAUDE.md non-negotiable 3): no predicate or expression value,
+  no row, no natural-language `intent`, no credential. Stated precisely rather
+  than as "no free text": caller-**authored aliases** (`alias`, `from_alias`,
+  a CTE `name`) are retained, because the shape is unreadable without them and
+  because `normalize_query_shape` retains them too. Parity with the audit
+  event is the claim; "contains no caller-authored characters" is not.
+- `InProcessObservedShapeStore` is **bounded** (`max_entries`, default 500,
+  LRU eviction, `evicted_total` surfaced in the API response). Shapes are
+  caller-authored, so an unbounded store is a memory leak an adversarial
+  caller controls — the same class of defect the 2026-07-23 review found in
+  the since-removed compensation store. Reset in `tests/conftest.py` alongside
+  the other in-process stores. Parameterizing `limit`/`offset`/`n` matters
+  here too: while those stayed unparameterized they were part of `shape_hash`,
+  so a caller walking a limit minted a fresh entry per request and could flush
+  a bounded store — measured at 55 evictions from 59 replays before the fix
+  (`security-invariant-reviewer`, 2026-08-17).
+- Recording is **opt-in** (`OBSERVED_SHAPES_ENABLED`, default false), hooked on
+  the allowed/completed path beside `_emit_usage_signals`, and never raises
+  into a request that already succeeded. A rejected query is not recorded — it
+  is not a shape anybody would promote.
+- One record per (shape, connection, principal): promotion is a per-principal
+  decision, so records cannot be merged across principals. `get()` therefore
+  takes optional connection/principal filters — a hash alone is not unique,
+  and drafting from whichever entry was recorded first would name the wrong
+  principal's connection.
+- A query the AST accepts but no template slot can express (a dict value, a
+  mixed-type `IN` list) is **skipped, counted, and surfaced** as
+  `skeletonization_failures`, for the same reason `evicted_total` is surfaced:
+  an operator about to narrow must be able to see that the discovery record is
+  incomplete. It was silently swallowed on the first cut
+  (`claim-reviewer`, 2026-08-17).
+- The on/off switch lives on the store, not on a config singleton read
+  separately at each call site — the first cut had the route reading an
+  app-scoped `AppConfig` while the recorder read the module global, so a report
+  could say `enabled: true` while nothing was recording.
+
+**Promotion surface — read-only, never auto-installs.**
+
+- `GET /api/v1/admin/observability/observed-shapes` and
+  `GET .../observed-shapes/{shape_hash}/template-draft`, gated by a **new,
+  dedicated `admin:shapes:read` scope** — deliberately not
+  `admin:observability:read`, because an observed shape names one principal's
+  exact tables, columns, joins and predicates, a materially more specific
+  disclosure than the aggregate dashboards on the same router. Holding the
+  observability scope does not imply it (pinned by
+  `test_the_observability_scope_alone_is_not_enough`).
+- `querygate-shapes list|draft` gives the same two reads at the CLI, emitting
+  YAML in the exact shape the templates file expects. **It calls the admin API
+  over HTTP** (`--url` + a bearer credential holding `admin:shapes:read`). The
+  first cut read the in-process store directly, which could never work — the
+  CLI is a different OS process from the server even in a single-replica
+  deployment, so it always printed "no query shapes recorded yet", the one
+  answer an operator must never be given wrongly. Found by `claim-reviewer`
+  (2026-08-17), which also noted the CLI had **zero tests**; it now has six,
+  including one pinning that "recording is disabled" and "recording is on and
+  nothing ran" never render the same.
+- **Neither installs anything.** A draft is returned for review; adding it to
+  the templates file stays a deliberate human edit — the same quarantined-draft
+  posture `catalog/governance.py` takes. There is no `--apply`, on purpose, and
+  `test_drafts_a_template_without_installing_it` asserts the live template
+  store is untouched.
+- The report states `scope: "process-local"` and reports `enabled` honestly, so
+  an operator cannot mistake "recording was never turned on" for "this agent
+  runs nothing" and narrow a connection to an empty template set.
+
+**Documentation correction shipped with it.** `docs/INFERENCE_RISKS.md`'s
+Class A section argued exhaustiveness from the AST staying shallow ("a scalar
+function's arguments are `ColArg | LiteralArg` with no nested-function variant
+… so there is no deeper expression tree a column could hide inside"). The
+premise about `ScalarFunctionArg` is still true; the conclusion is not, since
+item 100 added a deep `Expression` tree. The guarantee always held —
+`expression_column_refs` walks those positions — but the argument had gone
+stale, and the Class A table was missing rows for expression select items,
+predicate `expr`/`value_expr`, nested `CaseExpr` conditions and window
+`arg`/`PARTITION BY`/`ORDER BY`. Table extended and the argument restated
+correctly: exhaustiveness comes from the item-96 canonical visitor, not from a
+shallow AST.
+
+**Known limits, stated rather than glossed.**
+
+- The store is **per serving process and volatile** (`scope:
+  "process-local-volatile"`). A multi-replica or multi-worker deployment sees
+  only the shapes its own process handled, and an application restart or
+  rolling deploy discards the window entirely, so run a discovery window inside
+  one process lifetime and collect per replica. A Redis-backed sibling would
+  follow the `concurrency`/`quota` precedent; not built.
+- The discovery list can be incomplete in two counted ways — `evicted_total`
+  (bound reached) and `skeletonization_failures` (a value no slot can express).
+  The CLI warns on both; narrowing on a list carrying either number without
+  addressing it will break the omitted queries.
+- A drafted template containing a `between` predicate fails
+  `querygate config check`: `templates/binding.py`'s dry-run binder binds a
+  one-element list for the `between` slot. Pre-existing in item 48's binder,
+  not introduced here, but it hits the promote-then-check workflow this item
+  documents.
+- `templates_only` does not narrow the write path (by design — `WritePolicy` is
+  already deny-by-default) and does not narrow schema discovery.
+- A rejected ad-hoc query still consumes quota, because
+  `enforce_query_quota` runs earlier in `execute()` than
+  `_validate_and_compile` — unchanged behavior, shared with every other policy
+  rejection.
+- No admin-UI panel over the recorder; deliberately out of scope for this item.
+
+**Verification.** All nine enforcement lines added by this item were
+mutation-verified (each broken deliberately, suite re-run, failure confirmed
+for that reason, reverted): the `templates_only` flag check, the `template_id`
+exemption, the guard's *position* before the caps, the literal→placeholder
+rewrite, the free-text drop, the runtime redaction assert, the store bound, the
+recording opt-in gate, and the disabled-report suppression. The first pass left
+one survivor — the runtime redaction assert had no test, because `_walk`
+correctly removes everything — which is what the technique is for; a test was
+added and the mutation now dies.
+
+**Post-implementation audit (`auditors`, 2026-08-17).** Two reviewers ran
+against the finished tree. `security-invariant-reviewer` rated it **6/10** and
+`claim-reviewer` **6/10**; between them they found one High (the `delimiter`
+literal leak, with a proven end-to-end reproduction through the REST route),
+one Medium store-eviction vector, two false claims (metrics separability; the
+CLI being usable against a deployment), one unreproducible verification claim
+(the guard-position mutation was not actually pinned by any test), one
+overstated redaction claim, and four undisclosed limits. **Every one of those
+is fixed or corrected above** — the leak closed and regression-locked, the two
+false claims made true rather than reworded, the missing ordering test added,
+and the limits disclosed. Both reviewers separately confirmed that
+`templates_only` itself is **not bypassable**: `_template_id` is only ever set
+from a resolved published template, and no read path to a database avoids
+`_validate_and_compile`. The invariants they checked clean: no raw SQL, no
+credential on a returned model, no second catalog or database path, no inline
+dialect branching, no event-loop-binding hazard.
+
+**Effort:** M. **Depends on:** 48 (shipped).

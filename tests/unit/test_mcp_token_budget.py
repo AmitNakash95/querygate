@@ -239,7 +239,14 @@ from querygate.mcp.server import create_mcp_server
 # that check can run); the accurate replacement text is longer. A doc-
 # accuracy fix, not new capability, but it does live inside the schema this
 # budget measures.
-_MAX_TOTAL_CHARS = 128_000
+# 2026-08-17 (item 195): +4 chars — `Policy` gained `templates_only`, which
+# `describe_my_querygate_access` embeds so a narrowed caller can *discover*
+# that it is restricted to curated templates rather than learning it from a
+# rejection on every ad-hoc attempt. Real capability, one boolean field. The
+# previous ceiling had effectively no headroom left (the measured total sat at
+# 128_000 exactly), so this bump restores a modest margin rather than tracking
+# the measurement exactly.
+_MAX_TOTAL_CHARS = 128_500
 
 
 def _tool_schema_chars(tool: object) -> int:

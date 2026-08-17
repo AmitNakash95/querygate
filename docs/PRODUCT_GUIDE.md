@@ -1430,6 +1430,73 @@ designer, which already composed a validated `Policy` layer into the draft the
 same way; item 87 brought that "form instead of YAML" ergonomics to templates,
 the one config document that still lacked it.
 
+### Narrowing: from the general AST to a reviewed template set (item 195)
+
+The expressive AST and the curated templates above are two ends of one
+spectrum, and item 195 is the path between them.
+
+**`Policy.templates_only`** (off by default) narrows a principal/connection to
+templates: an ad-hoc `StructuredQuery` is refused on execute, explain, batch
+*and* verdict, and only a template invocation passes. The exemption is the
+**server-set** `template_id` — the template route/tool constructs the service
+with it, and nothing reads it from a request body, so a caller cannot assert
+its own way out. The refusal is raised *before* the structural caps, policy
+validation and schema validation, so the refusal is **uniform** — it does not
+depend on which rule the query happened to trip, and a narrowed caller cannot
+distinguish "you may not do this at all" from "you exceeded max_cte_count".
+(This is consistency and least-surprise, not confidentiality: cap values are
+already readable by any authenticated caller via `/help/my-access` and MCP
+`describe_my_querygate_access`, and schema discovery stays open — so do not
+pitch the ordering as hiding the policy.) It governs the READ surface only;
+governed writes stay gated independently and deny-by-default by `WritePolicy`,
+and schema discovery stays available.
+
+**The observed-shape recorder** answers the question that makes narrowing
+practical: *which* templates does this agent actually need? Opt-in
+(`OBSERVED_SHAPES_ENABLED`, default false), it records the redaction-safe
+**skeleton** of each allowed query — the AST with every caller-supplied *value*
+replaced by a typed parameter slot and `intent` dropped. "Value" is the
+enumerated set in `_LITERAL_KEYS`: predicate values, expression literals, a
+`string_agg` delimiter, date-arithmetic amounts, window offsets/buckets,
+percentile fractions, and limit/offset/top-N. What remains is structure —
+identifiers, operators, flags, and caller-authored **aliases**, which the
+persisted audit event also keeps. So the honest claim is parity with the audit
+event (no predicate value, no row, no `intent`, no credential), not "no free
+text": an alias is caller-authored text in both surfaces. That is the same shape a
+`QueryTemplate` stores, so a recorded shape promotes directly into a draft that
+binds back into a real query. Two properties make it safe to run in production:
+the walk is generic over the dumped AST rather than an enumeration of node
+types (with a reflection test that fails the day a new literal-bearing field
+appears), and `skeletonize` refuses at runtime to return a skeleton still
+carrying a value. The store is bounded — shapes are caller-authored, so an
+unbounded one would be a memory leak an adversarial caller controls.
+
+**Promotion is read-only.** `GET /api/v1/admin/observability/observed-shapes`
+and its `/{shape_hash}/template-draft` sibling (scope `admin:shapes:read`,
+deliberately *not* `admin:observability:read` — a shape names one principal's
+exact tables, columns and predicates), plus `querygate-shapes list|draft` at
+the CLI, return a draft for review. Neither installs it; adding a template
+stays a deliberate edit to `templates.yaml` or a governed config version.
+
+**The operating story this enables**, and the one to use in a security
+conversation: run the connection open in staging with recording on; promote the
+shapes the agent actually used into templates; flip `templates_only` on; the
+agent's entire reachable database surface is now a finite, reviewed, diffable
+list — with an audit trail proving nothing else ever ran. Two limits to state
+rather than gloss. The store is **per serving process and volatile** — a
+multi-replica deployment sees only what its own process handled, and a restart
+or rolling deploy resets the discovery window entirely, so run the window
+inside one process lifetime and collect per replica. The list can be
+**incomplete in two ways, both counted and surfaced**: `evicted_total` when the
+bound is hit, and `skeletonization_failures` when a query the AST accepts has a
+value no template slot can express (a dict value, a mixed-type `IN` list) and
+is therefore skipped — narrowing on a list carrying either number without
+raising the bound or handling the failures will break the queries it omitted.
+A drafted template containing a `between` predicate currently fails
+`querygate config check`, a pre-existing limitation of `templates/binding.py`'s
+dry-run binder, not of the draft. And a rejected ad-hoc query still consumes
+quota, since quota is reserved earlier in `execute()` than validation runs.
+
 ### Governed Writes (the write pipeline)
 
 Governed writes (TODO.md item 93) extend the same spine to **mutations** —
@@ -3953,6 +4020,37 @@ certification. See [Security Model](#security-model), section 6.
 Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
+
+- **2026-08-17 — Expressiveness is for discovery; narrowness is for
+  production. QueryGate ships the bridge between them (item 195).** A standing
+  tension had gone unresolved in the docs: the read AST is deliberately
+  SQL-complete for SELECT (items 99–106), which is a liability in a security
+  review — "if the agent can express any SELECT, what did removing the string
+  buy me?" — while item 48's curated templates are safe but require the
+  operator to *guess the needed shape list up front*, the same thing that makes
+  hand-authored tool catalogues wrong. **Decision:** do not narrow the AST, and
+  do not leave templates as an unreachable ideal. Ship the path between them:
+  `Policy.templates_only` narrows a principal to reviewed templates, and an
+  opt-in, redaction-safe recorder answers *which* templates by observing real
+  traffic. The pitch becomes "run open in staging, promote the shapes your
+  agent actually used, flip to templates-only, and show the audit proving
+  nothing else ran" — a story a connector library (which needs the tool list
+  authored first) and a semantic layer (which needs a modeling step first)
+  structurally cannot tell. **Two constraints kept it on-thesis:** the recorder
+  stores a *skeleton* (every literal replaced by a typed parameter slot,
+  `intent` dropped), so it inherits the persisted-audit redaction guarantee
+  rather than becoming a new place values accumulate; and it **never
+  auto-installs** a template — a draft is returned for human review, the same
+  quarantined-draft posture catalog governance takes. An auto-promoting
+  recorder would have been a policy engine editing its own policy from traffic,
+  which the catalog rules already forbid for learned content and which would
+  have made the narrowing worthless as evidence. **Rejected alternative:**
+  restricting the AST itself (fewer primitives, so the general surface is
+  "safe enough" without narrowing) — that trades a real capability every agent
+  needs for a guarantee `templates_only` provides exactly, and it would have
+  walked back the flagship expressiveness pillar to solve a positioning
+  problem. See TODO.md item 195 and
+  [`docs/INFERENCE_RISKS.md`](INFERENCE_RISKS.md).
 
 - **2026-08-12 — Two filed items were renumbered 179→184 and 180→185 when two
   concurrent branches were merged; the sole deviation from "item numbers are

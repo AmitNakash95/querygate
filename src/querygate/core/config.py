@@ -187,6 +187,17 @@ class AppConfig(BaseSettings):
     semantic_memory_learning_enabled: bool = pyd.Field(default=False)
     semantic_memory_learning_interval_seconds: float = pyd.Field(default=3600, gt=0)
 
+    # TODO.md item 195: record the redaction-safe *shape* of each allowed
+    # query, so an operator can see which shapes a principal actually uses
+    # before narrowing that principal to curated templates
+    # (`Policy.templates_only`). Opt-in and off by default, the same posture
+    # as the usage signals above and the `min_group_size`/disclosure-budget
+    # guardrails — a deployment that never intends to narrow a connection
+    # should not pay for the recording. The store is bounded and per serving
+    # process; see `admin/observed_shapes.py` for both limits.
+    observed_shapes_enabled: bool = pyd.Field(default=False)
+    observed_shapes_max_entries: int = pyd.Field(default=500, ge=1, le=100_000)
+
     # REST and MCP share one API-key authenticator (see core/auth.py). Both
     # allow an anonymous dev-bypass outside production when no keys are set.
     api_keys: list[str] = pyd.Field(

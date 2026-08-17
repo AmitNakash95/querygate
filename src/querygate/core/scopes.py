@@ -67,6 +67,17 @@ ADMIN_AUDIT_WORM_SEARCH_SCOPE = "admin:audit:worm-search"
 # docs/THREAT_MODEL.md QG-36).
 ADMIN_METRICS_READ_SCOPE = "admin:metrics:read"
 
+# Read the recorded observed query shapes and render a template draft from one
+# (TODO.md item 195, admin/observed_shapes.py). Its OWN scope rather than reuse
+# of ADMIN_OBSERVABILITY_READ_SCOPE: an observed shape is a far more specific
+# object than an aggregate trend — it names the exact tables, columns, joins
+# and predicates one principal queries — so it is closer to reading that
+# principal's query catalogue than to reading a dashboard. Holding the
+# observability scope should not imply it. It stays a *read* scope because
+# nothing on this surface mutates: a drafted template is returned for review,
+# never installed.
+ADMIN_SHAPES_READ_SCOPE = "admin:shapes:read"
+
 # Catalog governance (TODO.md item 32B) — least-privilege, split by
 # operation rather than one broad "catalog admin" scope.
 CATALOG_GENERATE_SCOPE = "catalog:generate"
@@ -171,6 +182,11 @@ SCOPE_CATALOG: Tuple[ScopeInfo, ...] = (
         ADMIN_AUDIT_WORM_SEARCH_SCOPE,
         "Admin · Observability",
         "Search the durable WORM (S3 Object Lock) compliance audit archive",
+    ),
+    ScopeInfo(
+        ADMIN_SHAPES_READ_SCOPE,
+        "Admin · Observability",
+        "Read observed query shapes and draft a template from one",
     ),
     ScopeInfo(
         CATALOG_GENERATE_SCOPE, "Catalog governance", "Generate draft catalog entries for review"
@@ -292,5 +308,15 @@ ROLE_BUNDLES: Tuple[RoleBundle, ...] = (
         "long-retention copy an Operator's day-2 observability access does "
         "not need.",
         (ADMIN_AUDIT_WORM_SEARCH_SCOPE,),
+    ),
+    RoleBundle(
+        "Access Narrower",
+        "Reads the observed query shapes a principal actually runs and drafts "
+        "curated templates from them, ahead of switching that principal to "
+        "templates_only (TODO.md item 195). Kept separate from the Operator "
+        "bundle: a shape names one principal's exact tables, columns and "
+        "predicates, which day-2 dashboard access does not need. The bundle "
+        "grants no ability to install a template — that stays a config change.",
+        (ADMIN_SHAPES_READ_SCOPE,),
     ),
 )

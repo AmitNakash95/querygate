@@ -49,6 +49,7 @@ scope, only a valid identity.
 | `admin:observability:read` | Read aggregated query/rejection/pressure trends |
 | `admin:metrics:read` | Scrape the raw Prometheus /metrics endpoint |
 | `admin:audit:worm-search` | Search the durable WORM (S3 Object Lock) compliance audit archive |
+| `admin:shapes:read` | Read observed query shapes and draft a template from one |
 
 ### Catalog governance
 
@@ -154,3 +155,9 @@ Steps in to cancel another principal's stuck or runaway async query. A caller ca
 Searches the durable WORM audit archive for a security/compliance review. Kept separate from the Operator bundle: this reaches a long-retention copy an Operator's day-2 observability access does not need.
 
 - `admin:audit:worm-search`
+
+### Access Narrower
+
+Reads the observed query shapes a principal actually runs and drafts curated templates from them, ahead of switching that principal to templates_only (TODO.md item 195). Kept separate from the Operator bundle: a shape names one principal's exact tables, columns and predicates, which day-2 dashboard access does not need. The bundle grants no ability to install a template — that stays a config change.
+
+- `admin:shapes:read`

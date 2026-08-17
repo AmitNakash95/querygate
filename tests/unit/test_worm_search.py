@@ -2218,7 +2218,7 @@ class TestMetrics:
                     continue
                 if "build_worm_search_result(" in stripped:
                     callers.append(f"{path.name}:{lineno}")
-        assert callers == ["admin_observability_routes.py:229"], callers
+        assert callers == ["admin_observability_routes.py:242"], callers
 
     async def test_a_chain_break_found_before_a_mid_scan_failure_is_still_counted(self, s3):
         # The path the ok-only placement would lose: a scan that finds a break

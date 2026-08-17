@@ -45,6 +45,7 @@ from querygate.connections.visibility import resolve_visible_connection
 from querygate.core.auth import Principal
 from querygate.core.config import config as app_config
 from querygate.core.exceptions import (
+    AdHocQueryNotPermittedError,
     ApprovalRequiredError,
     CapacityTimeoutError,
     ConcurrencyLimitError,
@@ -58,6 +59,7 @@ from querygate.core.exceptions import (
     public_error_message,
 )
 from querygate.core.logging import get_logger, log_execution
+from querygate.admin.observed_shapes import observed_shape_store
 from querygate.execution.admission import QueueMode, new_admission_id, resolve_wait_seconds
 from querygate.execution.approval import (
     TOKEN_KIND_GRANT,
@@ -395,6 +397,48 @@ class StructuredQueryService:
         )
         return policy
 
+    def _reject_ad_hoc_query_when_templates_only(self, policy: Policy) -> None:
+        """Refuse a free-form `StructuredQuery` on a templates-only policy.
+
+        Deliberately a positive check on the server-set `_template_id` rather
+        than a negative check on anything in the request: the only way to be
+        exempt is for the server itself to have built this service from a
+        published template.
+        """
+        if not policy.templates_only:
+            return
+        if self._template_id is not None:
+            return
+        raise AdHocQueryNotPermittedError(
+            "This connection accepts curated query templates only. "
+            "List the available templates and invoke one by id."
+        )
+
+    def _record_observed_shape(self, query: StructuredQuery) -> None:
+        """Record the *shape* of a query that was allowed and executed
+        (TODO.md item 195), so an operator can later see which shapes a
+        principal actually uses and promote them into templates.
+
+        Called only on the allowed/completed path — a rejected query is not a
+        shape anybody would promote. Never raises into the request: recording
+        is an operator convenience, and a bug here must not fail a query that
+        already succeeded (the same posture `_emit_usage_signals` takes).
+
+        The on/off switch lives on the store (`observed_shape_store().enabled`)
+        rather than being re-read from a config singleton here, so this hook
+        and the admin report can never disagree about whether recording is on.
+        """
+        try:
+            observed_shape_store().record(
+                query,
+                connection_id=self._connection_id,
+                principal_id=self._principal.subject if self._principal else None,
+            )
+        except Exception as exc:  # pragma: no cover - defensive, mirrors usage signals
+            get_logger().bind(func="execute").warning(
+                "observed_shapes.record_failed", error_type=type(exc).__name__
+            )
+
     def _snapshot_connection_resolver(
         self, scope_connections: Dict[int, Dict[str, str]]
     ) -> ConnectionResolver:
@@ -474,6 +518,25 @@ class StructuredQueryService:
         self, query: StructuredQuery
     ) -> Tuple[sa.Select, int, dict, str, Policy, Dict[int, Dict[str, str]], ConnectionResolver]:
         policy = self._get_policy()
+        # TODO.md item 195: the templates-only narrowing runs first in this
+        # function — before the structural caps, policy validation and schema
+        # validation below (quota reservation, which happens earlier in
+        # execute(), is deliberately unchanged: a rejected query consuming
+        # quota is the existing behavior for every other policy rejection too).
+        # A principal
+        # narrowed to curated templates should be refused on the grounds that
+        # it may not submit a free-form query at all — not on whichever cap the
+        # query happened to trip first, which would leak cap values (and, via
+        # an identifier rejection, schema existence) to a caller that has no
+        # business submitting the query in the first place.
+        #
+        # `self._template_id` is set by the server when it constructed this
+        # service to run a template (api/routes.py's run_query_template and
+        # mcp/tools/templates.py), and is never populated from a request body,
+        # so a caller cannot mint its own exemption. This single call site
+        # covers execute(), explain(), verdict() and batch (which funnels
+        # through execute()) — the four ways an ad-hoc AST reaches a database.
+        self._reject_ad_hoc_query_when_templates_only(policy)
         # TODO.md item 160 finding 2: the cheap, connection-registry-free caps
         # (max_cte_count, max_subquery_depth) run FIRST, before
         # `resolve_scope_connections` below ever calls `PolicyStore.get()` —
@@ -1063,6 +1126,7 @@ class StructuredQueryService:
                         ),
                     )
                     self._emit_usage_signals(query, admission_id=admission_id)
+                    self._record_observed_shape(query)
                     QUERIES_TOTAL.labels(connection=self._connection_id, status="success").inc()
                     QUERY_DURATION_SECONDS.labels(connection=self._connection_id).observe(
                         elapsed_seconds
