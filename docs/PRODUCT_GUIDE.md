@@ -1471,7 +1471,17 @@ appears), and `skeletonize` refuses at runtime to return a skeleton still
 carrying a value. The store is bounded — shapes are caller-authored, so an
 unbounded one would be a memory leak an adversarial caller controls.
 
-**Promotion is read-only.** `GET /api/v1/admin/observability/observed-shapes`
+**Promotion is read-only, and has a UI.** The observability domain of the admin
+console carries an **Observed Shapes** panel — recorded shapes most-used first,
+with a "Draft template…" dialog that renders the `QueryTemplate` for review.
+There is deliberately **no install action anywhere in it**: adding a template
+stays a governed config change, so nothing an agent was seen doing can install
+its own template. The panel also surfaces both incompleteness counters as a
+visible warning, and renders "recording is disabled" differently from
+"recording is on and nothing ran" — confusing those two is how an operator
+narrows a connection to an empty template set.
+
+`GET /api/v1/admin/observability/observed-shapes`
 and its `/{shape_hash}/template-draft` sibling (scope `admin:shapes:read`,
 deliberately *not* `admin:observability:read` — a shape names one principal's
 exact tables, columns and predicates), plus `querygate-shapes list|draft` at
@@ -1482,19 +1492,30 @@ stays a deliberate edit to `templates.yaml` or a governed config version.
 conversation: run the connection open in staging with recording on; promote the
 shapes the agent actually used into templates; flip `templates_only` on; the
 agent's entire reachable database surface is now a finite, reviewed, diffable
-list — with an audit trail proving nothing else ever ran. Two limits to state
-rather than gloss. The store is **per serving process and volatile** — a
+list — with an audit trail proving nothing else ever ran. Several limits to state
+rather than gloss. **Scope depends on the backend, and the report says which
+you have.** With `CONCURRENCY_BACKEND=redis` the store is
+`shared-durable`: one discovery window across every replica and worker,
+surviving restarts. Without it the store is `process-local-volatile` — a
 multi-replica deployment sees only what its own process handled, and a restart
-or rolling deploy resets the discovery window entirely, so run the window
-inside one process lifetime and collect per replica. The list can be
+or rolling deploy resets the window entirely, so run the window inside one
+process lifetime and collect per replica. The distinction matters more than it
+looks: narrowing a connection off a per-replica list breaks every shape the
+other replicas saw, so an incomplete list is not a smaller version of the right
+answer. The list can be
 **incomplete in two ways, both counted and surfaced**: `evicted_total` when the
 bound is hit, and `skeletonization_failures` when a query the AST accepts has a
 value no template slot can express (a dict value, a mixed-type `IN` list) and
-is therefore skipped — narrowing on a list carrying either number without
+is therefore skipped. A third emptiness cause is disclosed separately because it
+looks identical to an idle agent: the Redis backend fails **open**, so an
+unreachable store returns an empty list — `backend_healthy: false` says so, and
+both the CLI and the panel refuse to let that read as "nothing ran". On the
+shared backend the bound that actually binds is whichever replica last wrote, so
+a fleet whose replicas disagree on `OBSERVED_SHAPES_MAX_ENTRIES` is held to the
+smallest value; the report shows that stored bound, not the reading process's
+config — narrowing on a list carrying either number without
 raising the bound or handling the failures will break the queries it omitted.
-A drafted template containing a `between` predicate currently fails
-`querygate config check`, a pre-existing limitation of `templates/binding.py`'s
-dry-run binder, not of the draft. And a rejected ad-hoc query still consumes
+And a rejected ad-hoc query still consumes
 quota, since quota is reserved earlier in `execute()` than validation runs.
 
 ### Governed Writes (the write pipeline)

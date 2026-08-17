@@ -225,7 +225,7 @@ order-of-magnitude, not commitments.
 | 192 | The disclosure budget's Redis script passes multiple KEYS, which fails CROSSSLOT on Redis Cluster — turning a fail-closed control into an outage on the queries it protects | S | 179 |
 | 193 | `docs/product-guide.html` has no freshness gate against `docs/PRODUCT_GUIDE.md`, so the generated copy most likely to be shared goes stale silently | S | — |
 | 194 | Three crafted-or-corrupt WORM lines still escape `search_worm_archive` as a masked 500: a non-ASCII `hash` (reachable by ordinary corruption) and two unbounded recursions | S–M | 134 |
-| 195 | ✅ Narrow a principal from the general query surface to reviewed templates: `Policy.templates_only` enforcement plus an opt-in, redaction-safe observed-shape recorder that drafts a template from real traffic | M | 48 |
+| 195 | ✅ Narrow a principal from the general query surface to reviewed templates: `Policy.templates_only` enforcement plus an opt-in, redaction-safe observed-shape recorder (in-process + Redis-backed) that drafts a template from real traffic, with an admin-UI promotion panel | M–L | 48 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -3509,7 +3509,14 @@ typed parameter slot, `intent` dropped); and a scope-gated
 (`admin:shapes:read`) REST read plus a `querygate-shapes` CLI turn a recorded
 shape into a reviewable `QueryTemplate` draft that is never auto-installed.
 Also corrected `docs/INFERENCE_RISKS.md`'s stale Class A exhaustiveness
-argument. An admin-UI panel over the recorder was deliberately left out of
-scope.
+argument.
+
+**Phase 2 (same day)** closed the three limits phase 1 disclosed rather than
+fixed: a Redis-backed store (`admin/redis_observed_shapes.py`) makes the
+discovery window shared across replicas and durable across restarts
+(`scope: "shared-durable"`); the observed-shapes panel landed in the admin UI as
+a read-only promotion surface with no install action; and the `between`
+dry-run binder bug that made a drafted BETWEEN template fail
+`querygate-validate-config` is fixed.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 195).

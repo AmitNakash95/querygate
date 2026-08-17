@@ -58,6 +58,9 @@ def test_disabled_is_reported_distinctly_from_empty(monkeypatch, capsys):
     assert "DISABLED" in disabled
     assert "DISABLED" not in empty
     assert "no query shapes" in empty.lower()
+    # The scope line must appear in BOTH — on an empty window, knowing whether
+    # you are looking at the whole fleet or one replica matters most.
+    assert "scope=" in disabled and "scope=" in empty
 
 
 def test_list_renders_recorded_shapes(monkeypatch, capsys):
@@ -149,6 +152,50 @@ def test_draft_can_disambiguate_by_connection_and_principal(monkeypatch):
     )
     assert captured["params"]["connection_id"] == "demo"
     assert captured["params"]["principal_id"] == "agent"
+
+
+def test_an_unreachable_backend_is_not_reported_as_an_idle_agent(monkeypatch, capsys):
+    """The third way an empty list happens. Fail-open means an unreachable Redis
+    renders exactly like "recording is on and nothing ran", and an operator who
+    narrows from that list narrows to nothing.
+    """
+    _stub(
+        monkeypatch,
+        {
+            "enabled": True,
+            "shapes": [],
+            "max_entries": 500,
+            "evicted_total": 0,
+            "skeletonization_failures": 0,
+            "scope": "shared-durable",
+            "backend_healthy": False,
+        },
+    )
+    assert cli.main(["--token", "t", "list"]) == 0
+    err = capsys.readouterr().err
+    assert "UNREACHABLE" in err
+    assert "not because nothing ran" in err.lower()
+    assert "Do not narrow" in err
+
+
+def test_the_scope_line_explains_which_guarantee_you_have(monkeypatch, capsys):
+    for scope, expected in (
+        ("shared-durable", "shared across replicas"),
+        ("process-local-volatile", "discarded on restart"),
+    ):
+        _stub(
+            monkeypatch,
+            {
+                "enabled": True,
+                "shapes": [_SHAPE],
+                "max_entries": 500,
+                "evicted_total": 0,
+                "skeletonization_failures": 0,
+                "scope": scope,
+            },
+        )
+        cli.main(["--token", "t", "list"])
+        assert expected in capsys.readouterr().err
 
 
 def test_a_missing_credential_is_a_clear_error(monkeypatch):

@@ -111,9 +111,88 @@ def dummy_bound_query(template: QueryTemplate) -> StructuredQuery:
     dummies: Dict[str, Any] = {}
     for param in template.parameters:
         scalar = _DUMMY_SCALAR[param.type]
-        dummies[param.name] = [scalar] if param.is_list else scalar
+        # TWO elements, not one, for a list slot. A one-element dummy satisfies
+        # `in`/`not_in` ("non-empty list") but fails `between`, which requires
+        # exactly `[low, high]` — so any template carrying a BETWEEN predicate
+        # was rejected by `querygate config check` even though it was perfectly
+        # valid, and the failure came from this dry-run binder rather than from
+        # the template. Two satisfies every list-taking operator the AST has
+        # (`between` needs exactly 2; `in`/`not_in` need >= 1 with no upper
+        # bound), so the arity does not have to be inferred from the operator
+        # this slot happens to sit under. Surfaced by `claim-reviewer`
+        # 2026-08-17 against item 195's promote-then-check workflow, where a
+        # drafted template is checked before it is installed.
+        dummies[param.name] = [scalar, scalar] if param.is_list else scalar
     bound = _substitute(copy.deepcopy(template.query), dummies)
     return StructuredQuery.model_validate(bound)
+
+
+# Positions in the skeleton that name a table, column, alias or CTE — i.e. an
+# IDENTIFIER, not a value. A template parameter must never land in one.
+#
+# The whole premise of a curated template is that the *author* fixes what the
+# query touches and the *caller* only supplies values. A placeholder in an
+# identifier position inverts that: the caller would choose the join columns, the
+# grouping, or the table. Such a template is not an escalation on its own —
+# the bound query still passes full policy and schema validation, so a denied
+# identifier is still refused — but it silently converts a reviewed template back
+# into a general query surface, which is exactly what `templates_only` exists to
+# prevent. Better to refuse it at deploy time.
+#
+# Until the two-element dummy fix (item 195 phase 2) this was *accidentally*
+# caught for list slots, because a one-element dummy failed `between`; a
+# `claim-enforcing` review pointed out the accident was load-bearing. This makes
+# the rule explicit instead.
+_IDENTIFIER_POSITIONS = frozenset(
+    {
+        "from",
+        "from_table",
+        "from_alias",
+        "table",
+        "alias",
+        "name",
+        "col",
+        "value_col",
+        "on",
+        "extra_on",
+        "group_by",
+        "partition_by",
+        "correlate",
+        "connection",
+    }
+)
+
+
+def _placeholder_in_an_identifier_position(node: Any, path: str = "") -> Optional[str]:
+    """The dotted path of the first identifier position holding a placeholder,
+    or None. Walks the raw skeleton, so it covers nested subqueries and CTEs by
+    construction rather than by enumeration."""
+    if isinstance(node, dict):
+        if set(node.keys()) == {"param"} and isinstance(node["param"], str):
+            return path or "<root>"
+        for key, value in node.items():
+            child = f"{path}.{key}" if path else key
+            if key in _IDENTIFIER_POSITIONS:
+                found = _placeholder_in_an_identifier_position(value, child)
+                if found:
+                    return found
+            else:
+                found = _placeholder_in_an_identifier_position(value, child)
+                if found and _path_touches_identifier(found):
+                    return found
+        return None
+    if isinstance(node, list):
+        for index, item in enumerate(node):
+            found = _placeholder_in_an_identifier_position(item, f"{path}[{index}]")
+            if found:
+                return found
+    return None
+
+
+def _path_touches_identifier(path: str) -> bool:
+    return any(
+        segment.split("[")[0] in _IDENTIFIER_POSITIONS for segment in path.split(".") if segment
+    )
 
 
 def validate_template_structure(template: QueryTemplate) -> Optional[str]:
@@ -127,6 +206,15 @@ def validate_template_structure(template: QueryTemplate) -> Optional[str]:
     query like any other (the on-demand live-schema check verifies existence
     separately, against the real database).
     """
+    offending = _placeholder_in_an_identifier_position(template.query)
+    if offending is not None:
+        return (
+            f"template {template.id!r} puts a parameter in an identifier position "
+            f"({offending}). A template parameter may only supply a VALUE — the "
+            "template author fixes which tables, columns, aliases and join keys "
+            "the query touches, or the template stops being a narrower surface "
+            "than an ad-hoc query."
+        )
     try:
         dummy_bound_query(template)
     except Exception as exc:

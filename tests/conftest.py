@@ -65,7 +65,10 @@ import querygate.core.config as _config_module  # noqa: E402
 _config_module.AppConfig.model_config["env_file"] = None
 _config_module.config = _config_module.AppConfig()
 
-from querygate.admin.observed_shapes import observed_shape_store
+from querygate.admin.observed_shapes import (
+    clear_redis_observed_shape_store,
+    in_process_observed_shape_store,
+)
 from querygate.admin.store import ConfigVersionStore, set_config_version_store
 from querygate.audit.sinks import reset_audit_sink
 from querygate.catalog.loader import CatalogStore, set_catalog_store
@@ -121,7 +124,8 @@ def reset_state(tmp_path):
     reset_usage_signal_buffer()
     reset_worm_buffer()
     async_execution_store().clear()
-    observed_shape_store().clear()
+    in_process_observed_shape_store().clear_sync()
+    clear_redis_observed_shape_store()
     yield
     reset_audit_sink()
     reset_engines()
@@ -134,4 +138,5 @@ def reset_state(tmp_path):
     reset_usage_signal_buffer()
     reset_worm_buffer()
     async_execution_store().clear()
-    observed_shape_store().clear()
+    in_process_observed_shape_store().clear_sync()
+    clear_redis_observed_shape_store()

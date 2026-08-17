@@ -132,6 +132,30 @@ async def test_admin_spa_is_served_with_browser_security_headers(tmp_path, monke
     assert 'id="history-charts"' in response.text
     assert "Trend charts" in response.text
     assert "/admin/observability/history" in script.text
+    # TODO.md item 195: the observed-shapes panel — the promotion surface with a
+    # human in it. Asserted here rather than only in a JS test because the two
+    # properties that make it safe are both *in the markup*: it is gated on its
+    # own scope, and it never offers an install action.
+    assert 'id="shapes-table-wrap"' in response.text
+    assert "Observed query shapes" in response.text
+    assert "admin:shapes:read" in response.text
+    assert "/admin/observability/observed-shapes" in script.text
+    # The draft dialog exists and says plainly that it does not install.
+    assert 'id="shape-draft-dialog"' in response.text
+    assert "not installed" in response.text
+    # No install/apply affordance anywhere in this panel: the only way a template
+    # reaches the live store is a governed config change, and a button here would
+    # be a second path around that review gate.
+    assert "install-template" not in response.text
+    assert "/query-templates/install" not in script.text
+    # "Recording is off" must never render the same as "your agent ran nothing" —
+    # an operator who confuses them narrows a connection to an empty template set.
+    assert "DISABLED" in script.text
+    # The honest-scope wording for the volatile backend, so a narrowing decision
+    # is not taken off a per-replica list without knowing that is what it is.
+    assert "survives a restart" in script.text
+    assert "discarded on restart" in script.text
+
     # TODO.md item 47: portable change-set export/import + policy-only local recovery.
     assert 'id="export-change-set"' in response.text
     assert 'id="import-change-set"' in response.text
@@ -1006,3 +1030,70 @@ async def test_four_eyes_review_ui_is_wired_and_scope_gated(tmp_path, monkeypatc
     assert "reviewDecision(" in script
     # Approval status is surfaced per staged version.
     assert "approvalSummary(" in script
+
+
+@pytest.mark.asyncio
+async def test_observed_shapes_panel_loads_for_a_shapes_only_caller(tmp_path, monkeypatch):
+    """`admin:shapes:read` and `admin:observability:read` are separate scopes on
+    purpose, so a caller holding only the first must still get the shapes panel —
+    not one 403 from the aggregate reads blanking the whole view.
+
+    Asserted behaviourally (a real request with only the shapes scope) rather
+    than by reading the JS, because "these two loads are independent" is exactly
+    the kind of claim that is true in the markup and false in the control flow.
+    """
+    from querygate.admin.observed_shapes import configure_observed_shape_store, observed_shape_store
+    from querygate.query_ast.models import Predicate, StructuredQuery
+
+    configure_observed_shape_store(500, enabled=True)
+    await observed_shape_store().record(
+        StructuredQuery(
+            from_table="orders",
+            select=["orders.id"],
+            where=Predicate(col="orders.status", op="eq", value="completed"),
+            limit=5,
+        ),
+        connection_id="demo",
+        principal_id="agent",
+    )
+
+    app = create_app(
+        AppConfig(
+            environment="localhost",
+            mcp_enabled=False,
+            observed_shapes_enabled=True,
+            api_keys=["shapes-only-key"],
+            api_key_scopes=["admin:shapes:read"],
+        )
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as client:
+        headers = {"Authorization": "Bearer shapes-only-key"}
+        shapes = await client.get("/api/v1/admin/observability/observed-shapes", headers=headers)
+        overview = await client.get("/api/v1/admin/observability/overview", headers=headers)
+
+    # The shapes read succeeds...
+    assert shapes.status_code == 200
+    assert shapes.json()["enabled"] is True
+    assert len(shapes.json()["shapes"]) == 1
+    # ...while the aggregate read this caller has no scope for is refused, which
+    # is the point: one scope does not imply the other in either direction.
+    assert overview.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_the_panel_distinguishes_disabled_from_unreachable_from_empty(tmp_path, monkeypatch):
+    """Three different reasons the shapes list can be empty, three different
+    operator actions. The panel must never render them the same — confusing
+    "recording is off" or "the backend is down" with "your agent ran nothing" is
+    how a connection gets narrowed to an empty template set.
+    """
+    app = create_app(_settings(tmp_path, monkeypatch))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url=_BASE_URL) as client:
+        script = (await client.get("/admin/app.js")).text
+    # disabled
+    assert "recording is DISABLED" in script
+    # unreachable — must name itself distinctly and warn against narrowing
+    assert "UNREACHABLE" in script
+    assert "not because nothing ran" in script.lower()
+    # enabled-but-empty
+    assert "no query shapes have been seen yet" in script

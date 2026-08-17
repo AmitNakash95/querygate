@@ -14211,8 +14211,8 @@ shallow AST.
 
 **Known limits, stated rather than glossed.**
 
-- The store is **per serving process and volatile** (`scope:
-  "process-local-volatile"`). A multi-replica or multi-worker deployment sees
+- **(Closed in phase 2 below.)** The store is **per serving process and volatile**
+  (`scope: "process-local-volatile"`). A multi-replica or multi-worker deployment sees
   only the shapes its own process handled, and an application restart or
   rolling deploy discards the window entirely, so run a discovery window inside
   one process lifetime and collect per replica. A Redis-backed sibling would
@@ -14222,10 +14222,10 @@ shallow AST.
   The CLI warns on both; narrowing on a list carrying either number without
   addressing it will break the omitted queries.
 - A drafted template containing a `between` predicate fails
-  `querygate config check`: `templates/binding.py`'s dry-run binder binds a
+  `querygate-validate-config`: `templates/binding.py`'s dry-run binder binds a
   one-element list for the `between` slot. Pre-existing in item 48's binder,
   not introduced here, but it hits the promote-then-check workflow this item
-  documents.
+  documents. **(Closed in phase 2 below.)**
 - `templates_only` does not narrow the write path (by design — `WritePolicy` is
   already deny-by-default) and does not narrow schema discovery.
 - A rejected ad-hoc query still consumes quota, because
@@ -14233,6 +14233,7 @@ shallow AST.
   `_validate_and_compile` — unchanged behavior, shared with every other policy
   rejection.
 - No admin-UI panel over the recorder; deliberately out of scope for this item.
+  **(Shipped in phase 2 below.)**
 
 **Verification.** All nine enforcement lines added by this item were
 mutation-verified (each broken deliberately, suite re-run, failure confirmed
@@ -14262,3 +14263,106 @@ credential on a returned model, no second catalog or database path, no inline
 dialect branching, no event-loop-binding hazard.
 
 **Effort:** M. **Depends on:** 48 (shipped).
+
+#### Item 195 phase 2 — the three disclosed limits, closed
+
+Phase 1 disclosed its limits honestly and shipped anyway. Phase 2 removed them,
+because "documented" is not the same as "acceptable" for the two that changed
+what the feature is worth in a real deployment.
+
+**1. The discovery window is now shared and durable
+(`admin/redis_observed_shapes.py`).** The in-process store was per serving
+process and volatile, which is worse than it sounds: a window run against a
+3-replica deployment gave each process roughly a third of the traffic, so *no
+single reading was complete* — and an operator who set `templates_only` from one
+replica's list would break every shape the other two saw. An incomplete
+discovery list is not a smaller version of the right answer, it is the wrong
+answer. A rolling deploy mid-collection also silently reset it. The Redis
+sibling (registered automatically when `CONCURRENCY_BACKEND=redis` and recording
+is enabled) gives one window across every replica and worker, surviving
+restarts, reported as `scope: "shared-durable"`; the report reads `scope` off the
+active store, so it can never claim a durable guarantee on a volatile backend.
+Keys carry a refreshed TTL (`OBSERVED_SHAPES_TTL_SECONDS`, 30 days) so an
+operator who enables recording and forgets does not hold Redis memory forever.
+Fails **open** on a Redis outage — recording is layered on a query that already
+succeeded, so failing closed would turn a Redis blip into an error on a query
+that worked. That is deliberately the opposite posture from the disclosure
+budget (a security control) and matches `catalog/usage.py`'s signal buffer.
+
+The store Protocol is now `async` throughout. Note *why*: the in-process
+implementation needs no `await`, but defining the seam sync and widening it
+later is exactly the migration that broke the compensation store in the
+2026-07-23 review (three call sites left un-awaited, silently discarding every
+write). Defining it async from the start means there is no conversion to get
+wrong. Recorded as a `CLAUDE.md` gotcha.
+
+**Two Redis bugs were caught by tests before shipping, both worth recording
+because both are repeat classes in this repo:**
+
+- The first design used a *per-(connection, principal)* record hash reached from
+  Lua via `redis.call` on a key built inside the script rather than declared in
+  `KEYS`, specifically to dodge `CROSSSLOT`. That is backwards — touching an
+  undeclared key is what Redis Cluster forbids — so it would have failed on
+  Cluster *and* silently lost every eviction.
+  **Caught by review, not by a behavioural test — and it cannot be.** Neither
+  fakeredis nor a single-node Redis rejects undeclared-key access or models
+  slots at all (item 192's own write-up says the same), so the guard is the
+  source-level `test_every_key_the_script_touches_shares_one_hash_slot`.
+  Redesigned to keys sharing one `{qgshapes}` hash tag, all declared. `TODO.md`
+  item 192 is this same defect still open in the disclosure budget's script.
+- `ZPOPMIN`'s Lua reply shape is **not portable**: real Redis returns a flat
+  `{member, score}`, fakeredis returns a nested table, so the `HDEL` keyed off
+  `reply[1]` raised `Lua redis lib command arguments must be strings or
+  integers` mid-script — which the store's fail-open wrapper swallows, so it
+  *presented* as "the bound is cosmetic and every eviction is lost" rather than
+  as an error. This is the measured 10-entries-against-a-bound-of-3,
+  zero-evictions symptom (it belongs to this bug, not to the undeclared-key
+  one above). Replaced with `ZRANGE 0 0` + `ZREM`, which have stable flat
+  replies everywhere. Also
+  discovered that `lupa` must be installed for fakeredis to run Lua at all —
+  without it every scripted test fails with `unknown command 'evalsha'`, which
+  reads like a store bug and is not one.
+
+Verified against **real Redis** as well as fakeredis: bound held at 3 with 7
+evictions counted from 10 distinct shapes, and dedup plus occurrence-summing
+survived a simulated restart.
+
+**2. The admin-UI promotion panel shipped** (`admin_ui/`), which phase 1
+deliberately deferred. An Observed Shapes section in the observability domain
+lists recorded shapes most-used first with their parameter names, and a
+"Draft template…" dialog renders the `QueryTemplate` for the operator to copy.
+Three properties are pinned in `tests/integration/test_admin_ui.py` — the first
+one behaviourally (a real request carrying only `admin:shapes:read`), the other
+two by asserting the rendered markup and JS: it is gated on its own
+`admin:shapes:read` scope and loads independently of the aggregate
+observability reads (a caller holding one scope and not the other gets an
+honest empty state, not a blanked view); there is **no install affordance
+anywhere** in the panel, so the governed-config review gate cannot be
+short-circuited from the UI; and "recording is DISABLED" renders differently
+from "recording is on and nothing ran" — an operator who confuses those two
+narrows a connection to an empty template set. Both incompleteness counters
+(`evicted_total`, `skeletonization_failures`) surface as a visible warning
+rather than letting a truncated list read as complete, and the scope line spells
+out in words whether the window is shared-durable or per-replica-volatile.
+
+**3. The `between` dry-run binder is fixed** (`templates/binding.py`).
+`dummy_bound_query` bound a one-element list for every list-typed slot, which
+satisfies `in`/`not_in` but fails `between`'s exact `[low, high]` requirement —
+so any drafted template containing a BETWEEN predicate was rejected by
+`querygate-validate-config`, and the failure came from the dry-run binder rather
+than from the template. Now binds two elements, which satisfies every
+list-taking operator the AST has, so the arity does not have to be inferred from
+whichever operator the slot sits under. Pre-existing in item 48; it only became
+visible because item 195 documents a promote-then-check workflow.
+
+**Still open, and now the honest full list of what this feature does not do:**
+the shared store requires `CONCURRENCY_BACKEND=redis` (there is no separate
+switch — deliberate, matching how the quota and disclosure-budget siblings are
+wired); `templates_only` does not narrow the write path (`WritePolicy` is
+already deny-by-default) or schema discovery; a rejected ad-hoc query still
+consumes quota, since quota is reserved earlier in `execute()` than validation
+runs; and a shape whose value no template slot can express is skipped, counted,
+and surfaced — but not recorded.
+
+**Effort:** M–L overall. **Depends on:** 48, 50 phase 2 (the Redis wiring
+precedent).

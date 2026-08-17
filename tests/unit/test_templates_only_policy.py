@@ -15,11 +15,13 @@ the control meaningful rather than cosmetic:
 
 from __future__ import annotations
 
+import textwrap
 from unittest.mock import AsyncMock, patch
 
 import pytest
 import sqlalchemy as sa
 
+from querygate.cli import validate_config
 from querygate.core.exceptions import AdHocQueryNotPermittedError, PolicyViolationError
 from querygate.execution import service as svc
 from querygate.execution.service import StructuredQueryService
@@ -261,3 +263,128 @@ async def test_off_by_default_policy_is_unaffected():
         service = StructuredQueryService(connection_id="demo")
         result = await service.explain(_simple_query())
     assert result.sql
+
+
+# ---------------------------------------------------------------------------
+# Deploy-time cross-check
+# ---------------------------------------------------------------------------
+
+
+def _write(path, text):
+    path.write_text(textwrap.dedent(text), encoding="utf-8")
+    return str(path)
+
+
+def _config_files(tmp_path, policy_body, template_body=None):
+    connections = _write(
+        tmp_path / "connections.yaml",
+        """
+        connections:
+          - id: demo
+            dialect: postgresql
+            connection_string: postgresql+asyncpg://u:p@localhost/demo
+            enabled: true
+        """,
+    )
+    policy = _write(tmp_path / "policy.yaml", policy_body)
+    templates = _write(tmp_path / "templates.yaml", template_body) if template_body else None
+    return connections, policy, templates
+
+
+def test_templates_only_with_no_reachable_template_fails_validation(tmp_path):
+    """The one misconfiguration the whole promote-then-narrow workflow can end
+    in: flip `templates_only` before publishing the templates and every read on
+    that connection is refused with nothing the caller may invoke instead. It
+    validated clean before this check, so an operator could brick a connection
+    with no signal (`claim-reviewer`, 2026-08-17).
+
+    An error rather than a warning on purpose: no deployment intends "this
+    principal may read nothing at all" — `enabled: false` expresses that.
+    """
+    connections, policy, _ = _config_files(
+        tmp_path,
+        """
+        default:
+          enabled: true
+        connections:
+          demo:
+            templates_only: true
+        """,
+    )
+    errors = validate_config(connections, policy)
+    assert len(errors) == 1
+    assert "templates_only" in errors[0] and "demo" in errors[0]
+
+
+def test_an_empty_templates_file_is_not_a_reachable_template(tmp_path):
+    connections, policy, templates = _config_files(
+        tmp_path,
+        """
+        default:
+          enabled: true
+        connections:
+          demo:
+            templates_only: true
+        """,
+        "templates: []\n",
+    )
+    assert len(validate_config(connections, policy, template_file=templates)) == 1
+
+
+def test_templates_only_with_a_matching_template_validates_clean(tmp_path):
+    connections, policy, templates = _config_files(
+        tmp_path,
+        """
+        default:
+          enabled: true
+        connections:
+          demo:
+            templates_only: true
+        """,
+        """
+        templates:
+          - id: customers_by_id
+            connection: demo
+            parameters: []
+            query:
+              from: customers
+              select: [customers.id]
+              limit: 5
+        """,
+    )
+    assert validate_config(connections, policy, template_file=templates) == []
+
+
+def test_a_principal_level_narrowing_is_checked_too(tmp_path):
+    """The narrowing an operator is most likely to author is per-principal, so
+    checking only the connection layer would miss the common case.
+    """
+    connections, policy, _ = _config_files(
+        tmp_path,
+        """
+        default:
+          enabled: true
+        principals:
+          reporting-agent:
+            demo:
+              enabled: true
+              templates_only: true
+        """,
+    )
+    errors = validate_config(connections, policy)
+    assert len(errors) == 1
+    assert "principals.reporting-agent.demo" in errors[0]
+
+
+def test_an_unnarrowed_connection_needs_no_templates(tmp_path):
+    connections, policy, _ = _config_files(
+        tmp_path,
+        """
+        default:
+          enabled: true
+        connections:
+          demo:
+            enabled: true
+        """,
+    )
+    assert validate_config(connections, policy) == []

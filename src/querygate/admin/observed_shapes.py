@@ -26,7 +26,7 @@ AST node classes that can carry one. That is deliberate: an enumeration is the
 exact drift failure mode `CLAUDE.md`'s item-96 note warns about (a new node
 type that nobody remembers to add to the walk). `_LITERAL_KEYS` is the single
 place this guarantee is maintained, and
-`test_observed_shapes.py::test_literal_bearing_ast_fields_are_all_known`
+`test_observed_shapes.py::test_every_bare_scalar_ast_field_is_classified`
 reflects over the AST models to fail the day a new literal-bearing field
 appears without being added here.
 
@@ -70,7 +70,7 @@ from querygate.templates.models import ParameterType, QueryTemplate, TemplatePar
 # two entries — fragmenting the operator's view, and letting a caller flush a
 # bounded store by walking a number.
 #
-# Regression-locked by `test_literal_bearing_ast_fields_are_all_known`, which
+# Regression-locked by `test_every_bare_scalar_ast_field_is_classified`, which
 # reflects over every read-AST model and fails on ANY bare-scalar field that is
 # in neither this set, `_DROPPED_KEYS`, nor the explicitly-justified
 # `_STRUCTURAL_SCALAR_KEYS` below.
@@ -279,14 +279,70 @@ def skeletonize(query: StructuredQuery) -> Tuple[Dict[str, Any], List[TemplatePa
     return skeleton, allocator.parameters
 
 
+# Caller-*authored* names. They are kept in the stored skeleton (a shape is
+# unreadable without them, and the audit event keeps them too) but they are
+# normalized away before hashing — see `shape_hash`.
+_ALIAS_KEYS = frozenset({"alias", "from_alias", "name"})
+
+
+def _canonicalize_aliases(node: Any, mapping: Dict[str, str]) -> Any:
+    """Replace every caller-authored alias — and every bare reference to one —
+    with a positional token, so the alias text cannot affect the shape hash.
+    """
+    if isinstance(node, dict):
+        out: Dict[str, Any] = {}
+        for key, value in node.items():
+            if key in _ALIAS_KEYS and isinstance(value, str):
+                out[key] = mapping.setdefault(value, f"#{len(mapping) + 1}")
+            else:
+                out[key] = _canonicalize_aliases(value, mapping)
+        return out
+    if isinstance(node, list):
+        return [_canonicalize_aliases(item, mapping) for item in node]
+    # A bare string that exactly matches a known alias is a *reference* to it
+    # (group_by/order_by/correlate may name a select alias). A dotted
+    # Table.Column ref never matches, since an alias is a bare identifier.
+    if isinstance(node, str) and node in mapping:
+        return mapping[node]
+    return node
+
+
+def _collect_aliases(node: Any, mapping: Dict[str, str]) -> None:
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in _ALIAS_KEYS and isinstance(value, str):
+                mapping.setdefault(value, f"#{len(mapping) + 1}")
+            else:
+                _collect_aliases(value, mapping)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_aliases(item, mapping)
+
+
 def shape_hash(skeleton: Dict[str, Any]) -> str:
     """Stable identity for a skeleton: sha256 over its canonical JSON form.
 
-    Deliberately computed over the *skeleton*, not the raw query, so two
-    invocations of one shape with different filter values collapse to one
-    entry — which is the whole point of recording shapes rather than queries.
+    Computed over the *skeleton*, not the raw query, so two invocations of one
+    shape with different filter values collapse to one entry — the whole point
+    of recording shapes rather than queries.
+
+    **Aliases are normalized out first.** `alias`/`from_alias`/CTE `name` are
+    caller-*authored* strings, so leaving them in the hash left a residual
+    eviction vector: a caller could mint an unbounded number of "distinct"
+    shapes by varying an alias, evicting other principals' shapes out of a
+    bound that is fleet-global on the Redis backend
+    (`security-invariant-reviewer`, 2026-08-17). Normalizing also fixes a
+    correctness wart in its own right — `sum(x) AS total` and `sum(x) AS t` are
+    the same query shape and should have always been one entry. The *stored*
+    skeleton keeps the real aliases, because a template drafted with `#1` as a
+    column name would be useless; only the hash is normalized. This is the same
+    root cause as `TODO.md` item 186's alias-variance evasion of the disclosure
+    budget's per-shape cap, closed here for this store.
     """
-    canonical = json.dumps(skeleton, sort_keys=True, separators=(",", ":"), default=str)
+    mapping: Dict[str, str] = {}
+    _collect_aliases(skeleton, mapping)
+    normalized = _canonicalize_aliases(skeleton, mapping)
+    canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
 
 
@@ -333,14 +389,18 @@ class ObservedShape(pyd.BaseModel):
 class ObservedShapeStore(Protocol):
     """Records and reads back observed shapes.
 
-    A Protocol rather than a concrete class because the in-process
-    implementation below is per-process — the same limitation
-    `execution/concurrency.py` and `execution/quota.py` carry before their
-    Redis siblings — so a durable/shared backend can be registered later
-    without touching any call site.
+    **Async on purpose**, even though the in-process implementation needs no
+    await: the Redis sibling (`admin/redis_observed_shapes.py`) does, and a
+    Protocol that was sync-then-widened is precisely the migration that broke
+    the compensation store in the 2026-07-23 review (methods converted to
+    `async def` with three call sites left un-awaited, silently discarding
+    every write). Defining the seam async from the start means there is no
+    later conversion to get wrong — see `CLAUDE.md`'s testing-gotcha entry.
     """
 
-    def record(
+    scope: str
+
+    async def record(
         self,
         query: StructuredQuery,
         *,
@@ -348,13 +408,40 @@ class ObservedShapeStore(Protocol):
         principal_id: Optional[str],
     ) -> Optional[ObservedShape]: ...
 
-    def list_shapes(
+    async def list_shapes(
         self, *, connection_id: Optional[str] = None, principal_id: Optional[str] = None
     ) -> List[ObservedShape]: ...
 
-    def get(self, shape_hash: str) -> Optional[ObservedShape]: ...
+    async def get(
+        self,
+        shape_hash: str,
+        *,
+        connection_id: Optional[str] = None,
+        principal_id: Optional[str] = None,
+    ) -> Optional[ObservedShape]: ...
 
-    def clear(self) -> None: ...
+    async def counters(self) -> "ObservedShapeCounters": ...
+
+    async def clear(self) -> None: ...
+
+
+class ObservedShapeCounters(pyd.BaseModel):
+    """The two ways a discovery list can be incomplete, plus the ceiling.
+
+    Read through the store rather than off its attributes so the Redis sibling
+    (whose counters live in Redis, not in this process) satisfies the same
+    interface.
+    """
+
+    max_entries: int
+    evicted_total: int
+    skeletonization_failures: int
+    # False when the backend is unreachable. The in-process store is always
+    # healthy; the Redis one fails open, and an outage renders as an EMPTY list —
+    # indistinguishable from "your agent ran nothing" unless this is surfaced.
+    backend_healthy: bool = True
+
+    model_config = pyd.ConfigDict(extra="forbid")
 
 
 class InProcessObservedShapeStore:
@@ -394,7 +481,9 @@ class InProcessObservedShapeStore:
     def max_entries(self) -> int:
         return self._max_entries
 
-    def record(
+    scope = "process-local-volatile"
+
+    async def record(
         self,
         query: StructuredQuery,
         *,
@@ -438,7 +527,7 @@ class InProcessObservedShapeStore:
                 self.evicted_total += 1
             return entry
 
-    def list_shapes(
+    async def list_shapes(
         self, *, connection_id: Optional[str] = None, principal_id: Optional[str] = None
     ) -> List[ObservedShape]:
         with self._lock:
@@ -451,7 +540,7 @@ class InProcessObservedShapeStore:
         # carry the most traffic, not the most recent one.
         return sorted(entries, key=lambda e: (-e.occurrences, e.first_seen))
 
-    def get(
+    async def get(
         self,
         shape_hash_value: str,
         *,
@@ -475,7 +564,29 @@ class InProcessObservedShapeStore:
                 return entry
         return None
 
-    def clear(self) -> None:
+    async def counters(self) -> ObservedShapeCounters:
+        with self._lock:
+            return ObservedShapeCounters(
+                max_entries=self._max_entries,
+                evicted_total=self.evicted_total,
+                skeletonization_failures=self.skeletonization_failures,
+            )
+
+    def clear_sync(self) -> None:
+        """Sync reset for `tests/conftest.py`, which is not async at that point.
+
+        Resets `enabled` too. Without that, a test that switched recording on
+        left it on for the rest of the session, so
+        `test_recording_is_off_by_default` was vacuous once anything earlier had
+        enabled it (found by `security-invariant-reviewer` on the final tree).
+        """
+        with self._lock:
+            self._shapes.clear()
+            self.evicted_total = 0
+            self.skeletonization_failures = 0
+            self.enabled = False
+
+    async def clear(self) -> None:
         with self._lock:
             self._shapes.clear()
             self.evicted_total = 0
@@ -483,14 +594,36 @@ class InProcessObservedShapeStore:
 
 
 _in_process_store = InProcessObservedShapeStore()
+_active_store: "ObservedShapeStore" = _in_process_store
 
 
-def observed_shape_store() -> InProcessObservedShapeStore:
-    """The persistent in-process store — used by the recording hook, the admin
-    read API, the CLI, and by `tests/conftest.py` to reset state between tests
-    (the same discipline `in_process_limiter()` documents).
+def in_process_observed_shape_store() -> InProcessObservedShapeStore:
+    """The in-process store instance, regardless of which backend is active —
+    used by `tests/conftest.py` to reset state between tests, the same
+    discipline `in_process_limiter()` documents.
     """
     return _in_process_store
+
+
+def observed_shape_store() -> "ObservedShapeStore":
+    """The store the recording hook and the admin API actually use: the Redis
+    sibling when one is registered, otherwise the in-process store.
+    """
+    return _active_store
+
+
+def init_redis_observed_shape_store(store: "ObservedShapeStore") -> None:
+    """Register the shared/durable backend (called once at application start
+    when the Redis backend is configured)."""
+    global _active_store
+    _active_store = store
+
+
+def clear_redis_observed_shape_store() -> None:
+    """Fall back to the in-process store — used by `tests/conftest.py` so a test
+    that registered a Redis store cannot leak it into the next test."""
+    global _active_store
+    _active_store = _in_process_store
 
 
 def configure_observed_shape_store(max_entries: int, *, enabled: bool) -> None:
@@ -503,8 +636,14 @@ def configure_observed_shape_store(max_entries: int, *, enabled: bool) -> None:
     discovery window. Stated in `ObservedShapeReport.scope` and in the
     operator docs rather than left for someone to discover mid-cutover.
     """
-    global _in_process_store
+    global _in_process_store, _active_store
+    replacing_active = _active_store is _in_process_store
     _in_process_store = InProcessObservedShapeStore(max_entries=max_entries, enabled=enabled)
+    # Only re-point the active store if the in-process one *was* active — a
+    # registered Redis backend must survive this call, or configuring the
+    # ceiling would silently demote a shared deployment back to per-process.
+    if replacing_active:
+        _active_store = _in_process_store
 
 
 class ObservedShapeReport(pyd.BaseModel):
@@ -515,6 +654,10 @@ class ObservedShapeReport(pyd.BaseModel):
     max_entries: int
     evicted_total: int
     skeletonization_failures: int = 0
+    # See `ObservedShapeCounters.backend_healthy`. A false value means this list
+    # is empty because the store could not be read, NOT because nothing ran —
+    # narrowing a connection off it would narrow to nothing.
+    backend_healthy: bool = True
     # Stated rather than glossed: the in-process store is per serving process,
     # so a multi-replica or multi-worker deployment sees only the shapes that
     # this process handled. An operator narrowing a connection to templates
@@ -525,24 +668,28 @@ class ObservedShapeReport(pyd.BaseModel):
     model_config = pyd.ConfigDict(extra="forbid")
 
 
-def build_observed_shape_report(
+async def build_observed_shape_report(
     *,
     connection_id: Optional[str] = None,
     principal_id: Optional[str] = None,
-    store: Optional[InProcessObservedShapeStore] = None,
+    store: Optional["ObservedShapeStore"] = None,
 ) -> ObservedShapeReport:
-    """`enabled` is read from the store, not from a caller-supplied flag, so the
-    report cannot claim recording is on while the recorder is silent.
+    """`enabled` and `scope` are read from the store, never from a
+    caller-supplied flag, so the report cannot claim recording is on while the
+    recorder is silent, nor claim a durable scope on a volatile backend.
     """
     active = store if store is not None else observed_shape_store()
+    counters = await active.counters()
     return ObservedShapeReport(
         enabled=active.enabled,
         shapes=(
-            active.list_shapes(connection_id=connection_id, principal_id=principal_id)
+            await active.list_shapes(connection_id=connection_id, principal_id=principal_id)
             if active.enabled
             else []
         ),
-        max_entries=active.max_entries,
-        evicted_total=active.evicted_total,
-        skeletonization_failures=active.skeletonization_failures,
+        max_entries=counters.max_entries,
+        evicted_total=counters.evicted_total,
+        skeletonization_failures=counters.skeletonization_failures,
+        backend_healthy=counters.backend_healthy,
+        scope=active.scope,
     )

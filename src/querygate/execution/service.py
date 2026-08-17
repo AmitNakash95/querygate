@@ -414,7 +414,7 @@ class StructuredQueryService:
             "List the available templates and invoke one by id."
         )
 
-    def _record_observed_shape(self, query: StructuredQuery) -> None:
+    async def _record_observed_shape(self, query: StructuredQuery) -> None:
         """Record the *shape* of a query that was allowed and executed
         (TODO.md item 195), so an operator can later see which shapes a
         principal actually uses and promote them into templates.
@@ -429,7 +429,7 @@ class StructuredQueryService:
         and the admin report can never disagree about whether recording is on.
         """
         try:
-            observed_shape_store().record(
+            await observed_shape_store().record(
                 query,
                 connection_id=self._connection_id,
                 principal_id=self._principal.subject if self._principal else None,
@@ -1126,7 +1126,7 @@ class StructuredQueryService:
                         ),
                     )
                     self._emit_usage_signals(query, admission_id=admission_id)
-                    self._record_observed_shape(query)
+                    await self._record_observed_shape(query)
                     QUERIES_TOTAL.labels(connection=self._connection_id, status="success").inc()
                     QUERY_DURATION_SECONDS.labels(connection=self._connection_id).observe(
                         elapsed_seconds

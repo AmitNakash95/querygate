@@ -8,7 +8,11 @@ import pytest
 from querygate.core.config import AppConfig
 from querygate.core.exceptions import QueryValidationError
 from querygate.query_ast.models import StructuredQuery
-from querygate.templates.binding import bind_template, validate_template_structure
+from querygate.templates.binding import (
+    bind_template,
+    dummy_bound_query,
+    validate_template_structure,
+)
 from querygate.templates.loader import TemplateStore
 from querygate.templates.models import (
     PublicQueryTemplate,
@@ -297,3 +301,49 @@ def test_public_projection_excludes_query_skeleton():
     assert "query" not in dumped  # the AST skeleton is not exposed to agents
     assert dumped["id"] == "orders_for_customer"
     assert [p["name"] for p in dumped["parameters"]] == ["customer_id", "limit"]
+
+
+def test_a_between_template_passes_the_dry_run_structure_check():
+    """`dummy_bound_query` bound a ONE-element list for every list slot, which
+    satisfies `in`/`not_in` but fails `between`'s exact `[low, high]` rule — so a
+    perfectly valid BETWEEN template was rejected by `querygate config check`,
+    and the failure came from this dry-run binder rather than from the template.
+
+    It surfaced through item 195's promote-then-check workflow (draft a template
+    from an observed shape, check it, then install it), where the drafted
+    template is checked before an operator commits it. Two elements satisfy every
+    list-taking operator the AST has, so the arity does not have to be inferred
+    from whichever operator the slot happens to sit under.
+    """
+    template = QueryTemplate(
+        id="orders_in_range",
+        connection="demo",
+        parameters=[TemplateParameter(name="span", type="integer", is_list=True)],
+        query={
+            "from": "orders",
+            "select": ["orders.id"],
+            "where": {"col": "orders.total", "op": "between", "value": {"param": "span"}},
+            "limit": 5,
+        },
+    )
+    assert validate_template_structure(template) is None
+    bound = dummy_bound_query(template)
+    assert isinstance(bound.where.value, list) and len(bound.where.value) == 2
+
+
+def test_an_in_list_template_still_passes_the_dry_run_check():
+    """The same two-element dummy must not break the operator it was already
+    working for — `in` takes any non-empty list, so two is fine.
+    """
+    template = QueryTemplate(
+        id="orders_in_statuses",
+        connection="demo",
+        parameters=[TemplateParameter(name="statuses", type="string", is_list=True)],
+        query={
+            "from": "orders",
+            "select": ["orders.id"],
+            "where": {"col": "orders.status", "op": "in", "value": {"param": "statuses"}},
+            "limit": 5,
+        },
+    )
+    assert validate_template_structure(template) is None
