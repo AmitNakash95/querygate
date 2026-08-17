@@ -260,7 +260,9 @@ def build_admin_observability_router(
         # columns and predicates, which is materially more specific than the
         # aggregate reads above (see core/scopes.py).
         require_scope(principal, ADMIN_SHAPES_READ_SCOPE)
-        return build_observed_shape_report(connection_id=connection_id, principal_id=principal_id)
+        return await build_observed_shape_report(
+            connection_id=connection_id, principal_id=principal_id
+        )
 
     @router.get("/observed-shapes/{shape_hash}/template-draft", response_model=QueryTemplate)
     async def observability_observed_shape_draft(
@@ -285,7 +287,7 @@ def build_admin_observability_router(
         # A hash is not unique on its own (one shape run by two principals is
         # two entries), so the optional filters are threaded through rather
         # than drafting from whichever entry happened to be recorded first.
-        shape = store.get(shape_hash, connection_id=connection_id, principal_id=principal_id)
+        shape = await store.get(shape_hash, connection_id=connection_id, principal_id=principal_id)
         if shape is None:
             raise NotFoundError(f"Unknown observed shape: {shape_hash!r}")
         try:

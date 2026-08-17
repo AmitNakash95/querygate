@@ -72,6 +72,34 @@ class LoadedConfigContext:
     catalog_store: CatalogStore
 
 
+def _templates_only_layers(policy_store) -> list[tuple[str, str]]:
+    """Every (human label, connection id) pair whose resolved policy layer sets
+    `templates_only`. Walks the connection and principal layers rather than
+    calling `PolicyStore.get()` per pair, so it reports the *authored* rule an
+    operator has to fix, not a merged view.
+    """
+    found: list[tuple[str, str]] = []
+    for connection_id, policy in getattr(policy_store, "_overrides", {}).items():
+        if getattr(policy, "templates_only", False):
+            found.append((f"connections.{connection_id}", connection_id))
+    for principal, per_connection in getattr(policy_store, "_principal_overrides", {}).items():
+        for connection_id, policy in (per_connection or {}).items():
+            if connection_id == "*":
+                continue
+            # A principal override is stored as a RAW DICT (it is merged onto
+            # the connection layer at resolve time), unlike the connection
+            # layer's parsed `Policy` — so read it both ways rather than
+            # assuming, or the common per-principal narrowing goes unchecked.
+            narrowed = (
+                policy.get("templates_only", False)
+                if isinstance(policy, dict)
+                else getattr(policy, "templates_only", False)
+            )
+            if narrowed:
+                found.append((f"principals.{principal}.{connection_id}", connection_id))
+    return found
+
+
 def load_config_context(
     connections_file: str,
     policy_file: str,
@@ -146,6 +174,36 @@ def load_config_context(
                         f"{template_file}: template targets connection {connection_id!r} which "
                         f"does not match any connection id in {connections_file} "
                         f"(known ids: {sorted(known_ids)})"
+                    )
+
+    # TODO.md item 195: a connection narrowed to `templates_only` with no
+    # template that targets it is unusable — every read is refused and there is
+    # nothing the caller may invoke instead. It validates clean otherwise, so an
+    # operator can flip the switch before publishing the templates and brick the
+    # connection with no signal. This is the one misconfiguration the whole
+    # promote-then-narrow workflow can end in, so it is caught at validate time.
+    # Deliberately an ERROR rather than a warning: there is no deployment for
+    # which "this principal may read nothing at all" is the intent — that is
+    # what `enabled: false` is for.
+    if policy_store is not None:
+        narrowed = _templates_only_layers(policy_store)
+        if narrowed:
+            reachable = (
+                set(template_store.connection_ids())
+                if template_file and template_store is not None
+                else set()
+            )
+            for label, connection_id in sorted(narrowed):
+                if connection_id not in reachable:
+                    errors.append(
+                        f"{policy_file}: {label} sets templates_only for connection "
+                        f"{connection_id!r}, but no query template targets that connection"
+                        + (
+                            f" in {template_file}"
+                            if template_file
+                            else " (no templates file is configured)"
+                        )
+                        + " — every read would be refused with nothing to invoke instead."
                     )
 
     if errors or registry is None or policy_store is None or catalog_store is None:

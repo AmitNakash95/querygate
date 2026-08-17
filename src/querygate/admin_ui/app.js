@@ -128,6 +128,7 @@
     anomalies: null,
     changeTrend: null,
     metricsHistory: null,
+    observedShapes: null,
     serverDrafts: null,
     templateSources: {},
   };
@@ -2479,19 +2480,195 @@
     charts.innerHTML = series.map(trendChartCard).join("");
   }
 
+  function renderObservedShapes() {
+    const note = $("#shapes-note");
+    const warning = $("#shapes-warning");
+    const wrap = $("#shapes-table-wrap");
+    const empty = $("#shapes-empty");
+    const report = state.observedShapes;
+
+    if (!report) {
+      note.hidden = true;
+      warning.hidden = true;
+      wrap.hidden = true;
+      empty.hidden = false;
+      empty.textContent = "Connect with admin:shapes:read to load observed query shapes.";
+      return;
+    }
+
+    // "Recording is off" and "recording is on and nothing ran" lead an operator
+    // to opposite actions — narrowing a connection on the second when it was
+    // really the first sets templates_only with an empty template set. They must
+    // never render the same.
+    if (!report.enabled) {
+      note.hidden = true;
+      warning.hidden = true;
+      wrap.hidden = true;
+      empty.hidden = false;
+      empty.textContent =
+        "Observed-shape recording is DISABLED on this deployment. Set OBSERVED_SHAPES_ENABLED=true and restart — this is not the same as your agent running no queries.";
+      return;
+    }
+
+    // Fail-open means an unreachable backend renders as an EMPTY list, which
+    // reads exactly like "recording is on and nothing ran". An operator who
+    // narrows a connection from that list narrows to nothing — so say it.
+    if (report.backend_healthy === false) {
+      note.hidden = true;
+      wrap.hidden = true;
+      warning.hidden = false;
+      warning.textContent =
+        "The shape store's backend is UNREACHABLE. This list is empty because it could not be read, NOT because nothing ran — do not narrow a connection from it.";
+      empty.hidden = true;
+      return;
+    }
+
+    const scopeLabel =
+      report.scope === "shared-durable"
+        ? "shared across every replica, survives a restart"
+        : "this process only, and discarded on restart — collect from each replica and keep the window inside one process lifetime";
+    note.hidden = false;
+    note.textContent = `scope=${report.scope} (${scopeLabel}) · max_entries=${report.max_entries} · evicted=${report.evicted_total} · skeletonization_failures=${report.skeletonization_failures}`;
+
+    // Both counters mean "this list is missing shapes". Narrowing from an
+    // incomplete list breaks precisely the queries it omitted, so say so loudly
+    // rather than presenting a truncated list as complete.
+    const problems = [];
+    if (report.evicted_total > 0) {
+      problems.push(
+        `${report.evicted_total} shape(s) were evicted because the store hit its ${report.max_entries}-entry bound — raise OBSERVED_SHAPES_MAX_ENTRIES and re-run the discovery window. On the shared backend that bound is whichever replica last wrote, so in a fleet that disagrees it is the smallest configured value.`
+      );
+    }
+    if (report.skeletonization_failures > 0) {
+      problems.push(
+        `${report.skeletonization_failures} query/queries could not be reduced to a template skeleton and were NOT recorded.`
+      );
+    }
+    warning.hidden = problems.length === 0;
+    warning.textContent = problems.length
+      ? `This list is incomplete. ${problems.join(" ")}`
+      : "";
+
+    const shapes = report.shapes || [];
+    if (!shapes.length) {
+      wrap.hidden = true;
+      empty.hidden = false;
+      empty.textContent =
+        "Recording is enabled, but no query shapes have been seen yet on this deployment.";
+      return;
+    }
+    empty.hidden = true;
+    wrap.hidden = false;
+    $("#shapes-body").innerHTML = shapes
+      .map((shape) => {
+        const from = shape.skeleton?.from_table || shape.skeleton?.from || "?";
+        const params = (shape.parameters || []).map((p) => p.name).join(", ") || "—";
+        return `<tr>
+          <td><code>${escapeHtml(shape.shape_hash.slice(0, 12))}</code></td>
+          <td>${shape.occurrences}</td>
+          <td>${escapeHtml(shape.connection_id)}</td>
+          <td>${escapeHtml(shape.principal_id || "—")}</td>
+          <td><code>${escapeHtml(from)}</code></td>
+          <td>${escapeHtml(params)}</td>
+          <td><button class="button secondary" type="button" data-draft-shape="${escapeHtml(shape.shape_hash)}" data-draft-connection="${escapeHtml(shape.connection_id)}" data-draft-principal="${escapeHtml(shape.principal_id || "")}">Draft template…</button></td>
+        </tr>`;
+      })
+      .join("");
+  }
+
+  async function loadObservedShapes() {
+    // Its own scope, so this section loads (or doesn't) independently of the
+    // aggregate observability reads above — an operator may hold one and not
+    // the other by design.
+    if (!hasScope("admin:shapes:read")) {
+      state.observedShapes = null;
+      renderObservedShapes();
+      return;
+    }
+    try {
+      state.observedShapes = await api("/admin/observability/observed-shapes");
+      renderObservedShapes();
+    } catch (error) {
+      state.observedShapes = null;
+      $("#shapes-note").hidden = true;
+      $("#shapes-warning").hidden = true;
+      $("#shapes-table-wrap").hidden = true;
+      $("#shapes-empty").hidden = false;
+      $("#shapes-empty").textContent = error.message;
+    }
+  }
+
+  function openShapeDraftDialog(shapeHash, connectionId, principalId) {
+    const dialog = $("#shape-draft-dialog");
+    const output = $("#shape-draft-output");
+    $("#shape-draft-id").value = "";
+    $("#shape-draft-description").value = "";
+    $("#shape-draft-error").hidden = true;
+    $("#shape-draft-output-wrap").hidden = true;
+    output.textContent = "";
+    dialog.dataset.shapeHash = shapeHash;
+    dialog.dataset.connectionId = connectionId || "";
+    dialog.dataset.principalId = principalId || "";
+    dialog.showModal();
+  }
+
+  async function renderShapeDraft(event) {
+    // Deliberately does not close the dialog on success: the operator's next
+    // action is to READ and copy the draft, not to confirm an install. There is
+    // no install action here at all.
+    event.preventDefault();
+    const dialog = $("#shape-draft-dialog");
+    const templateId = $("#shape-draft-id").value.trim();
+    const errorEl = $("#shape-draft-error");
+    if (!templateId) {
+      errorEl.hidden = false;
+      errorEl.textContent = "A template id is required.";
+      return;
+    }
+    const params = new URLSearchParams({ template_id: templateId });
+    const description = $("#shape-draft-description").value.trim();
+    if (description) params.set("description", description);
+    if (dialog.dataset.connectionId) params.set("connection_id", dialog.dataset.connectionId);
+    if (dialog.dataset.principalId) params.set("principal_id", dialog.dataset.principalId);
+    const button = $("#shape-draft-submit");
+    setBusy(button, true, "Rendering…");
+    try {
+      const draft = await api(
+        `/admin/observability/observed-shapes/${encodeURIComponent(dialog.dataset.shapeHash)}/template-draft?${params.toString()}`
+      );
+      errorEl.hidden = true;
+      $("#shape-draft-output-wrap").hidden = false;
+      $("#shape-draft-output").textContent = JSON.stringify(
+        { templates: [draft] },
+        null,
+        2
+      );
+      toast("Draft rendered — review it, then add it to your templates file.", "ok");
+    } catch (error) {
+      $("#shape-draft-output-wrap").hidden = true;
+      errorEl.hidden = false;
+      errorEl.textContent = error.message;
+    } finally {
+      setBusy(button, false);
+    }
+  }
+
   async function loadObservability() {
     if (!hasScope("admin:observability:read")) {
       state.observability = null;
       state.anomalies = null;
       state.changeTrend = null;
       state.metricsHistory = null;
-      $("#observability-snapshot").hidden = true;
+      state.observedShapes = null;
       $("#observability-table-wrap").hidden = true;
       $("#observability-cards").innerHTML =
         '<p class="empty-state">Connect with admin:observability:read to load observability.</p>';
+      $("#observability-snapshot").hidden = true;
       renderAnomalies();
       renderChangeTrend();
       renderMetricsHistory();
+      // Its own scope: load it even when the observability scope is missing.
+      await loadObservedShapes();
       return;
     }
     const button = $("#refresh-observability");
@@ -2536,6 +2713,10 @@
       $("#history-empty").hidden = false;
       $("#history-empty").textContent = error.message;
     }
+    // Own scope, own request — a caller holding admin:observability:read but
+    // not admin:shapes:read gets the sections above and an honest empty state
+    // here, rather than one 403 blanking the whole view.
+    await loadObservedShapes();
     setBusy(button, false);
   }
 
@@ -3013,6 +3194,16 @@
     $("#refresh-health").addEventListener("click", () => loadConnectionHealth());
     $("#refresh-templates").addEventListener("click", () => loadTemplates());
     $("#refresh-observability").addEventListener("click", () => loadObservability());
+    $("#shape-draft-form").addEventListener("submit", renderShapeDraft);
+    $("#shapes-body").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-draft-shape]");
+      if (!button) return;
+      openShapeDraftDialog(
+        button.dataset.draftShape,
+        button.dataset.draftConnection,
+        button.dataset.draftPrincipal
+      );
+    });
     $("#template-cards").addEventListener("click", (event) => {
       const toggle = event.target.closest("[data-template-toggle]");
       if (toggle) toggleTemplateQuery(toggle);

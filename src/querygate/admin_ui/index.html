@@ -577,6 +577,19 @@
         <p id="history-note" class="observability-snapshot" hidden></p>
         <div id="history-charts" class="observability-cards" hidden></div>
         <p id="history-empty" class="empty-state" hidden></p>
+
+        <div class="observability-subsection">
+          <div><p class="eyebrow">Observed query shapes</p><h3>Which query shapes this agent actually runs — the list you narrow from.</h3><p>Every distinct shape an allowed query took, most-used first, so you can promote the ones your agent really needs into curated templates and then set <code>templates_only</code> on the connection. Each row is a <em>shape</em>, never a query: predicate values, expression literals, limits and offsets are all replaced by typed parameter slots and the natural-language intent is dropped, so this view carries the same redaction guarantee as the persisted audit event. Requires the <code>admin:shapes:read</code> scope — deliberately separate from <code>admin:observability:read</code>, because a shape names one principal's exact tables, columns and predicates. Needs <code>OBSERVED_SHAPES_ENABLED=true</code>; otherwise it reports as disabled rather than as an idle agent. <strong>Drafting does not install anything</strong> — copy the YAML into your templates file after review.</p></div>
+        </div>
+        <p id="shapes-note" class="observability-snapshot" hidden></p>
+        <p id="shapes-warning" class="form-error" role="alert" hidden></p>
+        <div class="table-wrap" id="shapes-table-wrap" hidden>
+          <table class="history-table">
+            <thead><tr><th>Shape</th><th>Occurrences</th><th>Connection</th><th>Principal</th><th>From</th><th>Parameters</th><th></th></tr></thead>
+            <tbody id="shapes-body"></tbody>
+          </table>
+        </div>
+        <p id="shapes-empty" class="empty-state" hidden></p>
       </section>
     </main>
   </div>
@@ -591,6 +604,22 @@
       <p id="auth-error" class="form-error" role="alert" hidden></p>
       <button class="button primary wide" type="submit">Connect securely</button>
       <small>The token is kept only in memory for this session — it is cleared when you close or reload the tab, and is never written to browser storage or a configuration document. It is sent only in the Authorization header.</small>
+    </form>
+  </dialog>
+
+  <dialog id="shape-draft-dialog" class="auth-dialog" aria-labelledby="shape-draft-title">
+    <form id="shape-draft-form" method="dialog">
+      <p class="eyebrow">Template draft — not installed</p>
+      <h2 id="shape-draft-title">Draft a template from this shape</h2>
+      <p>This renders the shape as a curated query template for you to review. It is <strong>not</strong> added to your templates file — adding it stays a deliberate config change, so nothing an agent did can install its own template.</p>
+      <label><span>Template id</span><input id="shape-draft-id" type="text" autocomplete="off" required placeholder="orders_by_status" pattern="[A-Za-z_][A-Za-z0-9_]*"></label>
+      <label><span>Description (optional)</span><input id="shape-draft-description" type="text" autocomplete="off" placeholder="Top orders by status for the reporting agent"></label>
+      <p id="shape-draft-error" class="form-error" role="alert" hidden></p>
+      <div class="table-wrap" id="shape-draft-output-wrap" hidden>
+        <pre id="shape-draft-output" class="code-block"></pre>
+      </div>
+      <button class="button primary wide" id="shape-draft-submit" type="submit">Render draft</button>
+      <small>Every caller-supplied value became a required parameter. Before publishing, hard-code the ones that should not vary and tighten the slots (<code>allowed_values</code>, <code>min</code>/<code>max</code>).</small>
     </form>
   </dialog>
 

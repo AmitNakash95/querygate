@@ -65,7 +65,7 @@ async def _get(app, path=_URL, params=None):
         return await client.get(path, headers=_auth(), params=params or {})
 
 
-def _seed(value: str = "completed", *, enabled: bool = True) -> str:
+async def _seed(value: str = "completed", *, enabled: bool = True) -> str:
     _configure_store(enabled=True)
     query = StructuredQuery(
         from_table="orders",
@@ -73,7 +73,7 @@ def _seed(value: str = "completed", *, enabled: bool = True) -> str:
         where=Predicate(col="orders.status", op="eq", value=value),
         limit=5,
     )
-    shape = observed_shape_store().record(query, connection_id="demo", principal_id="agent")
+    shape = await observed_shape_store().record(query, connection_id="demo", principal_id="agent")
     return shape.shape_hash
 
 
@@ -94,7 +94,7 @@ async def test_the_observability_scope_alone_is_not_enough():
 
 @pytest.mark.asyncio
 async def test_lists_recorded_shapes_without_any_values():
-    _seed("a-secret-status")
+    await _seed("a-secret-status")
     app = create_app(_settings((_SHAPES_SCOPE,)))
     resp = await _get(app)
     assert resp.status_code == 200
@@ -109,7 +109,7 @@ async def test_lists_recorded_shapes_without_any_values():
 
 @pytest.mark.asyncio
 async def test_reports_disabled_honestly_rather_than_as_an_empty_deployment():
-    _seed()
+    await _seed()
     app = create_app(_settings((_SHAPES_SCOPE,), enabled=False))
     observed_shape_store().enabled = False
     resp = await _get(app)
@@ -120,7 +120,7 @@ async def test_reports_disabled_honestly_rather_than_as_an_empty_deployment():
 
 @pytest.mark.asyncio
 async def test_filters_by_connection_and_principal():
-    _seed()
+    await _seed()
     app = create_app(_settings((_SHAPES_SCOPE,)))
     assert len((await _get(app, params={"connection_id": "demo"})).json()["shapes"]) == 1
     assert len((await _get(app, params={"connection_id": "other"})).json()["shapes"]) == 0
@@ -129,7 +129,7 @@ async def test_filters_by_connection_and_principal():
 
 @pytest.mark.asyncio
 async def test_drafts_a_template_without_installing_it():
-    shape_hash = _seed()
+    shape_hash = await _seed()
     app = create_app(_settings((_SHAPES_SCOPE,)))
     resp = await _get(
         app,
@@ -161,7 +161,7 @@ async def test_drafting_an_unknown_shape_is_a_404():
 
 @pytest.mark.asyncio
 async def test_drafting_requires_the_shapes_scope():
-    shape_hash = _seed()
+    shape_hash = await _seed()
     app = create_app(_settings((_OBS_SCOPE,)))
     resp = await _get(
         app,

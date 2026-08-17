@@ -22,9 +22,12 @@ adding it to the templates file stays a deliberate human edit — the same
 quarantined-draft posture `catalog/governance.py` takes. There is no `--apply`,
 on purpose.
 
-Because the server's store is per serving process and non-durable, a
-multi-replica deployment must be queried per replica, and a restart resets the
-window. The `scope` field in the response says so.
+The window's scope depends on the deployment: with `CONCURRENCY_BACKEND=redis`
+it is shared across every replica and survives a restart; otherwise it is per
+serving process and volatile, so a multi-replica deployment must be queried per
+replica and a restart resets it. The `scope` field says which, and this CLI
+prints it in *every* branch — including "nothing recorded yet", where knowing
+which guarantee you have matters most.
 """
 
 from __future__ import annotations
@@ -85,10 +88,24 @@ def _list(args: argparse.Namespace) -> int:
             "(set OBSERVED_SHAPES_ENABLED=true and restart).",
             file=sys.stderr,
         )
+        _print_bounds(report)
+        return 0
+    if report.get("backend_healthy") is False:
+        # The third way an empty list happens, and the nastiest: fail-open means
+        # an unreachable Redis renders exactly like an idle agent. Narrowing from
+        # that list narrows to nothing.
+        print(
+            "WARNING: the shape store's backend is UNREACHABLE — this list is "
+            "empty because it could not be read, NOT because nothing ran. Do "
+            "not narrow a connection from it.",
+            file=sys.stderr,
+        )
+        _print_bounds(report)
         return 0
     shapes = report.get("shapes", [])
     if not shapes:
         print("Recording is enabled, but no query shapes have been seen yet.", file=sys.stderr)
+        _print_bounds(report)
         return 0
     print(f"{'HASH':<34}{'OCCURS':>8}  {'CONNECTION':<20}{'PRINCIPAL':<24}TABLE")
     for shape in shapes:
@@ -98,9 +115,26 @@ def _list(args: argparse.Namespace) -> int:
             f"{shape['shape_hash']:<34}{shape['occurrences']:>8}  "
             f"{shape['connection_id']:<20}{(shape.get('principal_id') or '-'):<24}{table}"
         )
-    # Every bound the operator needs in order to read the list honestly.
+    _print_bounds(report)
+    return 0
+
+
+def _print_bounds(report: Dict[str, Any]) -> None:
+    """Every bound the operator needs in order to read the list honestly.
+
+    Printed in EVERY branch, not only when shapes were listed: on an empty
+    window the scope line is what tells an operator whether they are looking at
+    the whole fleet or one replica, which is exactly when they are most likely to
+    misread the emptiness.
+    """
+    scope = report.get("scope")
+    scope_note = (
+        "shared across replicas, survives a restart"
+        if scope == "shared-durable"
+        else "this process only, discarded on restart — collect per replica"
+    )
     print(
-        f"\nscope={report.get('scope')} · max_entries={report.get('max_entries')} · "
+        f"\nscope={scope} ({scope_note}) · max_entries={report.get('max_entries')} · "
         f"evicted={report.get('evicted_total')} · "
         f"skeletonization_failures={report.get('skeletonization_failures')}",
         file=sys.stderr,
@@ -108,7 +142,9 @@ def _list(args: argparse.Namespace) -> int:
     if report.get("evicted_total"):
         print(
             "WARNING: shapes were evicted — this list is incomplete. Raise "
-            "OBSERVED_SHAPES_MAX_ENTRIES and re-run the discovery window.",
+            "OBSERVED_SHAPES_MAX_ENTRIES and re-run the discovery window. Note "
+            "the bound shown is the one the last writing replica used, which in "
+            "a fleet that disagrees is the smallest configured value.",
             file=sys.stderr,
         )
     if report.get("skeletonization_failures"):
@@ -117,7 +153,6 @@ def _list(args: argparse.Namespace) -> int:
             "and were NOT recorded. Narrowing on this list alone may break them.",
             file=sys.stderr,
         )
-    return 0
 
 
 def _draft(args: argparse.Namespace) -> int:
