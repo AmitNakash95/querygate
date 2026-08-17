@@ -27,9 +27,9 @@ so those are a different class of risk, handled below.
 Every AST position that can carry a column reference is harvested and policy-
 checked. If any were missed, a denied value would leak indirectly (e.g.
 `ORDER BY salary` then reading the row order, or `CASE WHEN salary > 100000`
-then reading the flag). The parametrized
-`test_denied_column_cannot_be_used_for_inference` proves each rejects a denied
-column:
+then reading the flag). The parametrized denied-column tests below (chiefly
+`test_denied_column_cannot_be_used_for_inference`, plus its siblings for
+buried expressions and windows) prove each rejects a denied column:
 
 | AST position | Harvested by | Test id |
 |---|---|---|
@@ -51,14 +51,37 @@ column:
 | `string_agg` col (item 80) | `select_item_column_refs` | `string_agg` |
 | predicate `col_fn` arg (item 77) | `predicate_column_refs` | `predicate_col_fn` |
 | predicate `value_col` (column-to-column) | `predicate_column_refs` | `predicate_value_col` |
+| computed `Expression` in a select item (item 100) | `select_item_column_refs` → `expression_column_refs` | the buried-expression matrix |
+| predicate `expr` / `value_expr` (item 100) | `predicate_column_refs` → `expression_column_refs` | the buried-expression matrix |
+| a nested `CaseExpr` branch condition inside an expression | `expression_column_refs` → `predicate_direct_column_refs` | the buried-expression matrix |
+| window `arg` / `PARTITION BY` / `ORDER BY` (items 101/125) | `select_item_column_refs` / `expression_column_refs` | `window_partition_by`, `window_order_by` |
 
-The harvest is exhaustive by construction, not just by enumeration: a scalar
-function's arguments are `ColArg | LiteralArg` with **no nested-function
-variant** (`query_ast/models.py`, `ScalarFunctionCall`), and `CASE`
-`then`/`else` are that same union — so there is no deeper expression tree a
-column could hide inside. Any new AST node that can carry a column reference
-**must** extend `select_item_column_refs` / `predicate_column_refs` and gain a
-case here; that is the single place this guarantee is maintained.
+**How the harvest stays exhaustive (corrected 2026-08-17, item 195).** This
+section previously argued exhaustiveness from the *shape of the AST* — that a
+scalar function's arguments are `ColArg | LiteralArg` with no nested-function
+variant, "so there is no deeper expression tree a column could hide inside."
+The premise about `ScalarFunctionArg` is still true, but the conclusion drawn
+from it is not: since item 100 the AST **does** carry a deep `Expression` tree
+(`BinaryOpExpr`, `FunctionExpr`, `CastExpr`, `ExtractExpr`, `NowExpr`,
+`DateAddExpr`, `CaseExpr`, `WindowExpr`, plus the `ColumnExpr`/`LiteralExpr`
+leaves — `query_ast/models.py`'s `Expression` union),
+reachable from an expression select item, an aggregate's `arg`, and a
+predicate's `expr`/`value_expr`. The guarantee held throughout — those
+positions are walked by `expression_column_refs`, and the rows above are the
+ones the table was missing — but the *argument* for it had gone stale, which
+for a document a security reviewer reads is its own defect.
+
+The correct statement is the one item 96 was built to support: exhaustiveness
+comes from **a single canonical visitor**, not from the AST staying shallow.
+`iter_column_refs` / `select_item_column_refs` / `predicate_column_refs` /
+`expression_column_refs` are that visitor, and a nested scope (a subquery, a
+CTE body, a set-operation arm) is validated by running the same walk over that
+scope rather than by a second parallel walk. Any new AST node that can carry a
+column reference **must** extend those functions and gain a row here; that is
+the single place this guarantee is maintained. Expressiveness growth is
+therefore safe *because* of the visitor — and this section must be re-read
+whenever the AST gains a node, since it is the argument, not the code, that
+drifts first.
 
 ## Residual: not closable by identifier allow/deny (Class B)
 

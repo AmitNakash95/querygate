@@ -71,6 +71,11 @@ from querygate.admin.metrics_history import (
     build_metrics_history_report,
 )
 from querygate.admin.observability import ObservabilityOverview, build_overview
+from querygate.admin.observed_shapes import (
+    ObservedShapeReport,
+    build_observed_shape_report,
+    observed_shape_store,
+)
 from querygate.api._errors import mask_unexpected, require_scope
 from querygate.audit.ledger import resolve_ledger_key
 from querygate.audit.worm_search import (
@@ -78,9 +83,17 @@ from querygate.audit.worm_search import (
     WormSearchResult,
     build_worm_search_result,
 )
+import pydantic as pyd
+
 from querygate.core.auth import Principal
+from querygate.core.exceptions import NotFoundError, QueryValidationError
 from querygate.core.config import AppConfig, MetricsHistoryBackend
-from querygate.core.scopes import ADMIN_AUDIT_WORM_SEARCH_SCOPE, ADMIN_OBSERVABILITY_READ_SCOPE
+from querygate.core.scopes import (
+    ADMIN_AUDIT_WORM_SEARCH_SCOPE,
+    ADMIN_OBSERVABILITY_READ_SCOPE,
+    ADMIN_SHAPES_READ_SCOPE,
+)
+from querygate.templates.models import QueryTemplate
 
 
 def _change_trend_thresholds(cfg: AppConfig) -> ChangeTrendThresholds:
@@ -236,5 +249,48 @@ def build_admin_observability_router(
                 limit=limit,
                 cursor=cursor,
             )
+
+    @router.get("/observed-shapes", response_model=ObservedShapeReport)
+    async def observability_observed_shapes(
+        connection_id: Optional[str] = Query(default=None),
+        principal_id: Optional[str] = Query(default=None),
+        principal: Principal = Depends(get_principal),
+    ):
+        # Its own scope — an observed shape names one principal's exact tables,
+        # columns and predicates, which is materially more specific than the
+        # aggregate reads above (see core/scopes.py).
+        require_scope(principal, ADMIN_SHAPES_READ_SCOPE)
+        return build_observed_shape_report(connection_id=connection_id, principal_id=principal_id)
+
+    @router.get("/observed-shapes/{shape_hash}/template-draft", response_model=QueryTemplate)
+    async def observability_observed_shape_draft(
+        shape_hash: str,
+        template_id: str = Query(
+            description="Identifier for the drafted template (a valid identifier)."
+        ),
+        connection_id: Optional[str] = Query(default=None),
+        principal_id: Optional[str] = Query(default=None),
+        description: Optional[str] = Query(default=None),
+        principal: Principal = Depends(get_principal),
+    ):
+        require_scope(principal, ADMIN_SHAPES_READ_SCOPE)
+        # Returns a draft for review; deliberately does NOT install it. Adding
+        # a template stays an edit to the templates file (or a governed config
+        # version), so the human review gate cannot be bypassed by calling
+        # this endpoint — the same quarantined-draft posture catalog
+        # governance takes for generated entries.
+        store = observed_shape_store()
+        if not store.enabled:
+            raise NotFoundError("Observed-shape recording is disabled.")
+        # A hash is not unique on its own (one shape run by two principals is
+        # two entries), so the optional filters are threaded through rather
+        # than drafting from whichever entry happened to be recorded first.
+        shape = store.get(shape_hash, connection_id=connection_id, principal_id=principal_id)
+        if shape is None:
+            raise NotFoundError(f"Unknown observed shape: {shape_hash!r}")
+        try:
+            return shape.to_template_draft(template_id, description=description)
+        except pyd.ValidationError as exc:
+            raise QueryValidationError(f"Invalid template draft: {exc}") from exc
 
     return router

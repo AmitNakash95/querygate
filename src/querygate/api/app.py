@@ -23,6 +23,7 @@ from querygate.api.catalog_governance_routes import build_catalog_governance_rou
 from querygate.api.help_routes import build_help_router
 from querygate.api.routes import build_router
 from querygate.audit.ledger import resolve_ledger_key
+from querygate.admin.observed_shapes import configure_observed_shape_store
 from querygate.audit.sinks import configure_audit_sink, reset_audit_sink
 from querygate.catalog.refresh import CatalogRefreshMonitor
 from querygate.catalog.usage import CatalogUsageLearningMonitor
@@ -84,6 +85,13 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
             )
             await worm_flush_monitor.start()
         app.state.worm_flush_monitor = worm_flush_monitor
+
+        # TODO.md item 195: size the observed-shape store from config before
+        # any request can record into it. Off by default; when disabled the
+        # store simply never receives a record() call.
+        configure_observed_shape_store(
+            conf.observed_shapes_max_entries, enabled=conf.observed_shapes_enabled
+        )
 
         configure_audit_sink(
             backend=conf.audit_sink_backend.value,
