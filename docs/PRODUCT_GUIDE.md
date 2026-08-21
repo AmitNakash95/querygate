@@ -4066,6 +4066,41 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-21 — Open-core is rejected; the whole product goes BSL, not a
+  carved-out core.** `docs/business/PRE_BSL_CLEANUP_PLAN.md` Phase 0 had left
+  this "a later, reversible decision." `docs/business/GTM_EXECUTION_PLAN.md`
+  §1 **supersedes that keep-it-reversible posture** and rejects open-core
+  outright, consciously, because the reasoning changed rather than being
+  forgotten: the features a split would hold back — per-human attribution,
+  the tamper-evident ledger, policy enforcement — **are the three pillars
+  themselves**, not a peripheral add-on a free tier could plausibly do
+  without. Splitting them is lose-lose — either the differentiators are given
+  away for free (the split bought nothing) or the free tier is crippled
+  enough that the 90-minute evaluation the whole go-to-market motion depends
+  on fails outright. BSL dissolves the tension instead of choosing a side of
+  it: everything is visible, runnable, and evaluable under one licence, and
+  the restriction is on **scale and resale**, never on **capability** — the
+  right axis for an enforcement product, since a crippled security tool is
+  dismissed rather than evaluated. Revisit only via a NORTH_STAR-level
+  decision, the same bar CLAUDE.md non-negotiable #8 sets for the non-goals
+  list.
+- **2026-08-21 — The product's category name is deliberately left undecided,
+  and "agent database firewall" is rejected as a candidate.** A category name
+  is worth choosing carefully, because whoever names one tends to own it —
+  but `docs/business/GTM_EXECUTION_PLAN.md` §5.3 sets one hard constraint any
+  candidate must clear first: **the name must not imply inspection.** The
+  firewall/inspection mental model is exactly what `docs/business/NORTH_STAR.md`
+  ("by construction, never by inspecting a string") and the flagship essay
+  exist to demolish, so a name that reintroduces it would undercut the
+  product's own positioning at the naming layer. "Agent database firewall"
+  was considered and rejected for two independent reasons, both checked
+  against existing usage rather than assumed: it collides with entrenched
+  incumbent categories on search (Oracle Audit Vault and Database Firewall,
+  Imperva SecureSphere own "database firewall"; Pipelock, Radware, and A10
+  already use "AI agent firewall" in active vendor positioning), and — the
+  more important reason — it *is* the inspection model, the one this product
+  is built to reject. No category name goes into `NORTH_STAR.md` until a
+  candidate clears this constraint.
 - **2026-08-21 — The dependency-licence gate records copyleft findings rather
   than blocking on them, and scopes itself to Python packages.** Ahead of the
   planned source-available licence flip, `make license-check`

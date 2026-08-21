@@ -5,30 +5,52 @@ actually expire when the product runs on the **customer's** infrastructure —
 where you don't control the machine, the clock, or the network. Companion to
 [docs/DISTRIBUTION_STRATEGY.md](DISTRIBUTION_STRATEGY.md).*
 
+> **Decided (2026-08-21, `docs/business/GTM_EXECUTION_PLAN.md` §3 Layer 2):**
+> the fail mode below is **soft enforcement, always — no fail-closed mode
+> exists, on any trigger, ever.** Shape A (the BSL Additional Use Grant) is
+> unlimited internal production use with no database ceiling, so there is no
+> production threshold left for a licence to self-check; the token becomes an
+> **entitlement token for the paid tier** (support, indemnification, Notary
+> access), not a compliance gate. QueryGate sits in the request path of a
+> production system — a licence check able to interrupt data access is itself
+> an availability risk a security review can find and fail, which is the
+> opposite of the product's own north-star metric. This supersedes the
+> grace-period-then-fail-closed recommendation this document originally made;
+> the general enforcement-model survey below is kept for reference, but read
+> the [Fail-open vs. fail-closed](#fail-open-vs-fail-closed-an-important-product-call)
+> and [What fits QueryGate specifically](#what-fits-querygate-specifically)
+> sections for the posture actually adopted. Logged as TODO.md item 197 —
+> not-before-customers, build it alongside item 198 (QueryGate Notary) when a
+> paying customer needs it, not before.
+
 ---
 
 ## TL;DR
 
 - **Any license check on the customer's hardware is a speed bump, not a wall.**
   The goal isn't to beat a determined thief (that's the **contract's** job) —
-  it's to make honest expiry automatic and make bypassing it a deliberate,
+  it's to make honest expiry visible and make bypassing it a deliberate,
   contract-breaching act.
-- **Six models:** (1) **signed offline license token** ⭐, (2) online
-  activation + heartbeat, (3) floating license server, (4) node/environment
-  binding, (5) hybrid crown-jewel-server-side (the only *airtight* one), (6)
-  legal-only (the baseline under all of them).
-- **Recommended stack for you, in order:** contract first (you have the EULA) →
-  **signed offline token** with an `expiry`, a grace period, and clock-tamper
-  detection → add a heartbeat later *only* if customers allow outbound network.
-  Skip the heavy stuff (#3/#4/#5) for a first pilot.
-- **Key design call — fail mode:** enforce a *definite signed expiry date*
-  (safe to fail-closed after a grace period), but **never brick a paying
-  customer just because you couldn't reach them right now** (fail-open when the
-  check is merely *unreachable*, act only on an affirmative "revoked").
+- **Six models surveyed below:** (1) **signed offline license token** ⭐, (2)
+  online activation + heartbeat, (3) floating license server, (4)
+  node/environment binding, (5) hybrid crown-jewel-server-side (the only
+  *airtight* one — and rejected for QueryGate, see below), (6) legal-only (the
+  baseline under all of them).
+- **Decided stack for QueryGate:** contract first (the licence/EULA) →
+  **signed offline token** with an `expiry`, soft-warn only, and clock-tamper
+  detection logged (never enforced by refusing to run). No heartbeat, no
+  online activation, ever — see the anti-patterns below.
+- **Key design call — fail mode, decided:** **soft enforcement only, with no
+  exception.** An absent, expired, or unverifiable token produces a startup
+  `WARN` log line, a field on the health endpoint, and a redaction-safe audit
+  event — and **never** refuses to start and **never** blocks or degrades a
+  query, on any trigger, including a definite signed expiry. There is no grace
+  period because there is no fail-closed state for a grace period to lead
+  into.
 - **QueryGate already has the machinery:** a license token is just another
-  signed JWT ([core/auth.py](../src/querygate/core/auth.py)), enforced by one
-  guard in front of `StructuredQueryService`, with clock-tamper detection
-  anchored in the audit stream — no new architecture needed.
+  signed JWT ([core/auth.py](../src/querygate/core/auth.py)), verified by one
+  non-blocking check in front of `StructuredQueryService`, with clock-tamper
+  detection anchored in the audit stream — no new architecture needed.
 
 ---
 
@@ -62,43 +84,46 @@ enforcement is to not ship the thing you're protecting at all (Model 5 / SaaS).
 
 ## The enforcement models
 
-| # | Model | How expiry is enforced | Works air-gapped? | Strength vs. tampering | Fit for you |
+| # | Model | How expiry is enforced | Works air-gapped? | Strength vs. tampering | Fit for QueryGate |
 |---|---|---|---|---|---|
-| **1** | **Signed offline license token** ⭐ | A cryptographically signed file with an `expiry` date the product verifies at startup + periodically | ✅ Yes | Medium (can't forge a date; *can* patch the check) | **Best default** |
-| **2** | **Online activation + heartbeat** | Product phones home to your license server to confirm the subscription is active; degrades after a grace period if it can't | ❌ Needs egress | Medium-high (adds revocation) | Great add-on to #1 |
-| **3** | **Floating license server** | A separate license-manager component (yours or hosted) hands out time/seat-limited leases the app checks out | ⚠️ On-prem server | Medium | Overkill until you sell seats |
-| **4** | **Node / environment binding** | License is locked to a machine fingerprint (hostname, cloud instance id, MAC) so a valid token can't be copied to other machines | ✅ Yes | Medium (anti-copy, not anti-patch) | A *modifier* on #1/#2 |
-| **5** | **Hybrid: keep a crown-jewel server-side** | An essential capability lives in *your* infra; no subscription → you cut it off | ❌ By design | **High** — real teeth | The airtight option |
-| **6** | **Legal-only** | No technical check; the written term + audit rights govern | ✅ Yes | None technically | The baseline under all of the above |
+| **1** | **Signed offline license token** ⭐ | A cryptographically signed file with an `expiry` date the product verifies at startup + periodically | ✅ Yes | Medium (can't forge a date; *can* patch the check) | **Decided default** (TODO.md item 197) |
+| **2** | **Online activation + heartbeat** | Product phones home to your license server to confirm the subscription is active; degrades after a grace period if it can't | ❌ Needs egress | Medium-high (adds revocation) | **Rejected, permanently.** Phone-home for licensing contradicts "credentials and data never leave your network." |
+| **3** | **Floating license server** | A separate license-manager component (yours or hosted) hands out time/seat-limited leases the app checks out | ⚠️ On-prem server | Medium | Not applicable — Shape A has no seat/instance ceiling to meter |
+| **4** | **Node / environment binding** | License is locked to a machine fingerprint (hostname, cloud instance id, MAC) so a valid token can't be copied to other machines | ✅ Yes | Medium (anti-copy, not anti-patch) | Not applicable — nothing to bind against under an unlimited grant |
+| **5** | **Hybrid: keep a crown-jewel server-side** | An essential capability lives in *your* infra; no subscription → you cut it off | ❌ By design | **High** — real teeth | **Rejected.** Would surrender Reach (self-hosted, data never leaves) — the real answer to "how do I meter this" is QueryGate Notary (TODO.md item 198), which anchors the audit ledger's head hash rather than gating execution |
+| **6** | **Legal-only** | No technical check; the written term + audit rights govern | ✅ Yes | None technically | The load-bearing layer under Shape A (`docs/business/GTM_EXECUTION_PLAN.md` §3 Layer 1) |
 
-### 1. Signed offline license token ⭐ (recommended default)
-You issue the customer a signed license file — think a JWT-style token whose
-payload carries `customer`, `issued_at`, `expiry`, and `scope/features`, signed
-with **your private key**. The product ships with your **public key embedded**
-and verifies the token's signature + expiry at startup and on a timer.
+### 1. Signed offline license token ⭐ (decided default — Ed25519, soft-warn only)
+You issue the customer a signed license file — an Ed25519-signed token whose
+payload carries `customer`, `issued_at`, `expiry`, and `tier/scope`. The
+product ships with your **public key embedded** and verifies the token's
+signature + expiry locally, at startup and on a timer, with **zero network
+calls**.
 
-- **Why it's the right default:** it needs no network (works in air-gapped
-  enterprise environments — a common on-prem requirement), the customer can't
-  forge a later expiry without your private key, and renewal is just "issue a
-  new token." It cleanly automates the honest non-renewal case.
+- **Why it's the right (and only) model here:** it needs no network (works in
+  air-gapped enterprise environments), the customer can't forge a later expiry
+  without the private key, and renewal is just "issue a new token." It
+  automates the honest non-renewal case *as visibility*, not as a gate — see
+  the decided fail mode above.
 - **Its limit:** the *check* runs client-side, so it can be patched out. That's
   the speed-bump reality above — acceptable, because it's paired with the
-  contract.
+  contract, and because QueryGate never asks this check to do more than warn.
 
-### 2. Online activation + heartbeat (phone-home)
+### 2. Online activation + heartbeat (phone-home) — **rejected, permanently**
 The product periodically calls your license API to confirm the subscription is
 still active, and degrades after a **grace period** if it can't confirm or is
 told the license was revoked.
 
-- **Adds:** real-time **revocation** (you can kill a license mid-term for
-  non-payment or breach — the offline token can't do this until it expires),
-  and a signal when tampering/clock-fiddling is happening.
-- **Costs:** requires **outbound network access** from the customer's
-  environment, which secure/air-gapped customers often forbid; your license
-  server becomes a dependency whose downtime must not brick paying customers
-  (hence the grace period). Raises data-privacy questions you must document.
-- **Best used as a layer on top of #1**, not instead of it: offline token is
-  the source of truth; the heartbeat adds revocation *when reachable*.
+- **Would add:** real-time **revocation** and a signal when tampering/
+  clock-fiddling is happening.
+- **Why it's rejected outright, not merely deferred:** `docs/business/GTM_EXECUTION_PLAN.md`
+  §3 lists "no phone-home telemetry — not for licensing, not for analytics" as
+  an absolute anti-pattern. The product's pitch is that credentials and data
+  never leave the customer's network; a licensing beacon originating inside
+  that network contradicts the claim on its face, and a security reviewer will
+  find it and ask about it. This is not a network-availability question
+  ("only if customers allow egress") — it is off the table regardless of what
+  a customer would permit.
 
 ### 3. Floating license server
 A dedicated license-manager component (the classic enterprise pattern —
@@ -114,15 +139,20 @@ per-server. Caveat: cloud/containerized environments have unstable fingerprints
 (autoscaling, new instance ids), so bind loosely (e.g. to a customer-set
 `deployment_id` you put in the token) or you'll generate support tickets.
 
-### 5. Hybrid — keep a crown-jewel server-side (the airtight option)
+### 5. Hybrid — keep a crown-jewel server-side (rejected)
 The only way to make enforcement *actually* airtight on self-hosted is to make
 the product genuinely depend on something only you can provide, so "stop paying
 → it stops working" isn't a check they can patch, it's a capability that's
-simply gone. For QueryGate, candidate crown jewels could be a **control plane**
-(config/policy/catalog distribution) or **signed update/catalog feeds** the
-product needs periodically. This shades toward a partial-SaaS model and is a
-product decision, not just an enforcement one — but it's the honest answer to
-"how do I make it truly enforceable."
+simply gone. **Rejected for QueryGate**: any crown jewel gating execution
+(config/policy/catalog distribution, a signed update feed the product needs
+periodically) would make the product depend on a hosted component to serve a
+query at all — exactly the availability dependency, and exactly the surrender
+of self-hosted Reach, that the decided fail mode above exists to avoid. The
+actual answer to "how do I attach revenue to something a customer can't
+replace by self-hosting it" is **QueryGate Notary** (TODO.md item 198,
+`docs/business/GTM_EXECUTION_PLAN.md` §4): it anchors the audit ledger's chain
+head hash — asynchronously, never in the request path, no data plane
+involvement — rather than gating the request path itself.
 
 ### 6. Legal-only (the baseline)
 Even with zero technical checks, the EULA's **term + termination + audit-rights
@@ -140,7 +170,7 @@ Design against the realistic ones, in rough order of how likely they are:
 | Attack | Likelihood | Defense |
 |---|---|---|
 | **Just not renewing** (honest lapse) | **Very high** | Signed token with `expiry` (#1) — the whole point |
-| **Clock rollback** — set the system clock back to before expiry | Medium | Persist a **monotonic high-water mark** of the latest time the product has ever observed (in a state file / the audit stream); refuse to run if the clock is now *before* it. Optionally trust signed time from a heartbeat (#2). |
+| **Clock rollback** — set the system clock back to before expiry | Medium | Persist a **monotonic high-water mark** of the latest time the product has ever observed (in a state file / the audit stream); if the clock is now *before* it, emit the same soft `WARN` + health-endpoint + audit event as any other unverifiable-token case — never refuse to run. |
 | **Copying one license to many deployments** | Medium | Node/deployment binding (#4) |
 | **Patching out the license check** | Low, but possible | Can't be fully prevented client-side. Obfuscation/compilation (Nuitka) raises the bar; the **contract** is the real deterrent; #5 removes the check as a target entirely |
 
@@ -156,22 +186,35 @@ When the license is expired, missing, or unverifiable, what should the product
 do?
 
 - **Fail-closed** — refuse to serve requests. Strongest enforcement, but a
-  false positive (clock skew, a renewal that arrived a day late, your heartbeat
-  server having an outage) **bricks a paying customer** and burns goodwill +
-  support time.
+  false positive (clock skew, a renewal that arrived a day late, a customer
+  who legitimately runs air-gapped) **bricks a paying customer** and burns
+  goodwill + support time. **Rejected for QueryGate, unconditionally** — see
+  below.
 - **Fail-open with loud warnings** — keep serving but log/alert/emit warnings.
-  Friendlier, weaker.
-- **Recommended middle path:**
-  - On a **definite expiry date from a validly-signed token** → **grace period**
-    (e.g. 7–14 days of degraded-but-working with escalating warnings), then
-    fail-closed. This is a certain fact, not an outage, so enforcing it is safe.
-  - On an **inability to reach the heartbeat** (#2) → **fail-open** within the
-    grace window (never punish a customer for *your* server's downtime or their
-    firewall); only act on an *affirmative* "revoked/expired" response.
+  Friendlier, weaker as a compliance lever. **This is the only mode QueryGate
+  implements.**
+- **Decided posture — soft enforcement only, no exception:** an absent,
+  expired, or unverifiable token — including a **definite signed expiry
+  date**, which an earlier draft of this document treated as "safe to
+  fail-closed after a grace period" — produces exactly four things and nothing
+  more: a startup `WARN` log line, a periodic `WARN` on the same timer the
+  token is re-checked, a field on the health endpoint, and a redaction-safe
+  audit event. **It never refuses to start and never blocks, delays, or
+  degrades a query, on any trigger.** There is no grace period, because a
+  grace period implies a fail-closed state waiting at the end of it, and none
+  exists.
 
-Distinguishing "the token itself says expired" (safe to enforce) from "I
-couldn't check right now" (don't punish) is the single most important design
-decision here.
+**Why "a certain fact, not an outage" is no longer the deciding line for
+QueryGate.** The earlier reasoning was right that a definite expiry is
+different in kind from an unreachable heartbeat — but the conclusion it drew
+(safe to enforce) doesn't hold for a product that sits in the request path of
+a customer's production database. QueryGate's own product identity is that it
+never becomes an availability dependency the way a database-firewall-style
+inspection layer would; a licence gate able to interrupt a query is exactly
+that dependency, self-inflicted, and a security reviewer evaluating QueryGate
+for a design partner would be right to flag it. The token's only job is
+honest, self-reported visibility (to the operator, and to us via the audit
+event) — never a lever we pull.
 
 ---
 
@@ -188,14 +231,17 @@ would reuse existing patterns rather than introduce new ones:
   low-risk to build.
 - **Model it as a composable interface** per the repo's own convention (the
   `Authenticator` / `DialectAdapter` / `AuditSink` pattern in CLAUDE.md): a
-  narrow `LicenseValidator` protocol with concrete variants — e.g.
-  `SignedTokenLicenseValidator` (#1) and, later, `HeartbeatLicenseValidator`
-  (#2) that can be **composed** the same way `CompositeAuthenticator` chains
-  authenticators. No `if mode == ...` branching.
-- **Check at startup + on a timer**, and gate the request pipeline. The
-  cleanest enforcement point is one guard in front of
-  `StructuredQueryService` (the single path to a database — CLAUDE.md), so an
-  expired license fails *every* query uniformly, with no second code path.
+  narrow `LicenseValidator` protocol with `SignedTokenLicenseValidator` (#1)
+  as its only planned concrete variant. **No heartbeat variant is planned or
+  wanted** — see the anti-patterns below; there is nothing for a
+  `HeartbeatLicenseValidator` to compose with, since QueryGate makes zero
+  network calls for licensing, ever.
+- **Check at startup + on a timer**, non-blockingly. The cleanest place to run
+  the check is alongside `StructuredQueryService` (the single path to a
+  database — CLAUDE.md) so the same startup/audit machinery sees every
+  request, but the check **never gates** that path — an expired or missing
+  license changes only the health-endpoint field and the audit trail, never
+  whether a query runs.
 - **Clock-tamper detection via the audit stream.** The audit log
   ([audit/sinks.py](../src/querygate/audit/sinks.py)) already persists ordered,
   redaction-safe events — a natural place to anchor the monotonic time
@@ -215,37 +261,43 @@ would reuse existing patterns rather than introduce new ones:
 
 ## Recommendation
 
-**Layered, in this order:**
+**Decided, in this order:**
 
-1. **Ship the contract first** (#6) — the EULA term + termination clause. This
-   is the load-bearing layer and you already have the EULA drafted.
-2. **Add a signed offline license token** (#1) with `expiry`, reusing the
-   existing JWT machinery, a grace period, and clock-tamper detection. This
-   automates the honest non-renewal case, works air-gapped, and is a natural
-   fit for the codebase.
-3. **Optionally add a heartbeat** (#2) later for real-time revocation — *only*
-   if your customers permit outbound network access, and always fail-open on
-   unreachable-vs-fail-closed on affirmatively-revoked.
-4. **Reach for hybrid/SaaS** (#5) only if a customer's value-at-risk is high
-   enough to justify keeping a crown jewel off their machine.
+1. **The contract is the load-bearing layer** (#6) — the licence + EULA term.
+   Under Shape A, revenue comes from the enterprise tier (indemnification +
+   support + security packet + Notary), not from a technical gate, so this
+   layer is doing more work than it would under a capped grant.
+2. **Add a signed offline license token** (#1, TODO.md item 197) with
+   `expiry`, reusing the existing JWT machinery, **soft-warn only**, and
+   clock-tamper detection that logs rather than enforces. Not before a
+   customer needs it; ships alongside item 198.
+3. **No heartbeat, ever** (#2) — a permanent rejection, not a "for now."
+4. **No hybrid/SaaS crown jewel** (#5) — a permanent rejection; **QueryGate
+   Notary** (item 198) is the actual answer to "what's the unpirateable
+   thing," and it anchors the audit ledger rather than gating execution.
 
-Skip #3/#4 for a first pilot — token + contract is the right-sized starting
-point.
+The rejections of #2 and #5 are permanent design positions, not scheduling —
+neither is being deferred, and neither is on the roadmap under any name. Item
+2 (the signed token, TODO.md item 197) and item 4's Notary reference (TODO.md
+item 198) *are* scheduling decisions: **not-before-customers**, meaning build
+when a paying customer needs them, not before — but even then, always
+soft-warn/asynchronous, never fail-closed or in the request path. That
+constraint does not lift with time or customer pressure; changing it would
+need a NORTH_STAR-level decision per CLAUDE.md non-negotiable #8.
 
 ---
 
-## Open decisions (yours to make)
+## Open decisions — closed
 
-- [ ] **Enforcement posture** — token-only (#1) for the first customer, or
-      token + heartbeat (#2)? (Depends on whether customers allow egress.)
-- [ ] **Fail mode + grace period length** — how many days of degraded operation
-      after a token expires before hard fail-closed?
-- [ ] **Per-what pricing** — per-deployment (drives node binding #4), per-seat
-      (drives a floating server #3, later), or per-customer flat?
-- [ ] **Build vs. defer** — implement the `SignedTokenLicenseValidator` now, or
-      keep licensing legal-only (#6) for the very first pilot and add the token
-      before customer #2?
+Every open decision this document originally posed is now settled by the
+owner (2026-08-21, `docs/business/GTM_EXECUTION_PLAN.md` §2.1/§3):
 
-*If you decide to build #1, say so and I can scope it as a TODO item and
-implement it against the existing auth/audit machinery — including the key
-generation, the token-issuing CLI, and the pipeline guard.*
+- ~~Enforcement posture — token-only or token + heartbeat?~~ **Token-only,
+  permanently.** No heartbeat variant will ever be built.
+- ~~Fail mode + grace period length?~~ **Soft-warn only, unconditionally — no
+  grace period, because there is no fail-closed state at the end of one.**
+- ~~Per-what pricing (drives node binding / a floating server)?~~ **Moot** —
+  Shape A has no production ceiling to meter; revenue is the enterprise
+  bundle (§3 Layer 3), not the licence.
+- ~~Build vs. defer?~~ **Defer.** Logged as TODO.md item 197, explicitly
+  not-before-customers; do not implement until a paying customer needs it.
