@@ -870,6 +870,14 @@ position.
   tooling, not a governance control — the same shape as
   `scripts/check_worklist.py`'s mirror check, and equally cheap.*
 
+- [ ] **196** — the container image's non-Python layers (Debian `bookworm` plus
+  Microsoft's `msodbcsql18` under `ACCEPT_EULA=Y`) have never been
+  licence-assessed. *Surfaced 2026-08-21 by the GTM WP1 dependency-licence pass,
+  which gates every package in `poetry.lock` and states this scope limit in its
+  own report rather than implying it is covered. Not flip-blocking; needed before
+  the first paid pilot's security review, which is the north-star metric. The
+  `msodbcsql18` EULA question is the one that could change the Dockerfile.*
+
 ---
 
 ## Decision-gated — NOT in the automated order

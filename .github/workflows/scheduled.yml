@@ -68,6 +68,21 @@ jobs:
       - name: Generate SBOM and audit locked dependencies
         run: poetry run python scripts/generate_sbom.py
 
+      # Five packages in docs/THIRD_PARTY_LICENSES.md have their licence recorded
+      # in security/third-party-license-overrides.json rather than read locally:
+      # four carry environment markers that do not apply on this runner, and one
+      # declares no licence metadata at all. Without
+      # this step those records would rest permanently on a hand-typed snapshot.
+      # It needs network, which is why it is NOT part of `make license-check` (that
+      # gate runs per-commit and must stay hermetic) and lives here instead, where
+      # a failure is actionable and a flaky network blocks nobody's commit.
+      # `if: always()` because the step above is the CVE gate — the nightly's
+      # most likely failure. Without this, a newly-disclosed CVE would also
+      # suppress licence-record verification for as long as it went unfixed.
+      - name: Re-verify recorded third-party licences against PyPI
+        if: always()
+        run: poetry run python scripts/check_licenses.py --verify-overrides
+
   image-scan:
     name: Trivy image CVE/secret/misconfig scan
     runs-on: ubuntu-latest

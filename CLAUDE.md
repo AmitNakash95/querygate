@@ -288,8 +288,8 @@ make test-load                         # bounded real-Postgres concurrency load 
 make test-soak SOAK_ROUNDS=100         # repeated guardrail load scenarios
 
 # Formatting
-poetry run black --check src/ tests/    # or: make format-check
-poetry run black src/ tests/            # or: make format
+poetry run black --check src/ tests/ examples/ scripts/   # or: make format-check
+poetry run black src/ tests/ examples/ scripts/           # or: make format
 
 # Demo database (for manual/local verification against a real Postgres)
 docker compose up -d                    # starts querygate-demo-db on localhost:5433, auto-seeded

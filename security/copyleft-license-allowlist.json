@@ -1,0 +1,67 @@
+[
+  {
+    "package": "certifi",
+    "license": "MPL-2.0",
+    "redistributed": true,
+    "facts": {
+      "required_by": ["httpcore", "httpx", "requests", "snowflake-connector-python"],
+      "declared_direct_dependency": false,
+      "imported_by_querygate_source": false
+    },
+    "review_status": "draft",
+    "reason": "DRAFTED ANALYSIS, NOT A LEGAL OPINION — owner and counsel confirmation required before the licence flip. THE ONLY NON-PERMISSIVE LICENCE IN THE REDISTRIBUTED SET. certifi is the Mozilla CA root bundle; of the requirers listed above, httpx/httpcore/requests are what carry it into the `main` group, while snowflake-connector-python is dev-only. Redistribution surface, stated precisely, because this is the premise of the question: the published container image contains it (`Dockerfile` runs `poetry install --no-root --only main`). The wheel and sdist contain no dependencies at all, and QueryGate's wheel does not even declare certifi — it is not among the `Requires-Dist` entries in the built wheel's METADATA (verified 2026-08-21 against `dist/querygate-0.1.0-py3-none-any.whl`: 24 direct requirements, certifi not one of them); `pip` resolves it transitively, so a `pip install querygate` still fetches it from PyPI. MPL-2.0 is file-level (weak) copyleft: §3.3 permits distributing a Larger Work under other terms provided the MPL-covered files stay under MPL-2.0 and their source stays available. QueryGate ships certifi verbatim as its own installed package, unmodified and not derived from — httpx/httpcore/requests load it only for the default CA bundle — so no QueryGate source file becomes MPL-covered. This is the one dependency-licence question that must be put to counsel alongside the BSL text.",
+    "added": "2026-08-21"
+  },
+  {
+    "package": "chardet",
+    "license": "LGPL-2.0-or-later",
+    "redistributed": false,
+    "facts": {
+      "required_by": ["cyclonedx-bom"],
+      "declared_direct_dependency": false,
+      "imported_by_querygate_source": false
+    },
+    "review_status": "draft",
+    "reason": "DRAFTED ANALYSIS, NOT A LEGAL OPINION — proposed as not requiring a counsel question; owner to confirm that routing as well as the substance. The only LGPL (weak, library-level copyleft) licence anywhere in poetry.lock, and it is NOT redistributed. On the identifier: chardet declares the Trove classifier `GNU Lesser General Public License v2 or later (LGPLv2+)`, which this gate maps to LGPL-2.0-or-later, so that is what is recorded; its bundled LICENSE file is in fact `GNU LESSER GENERAL PUBLIC LICENSE Version 2.1`. Same tier either way — the record deliberately reports the declared classifier rather than a point version the metadata does not state. `cyclonedx-bom`, the requirer above, is the dev-group tool `scripts/generate_sbom.py` uses to build the SBOM. chardet is absent from the `main` group, so it is absent from the container image and from the wheel's and sdist's declared requirements. LGPL obligations attach on distribution of the library; QueryGate distributes neither chardet nor anything derived from it. Re-review immediately if it ever enters the `main` group — the gate fails automatically in that case, because this entry records `redistributed: false`.",
+    "added": "2026-08-21"
+  },
+  {
+    "package": "fqdn",
+    "license": "MPL-2.0",
+    "redistributed": false,
+    "facts": {
+      "required_by": ["jsonschema"],
+      "declared_direct_dependency": false,
+      "imported_by_querygate_source": false
+    },
+    "review_status": "draft",
+    "reason": "DRAFTED ANALYSIS, NOT A LEGAL OPINION — proposed as not requiring a counsel question; owner to confirm. Dev-only and not redistributed: absent from the `main` group, so absent from the container image and from the wheel's and sdist's declared requirements. It reaches the lock through `jsonschema[format-nongpl]`, which `cyclonedx-python-lib` requires for its validation extra — which is why the requirer above is jsonschema, the package that declares the optional dependency, rather than cyclonedx-python-lib, which selects the extra. Note that plain `jsonschema` IS in the `main` group (via `mcp`), but without the `format-nongpl` extra, which is why fqdn resolves to `dev` alone. MPL-2.0 is file-level (weak) copyleft whose obligations run with distribution of the covered files; QueryGate distributes none of them. Stated in full rather than by reference to the certifi record, so a correction there cannot silently propagate here.",
+    "added": "2026-08-21"
+  },
+  {
+    "package": "hypothesis",
+    "license": "MPL-2.0",
+    "redistributed": false,
+    "facts": {
+      "required_by": [],
+      "declared_direct_dependency": true,
+      "imported_by_querygate_source": false
+    },
+    "review_status": "draft",
+    "reason": "DRAFTED ANALYSIS, NOT A LEGAL OPINION — proposed as not requiring a counsel question; owner to confirm. Dev-only and not redistributed. The only record here that QueryGate declares directly, in `[tool.poetry.group.dev.dependencies]` — nothing else in the lock depends on it. It is imported by the property-based tests in `tests/unit/test_compiler_properties.py`, the only module in the repository that imports it; note that is a test module, not `src/querygate/`, which is what `imported_by_querygate_source` tracks. MPL-2.0 is file-level (weak) copyleft whose obligations run with distribution of the covered files; a test-time tool that never enters the `main` group is never distributed.",
+    "added": "2026-08-21"
+  },
+  {
+    "package": "pathspec",
+    "license": "MPL-2.0",
+    "redistributed": false,
+    "facts": {
+      "required_by": ["black"],
+      "declared_direct_dependency": false,
+      "imported_by_querygate_source": false
+    },
+    "review_status": "draft",
+    "reason": "DRAFTED ANALYSIS, NOT A LEGAL OPINION — proposed as not requiring a counsel question; owner to confirm. Dev-only and not redistributed. Its sole requirer, `black`, is the formatter. MPL-2.0 is file-level (weak) copyleft whose obligations run with distribution of the covered files; a build-time tool that never enters the `main` group is never distributed.",
+    "added": "2026-08-21"
+  }
+]

@@ -28,6 +28,7 @@ that weakened any of them would fail the build.
 | **SAST** | Static security analysis of source | **Bandit** + **Semgrep OSS** (`p/python`, `p/security-audit`, `p/owasp-top-ten`) | ✅ Clean (deny-by-default) | `make sast` + `make semgrep` |
 | **Dependencies** | Known-CVE audit of the exact shipped set | **pip-audit** against `poetry.lock` `main` group | ✅ Clean — **1 reviewed allowlist entry** (asyncmy, unreachable codepath) | `make sbom` |
 | **SBOM** | Software bill of materials | **CycloneDX** | ✅ Generated per release | `make sbom` |
+| **Licences** | Third-party licence inventory of the locked **Python** packages ([report](THIRD_PARTY_LICENSES.md)) | Deny-by-default tier policy + individually recorded exceptions | 🟡 No GPL/AGPL among locked Python packages, in either group; **1 weak-copyleft (MPL-2.0 `certifi`) in the redistributed set, review pending**. Python packages only — the image's Debian/`msodbcsql18` layers are unassessed (TODO item 196) | `make license-check` |
 | **Container image** | OS + library CVEs, secrets, misconfig | **Trivy** on the shipped image | ✅ **0 HIGH/CRITICAL** (no exceptions) | `make scan-image` |
 | **Secrets** | No credential ever committed | **gitleaks** over full git history | ✅ Clean | `make scan-secrets` |
 | **DAST** | Fuzz the API for validation bypass / crashes | **Schemathesis** against the live OpenAPI schema | ✅ 0 server errors, 0 bypass | `make test-dast` |
@@ -36,7 +37,8 @@ that weakened any of them would fail the build.
 | **Credential isolation** | No secret on any returned model | Asserted against live OpenAPI + MCP schemas | ✅ Enforced | `pytest tests/unit/test_credential_redaction.py` |
 | **Best-practices self-assessment** | OpenSSF criteria maturity | **OpenSSF Best Practices** criteria (self-assessed) | 🟡 Self-assessed | see [below](#external-attestations) |
 
-Legend: ✅ implemented and gating CI · 🟡 self-assessed / not yet an external award.
+Legend: ✅ implemented and gating CI · 🟡 self-assessed / not yet an external
+award, **or** gating but with an open finding recorded in the row.
 
 ---
 
@@ -271,6 +273,7 @@ make sast            # Bandit static analysis
 make semgrep         # Semgrep OSS rulesets (uses the official image if not installed)
 make scan-secrets    # gitleaks over full history
 make sbom            # CycloneDX SBOM + pip-audit dependency gate
+make license-check   # third-party licence inventory gate (docs/THIRD_PARTY_LICENSES.md)
 make test-dast       # Schemathesis OpenAPI fuzzing
 make test-security   # adversarial regression suite
 make scan-image      # Trivy scan of the built container image
@@ -278,13 +281,16 @@ make security-scan   # sast + semgrep + scan-secrets + sbom + test-dast in one s
                      # (test-security and scan-image stay separate)
 ```
 
-*Last reviewed: 2026-08-11 — every row in the table above was independently
-re-run against this exact tree that day, not carried forward from a prior CI
-result: `make sast` (Bandit, clean), `make semgrep` (0 findings), `make
+*Last reviewed: 2026-08-11 — every row in the table above **except Licences**
+was independently re-run against the tree at that commit, not carried forward
+from a prior CI result: `make sast` (Bandit, clean), `make semgrep` (0 findings), `make
 scan-secrets` (gitleaks, 352 commits scanned, no leaks), `poetry build` +
 `make sbom` (pip-audit clean, 1 allowlisted entry as documented), `make
 scan-image` (Trivy, debian 12.15 base + 57 Python packages, 0
 vulnerabilities), `make test-security` (480 tests), and `make test-dast`
-(1755/1755 checks, 72 operations). (Bump this date whenever a row changes.)
+(1755/1755 checks, 72 operations). The **Licences** row was added later, on
+2026-08-21, and re-run that day (`make license-check`: 138 locked packages, 60
+redistributed, report current); the other rows were not re-run then and still
+carry their 2026-08-11 evidence. (Bump this date whenever a row changes.)
 Keep this page honest with the `claim-verify` workflow — every row must
 point at a gate that exists and passes.*
