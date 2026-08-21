@@ -153,7 +153,7 @@ product commitment as much as a licensing one: QueryGate sits in the request pat
 between an agent and your operational database, and a beacon originating inside
 a customer's network would contradict the entire premise.
 
-You do not have to take that on trust, and you should not: `tests/security/test_no_phone_home.py` fails the build if a QueryGate-controlled hostname, a licence-server or activation endpoint, or a telemetry URL ever appears in shipped source. Run `grep -rniE 'querygate\.(com|io|dev|net)' src/` yourself — it is a one-line check and it is meant to be run.
+You do not have to take that on trust, and you should not: `tests/security/test_no_phone_home.py` fails the build if a QueryGate-controlled hostname, a licence-server or activation endpoint, or a telemetry URL ever appears in shipped source. One honest boundary on that: the claim is about **QueryGate**. The container image also carries Microsoft's ODBC driver for SQL Server, whose own licence terms contemplate data collection; we have not audited that third-party component's behaviour and do not speak for it. See `docs/CONTAINER_IMAGE_LICENCES.md`. Run `grep -rniE 'querygate\.(com|io|dev|net)' src/` yourself — it is a one-line check and it is meant to be run.
 
 There is also no kill switch, no time bomb, and no check that can refuse to start
 or block a query. If a licensing feature is ever added for the paid tier, it will

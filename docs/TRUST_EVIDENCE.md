@@ -649,14 +649,26 @@ reports with corresponding seriousness.
 
 **Please do not open a public issue for security vulnerabilities.**
 
-Report privately to the maintainers:
+**Preferred channel — GitHub private vulnerability reporting.** Open a
+[private security advisory](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability)
+on this repository. It is private to you and the maintainers, it threads the
+whole report and fix in one place, and it is the channel we monitor.
 
-- Email: **security@querygate.invalid** (subject line prefixed `[QueryGate Security]`)
-- Or, if you have repository access, open a
-  [GitHub private security advisory](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability).
+**Email — not yet available.** A dedicated
+`security@<DOMAIN — to be registered>` alias is the intended second channel and
+**does not exist yet**; there is no legal entity or domain behind QueryGate at
+the time of writing. Until this placeholder is replaced with a real address,
+the GitHub advisory above is the only reporting channel, and we would rather
+say that plainly than publish an address that nobody answers. A personal
+mailbox previously stood here; it was removed deliberately, because "who
+answers a vulnerability report, and how" is a property of the project, not of
+one person's inbox.
 
-> Maintainer note: replace the address above with a dedicated
-> `security@<your-domain>` alias before wider distribution.
+> Maintainer checklist before wider distribution: register the domain, stand up
+> the `security@` alias with a monitored inbox and a documented on-call owner,
+> replace the placeholder above, enable **Settings → Code security → Private
+> vulnerability reporting** on the public repository, and re-run
+> `make trust-page` so `docs/TRUST_EVIDENCE.md` picks up the change.
 
 Please include:
 

@@ -1118,8 +1118,9 @@ def render(
         "**Scope limit.** This inventory covers Python packages in `poetry.lock` only. The "
         "container image additionally layers a Debian `bookworm` userland and Microsoft's "
         "`msodbcsql18` ODBC driver (installed under `ACCEPT_EULA=Y`, its own proprietary "
-        "terms). Those are not Python packages, are not in `poetry.lock`, and are not "
-        "assessed here."
+        "terms). Those are not Python packages and are not in `poetry.lock`, so this gate "
+        "does not see them — they are assessed separately in "
+        "`docs/CONTAINER_IMAGE_LICENCES.md`."
     )
     add("")
     add(
