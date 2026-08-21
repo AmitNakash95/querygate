@@ -47,7 +47,16 @@ ENV PYTHONUNBUFFERED=1 \
 # trusted.gpg.d/*.asc — Debian's apt (via sqv) rejects an ASCII-armored key
 # there. /usr/share/keyrings/microsoft-prod.gpg is the exact path
 # Microsoft's own prod.list already references via signed-by=.
-RUN apt-get update \
+# `msodbcsql18` is proprietary and accepted under EULA, and the base image's
+# "slim" dpkg config path-excludes /usr/share/doc/*, so the driver's own
+# LICENSE.txt was declared by the package but never landed in the image — we
+# were shipping Microsoft's driver without its licence text. The path-include
+# below must be written BEFORE the install for dpkg to honour it. Measured
+# 2026-08-21 (TODO item 196): 124 OS packages, of which msodbcsql18 was one of
+# only three with no copyright file present.
+RUN printf 'path-include /usr/share/doc/msodbcsql18/*\n' \
+      > /etc/dpkg/dpkg.cfg.d/msodbcsql18-licence \
+    && apt-get update \
     && apt-get install -y --no-install-recommends curl gnupg unixodbc \
     && curl -sSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg \
     && curl -sSL https://packages.microsoft.com/config/debian/12/prod.list -o /etc/apt/sources.list.d/mssql-release.list \
