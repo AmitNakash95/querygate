@@ -7,10 +7,18 @@
  stamped. Nothing in this file is legal advice, and no one should rely on it
  as QueryGate's licence until this banner is removed.
 
- Two values are unknown and are left as literal placeholders below — the
- Licensor placeholder appears three times (the parameter, the copyright line,
- and the alternative-licensing contact) and all three must be filled together:
-   * <LICENSOR — legal entity, to be supplied>
+ WHAT GOVERNS IN THE MEANTIME: this draft grants nothing. Until the banner is
+ removed, QueryGate remains proprietary and all rights are reserved — the terms
+ previously carried by this file, and the EULA in EULA.en.md / EULA.he.md,
+ continue to govern. The repository is private; no public licence is granted by
+ the presence of this draft.
+
+ Four values are unknown and are left as literal placeholders below. The
+ Licensor placeholder appears twice (the parameter and the copyright line) and
+ both must be filled together; the alternative-licensing line needs a real
+ channel, not a company name, so it is its own placeholder:
+   * <LICENSOR — legal entity, to be supplied>          (x2)
+   * <LICENSING_CONTACT — email address or URL>
    * <VERSION — stamped per release>
    * <CHANGE_DATE — stamped per release>
  Change Date stamping is a separate, later work package; see docs/RELEASING.md.
@@ -51,7 +59,7 @@ Change Date:          <CHANGE_DATE — stamped per release>
 Change License:       Apache License, Version 2.0
 
 For information about alternative licensing arrangements for the Licensed Work,
-please contact <LICENSOR — legal entity, to be supplied>.
+please contact <LICENSING_CONTACT — email address or URL>.
 
 Notice
 

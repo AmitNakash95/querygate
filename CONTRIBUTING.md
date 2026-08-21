@@ -99,7 +99,8 @@ hook, so drift fails fast.
 
 ## Licence and the Contributor Licence Agreement
 
-QueryGate is licensed under the **Business Source License 1.1** — see
+QueryGate **will be** licensed under the **Business Source License 1.1** —
+`LICENSE` is a draft **not yet in force**, and QueryGate is proprietary today. See
 [`LICENSE`](LICENSE) and the plain-language
 [licensing FAQ](docs/LICENSING_FAQ.md). Source-available, not open source; each
 version converts to Apache-2.0 four years after it ships.

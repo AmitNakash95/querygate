@@ -73,6 +73,11 @@ RUN rm -rf /usr/local/lib/python3.11/site-packages/setuptools* \
     /usr/local/lib/python3.11/site-packages/_distutils_hack \
     /usr/local/lib/python3.11/site-packages/distutils-precedence.pth
 RUN addgroup --system querygate && adduser --system --ingroup querygate querygate
+# BSL 1.1 requires the licence to be displayed conspicuously on each copy of the
+# Licensed Work, and the container image is how QueryGate is distributed. The
+# wheel already carries it (`License-File: LICENSE` in its METADATA); the image
+# did not until this line. Asserted by `scripts/check_release_artifacts.py`.
+COPY LICENSE /app/LICENSE
 COPY --from=builder /app/.venv /app/.venv
 RUN chown -R querygate:querygate /app
 USER querygate

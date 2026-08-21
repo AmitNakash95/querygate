@@ -47,7 +47,7 @@ that weakened any of them would fail the build.
 | **Container image** | OS + library CVEs, secrets, misconfig | **Trivy** on the shipped image | ✅ **0 HIGH/CRITICAL** (no exceptions) | `make scan-image` |
 | **Secrets** | No credential ever committed | **gitleaks** over full git history | ✅ Clean | `make scan-secrets` |
 | **DAST** | Fuzz the API for validation bypass / crashes | **Schemathesis** against the live OpenAPI schema | ✅ 0 server errors, 0 bypass | `make test-dast` |
-| **Adversarial suite** | Known bypass classes as regressions | Purpose-built pytest suite (`-m security`) | ✅ 518 tests | `make test-security` |
+| **Adversarial suite** | Known bypass classes as regressions | Purpose-built pytest suite (`-m security`) | ✅ 550 tests | `make test-security` |
 | **Reliability** | Guardrails hold under real concurrent load | Real-Postgres soak/load gates | ✅ Enforced in CI | `make test-load` / `make test-soak` |
 | **Credential isolation** | No secret on any returned model | Asserted against live OpenAPI + MCP schemas | ✅ Enforced | `pytest tests/unit/test_credential_redaction.py` |
 | **Best-practices self-assessment** | OpenSSF criteria maturity | **OpenSSF Best Practices** criteria (self-assessed) | 🟡 Self-assessed | see [below](#external-attestations) |
@@ -185,7 +185,7 @@ hand-written adversarial suite.
 ## Adversarial regression suite
 
 Beyond automated fuzzing, QueryGate carries a purpose-built adversarial suite
-(518 tests, `pytest -m security`) encoding specific known bypass classes:
+(550 tests, `pytest -m security`) encoding specific known bypass classes:
 denied-column inference, undeclared-table smuggling, predicate-as-SQL,
 schema-discovery leaks, policy-cap boundary breaches, and audit no-leak checks.
 New attack vectors are added here as regressions (see the `adversarial-probe`
@@ -302,7 +302,7 @@ from a prior CI result: `make sast` (Bandit, clean), `make semgrep` (0 findings)
 scan-secrets` (gitleaks, 352 commits scanned, no leaks), `poetry build` +
 `make sbom` (pip-audit clean, 1 allowlisted entry as documented), `make
 scan-image` (Trivy, debian 12.15 base + 57 Python packages, 0
-vulnerabilities), `make test-security` (518 tests), and `make test-dast`
+vulnerabilities), `make test-security` (550 tests), and `make test-dast`
 (1755/1755 checks, 72 operations). The **Licences** row was added later, on
 2026-08-21, and re-run that day (`make license-check`: 138 locked packages, 60
 redistributed, report current); the other rows were not re-run then and still

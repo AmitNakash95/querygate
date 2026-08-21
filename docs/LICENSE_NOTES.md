@@ -7,19 +7,22 @@
 
 **What is being reviewed.** `LICENSE` in the repository root: the Business
 Source License 1.1 template with QueryGate's four parameters filled in. The
-template body (everything from `Business Source License 1.1` / `Terms` to the
-end of `Covenants of Licensor`) is reproduced **byte-for-byte** from SPDX's
-canonical `BUSL-1.1` text and has not been altered — the review is of the
-*parameters* and of the two blanks, not of the template.
+template body from `Terms` to the end of `Covenants of Licensor` is reproduced
+**byte-for-byte** from SPDX's canonical `BUSL-1.1` text. Two deviations sit
+*outside* that body and are deliberate: the MariaDB licence-text copyright lines
+are placed above `Parameters` (adopter convention — CockroachDB and MaxScale
+both do this), and the alternative-licensing line reads "please contact" rather
+than the template's "please visit:", as HashiCorp's does. The review is of the
+*parameters* and of the four blanks, not of the template body.
 
 ## The parameters as drafted
 
 | Parameter | Value |
 |---|---|
 | Licensor | **BLANK** — `<LICENSOR — legal entity, to be supplied>`. The entity does not exist yet. |
-| Licensed Work | QueryGate, all versions. |
+| Licensed Work | QueryGate *at the release being licensed* (e.g. `QueryGate 0.1.0`) — see "Licensed Work is per release" below. |
 | Additional Use Grant | "Shape A" — unlimited internal production use, no hosted/managed/embedded resale, with an MSP carve-out. Full text in `LICENSE`. |
-| Change Date | **BLANK** — `<CHANGE_DATE — stamped per release, see docs/RELEASING.md>`. The policy is four years per release; each release is to stamp its own concrete date. |
+| Change Date | **BLANK** — `<CHANGE_DATE — stamped per release>`. The policy is four years per release; each release is to stamp its own concrete date. |
 | Change License | Apache License, Version 2.0. |
 
 ## Questions for counsel, in priority order
