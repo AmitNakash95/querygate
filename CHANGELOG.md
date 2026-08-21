@@ -624,6 +624,41 @@ All notable changes to QueryGate are documented here.
 
 ### Security
 
+- **The cumulative disclosure budget's per-shape cap was evadable, and the
+  refusal handed over the evasion strategy** (TODO.md items 186 and 187). A
+  prober could mint a fresh shape bucket per probe — and so never trip
+  `max_shape_repeats_per_window` at any configured value — by walking a select
+  alias and its `ORDER BY` reference, renaming a CTE, renaming a table alias
+  inside a nested scope, or reordering a list. Measured at **20 distinct
+  fingerprints for 20 probes**; it now measures 1. `shape_fingerprint` collapses
+  every bare reference to a caller-authored name to one token, resolves table
+  aliases from every scope rather than only the outermost, sorts every list, and
+  ignores sort direction. Separately, the refusal message named which cap
+  tripped, its configured value and the window length — which directly answered
+  "will varying my shape help?" — and is now byte-identical for both caps;
+  `quota_kind` remains on the exception for metrics and the operator breakdown.
+  **Upgrade impact:** shape fingerprints changed, so an in-flight rolling window
+  resets once on deploy. If you set only `max_aggregate_queries_per_window` on
+  the previous advice that the per-shape cap was not load-bearing, both caps are
+  now worth setting.
+- **The disclosure budget's Redis script failed `CROSSSLOT` on Redis Cluster**
+  (TODO.md item 192), turning a deliberately fail-closed privacy control into a
+  hard outage on exactly the aggregate queries it was enabled to protect. It is
+  the only limiter that passes several KEYS to one Lua script; those keys now
+  carry a per-connection hash tag so they land in one slot. Neither `fakeredis`
+  nor a single-node Redis can observe this, so the guard is a source-level
+  assertion. **Upgrade impact:** the Redis key format changed; existing budget
+  keys expire on their own window-length TTL.
+- **A principal policy override could pass `validate-config` and then 500 every
+  query for that principal** (TODO.md item 188). `policy/loader.py` validated a
+  per-principal override against the `default:` layer only, which was harmless
+  until `Policy` gained its first cross-layer validator: a default that sets
+  `min_group_size`, a connection override that removes it, and a principal
+  override that sets a disclosure cap each validated alone, loaded clean, and
+  then raised at request time as a generic 500. Overrides are now validated
+  against every merge base `PolicyStore.get` can actually resolve, so the
+  failure lands at load time with an actionable message.
+
 - **A denied-write-column configured with any capitalization other than
   all-lowercase (e.g. `{"Orders": [...]}`) was silently never enforced,
   regardless of the write statement's own table casing** (TODO.md item

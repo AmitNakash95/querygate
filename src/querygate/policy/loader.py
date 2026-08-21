@@ -21,6 +21,22 @@ from querygate.policy.models import Policy
 PrincipalOverrides = Dict[str, Dict[str, dict]]
 
 
+def _merge_bases(
+    connection_id: str, *, default: Policy, overrides: dict[str, Policy]
+) -> list[Policy]:
+    """Every base `PolicyStore.get` could merge this principal override onto.
+
+    A connection-specific entry has exactly one: that connection's own
+    `connections:` override, or the default when it has none — which is
+    `overrides.get(connection_id, default)`, the same expression `get()` uses. A
+    `"*"` entry applies to every connection, so it must satisfy every base,
+    including the bare default for connections with no override entry at all.
+    """
+    if connection_id != "*":
+        return [overrides.get(connection_id, default)]
+    return [default, *overrides.values()]
+
+
 class PolicyStore:
     def __init__(
         self,
@@ -54,12 +70,31 @@ class PolicyStore:
             resolved: Dict[str, dict] = {}
             for connection_id, entry in (per_connection or {}).items():
                 entry = entry or {}
-                # Fail fast on a typo'd field name or wrong type here, at load
-                # time, rather than the first time a matching principal
-                # queries — merged against default_raw as a validity check
-                # only; the real merge base at request time may instead be
-                # this connection's own `connections:` override (see get()).
-                Policy.model_validate({**default_raw, **entry})
+                # Fail fast at load time, against EVERY merge base this override
+                # can actually land on at request time — not just the default
+                # (TODO.md item 188).
+                #
+                # Validating against `default_raw` alone was harmless while
+                # `Policy` had no cross-field constraint: a typo'd field name or
+                # a wrong type fails identically whatever the base is. Item 179
+                # added `_disclosure_budget_needs_a_k_floor`, the first validator
+                # that can fail on a COMBINATION of two individually-valid
+                # layers, and with it this shortcut became a real defect:
+                # `default:` sets `min_group_size: 5`, `connections.foo:` sets it
+                # back to `null`, `principals.alice.foo:` sets
+                # `max_shape_repeats_per_window` — every layer valid, the file
+                # loads clean, `validate-config` passes, and then the first query
+                # alice issues on `foo` raises inside
+                # `StructuredQueryService._get_policy()`, which `mask_unexpected`
+                # turns into a generic 500. One principal fully offline, on a
+                # config the CLI accepted, with an error nobody can act on.
+                #
+                # So mirror `get()` exactly: it merges the override onto the
+                # RESOLVED base (`base.model_dump()`), and the base is this
+                # connection's own override when it has one. A `"*"` entry can
+                # land on any of them, so it is checked against all.
+                for base in _merge_bases(connection_id, default=default, overrides=overrides):
+                    Policy.model_validate({**base.model_dump(), **entry})
                 resolved[connection_id] = entry
             principal_overrides[subject] = resolved
 
