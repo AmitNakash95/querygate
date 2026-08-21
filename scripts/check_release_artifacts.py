@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import tarfile
 import tomllib
 import zipfile
@@ -40,6 +41,27 @@ def main() -> None:
     invalid = _invalid_members(wheel_members + sdist_members)
     if invalid:
         raise SystemExit("release artifact check failed: forbidden members: " + ", ".join(invalid))
+
+    # BSL 1.1 requires the licence to be displayed conspicuously on each copy of
+    # the Licensed Work, so every artifact that carries the code must carry it.
+    # The wheel gets it from `License-File` metadata and the sdist from its own
+    # root; the container image needs an explicit `COPY LICENSE` in `Dockerfile`,
+    # which is asserted here rather than left to a reader noticing its absence.
+    if not any(name.endswith("licenses/LICENSE") for name in wheel_members):
+        raise SystemExit(
+            "release artifact check failed: the wheel carries no LICENSE. BSL 1.1 requires "
+            "the licence on each copy of the Licensed Work — add `license-files` to "
+            "pyproject.toml's [project] table."
+        )
+    if not any(name.endswith("/LICENSE") for name in sdist_members):
+        raise SystemExit("release artifact check failed: the sdist carries no LICENSE")
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    if not re.search(r"^COPY\s+LICENSE\b", dockerfile, re.M):
+        raise SystemExit(
+            "release artifact check failed: Dockerfile does not COPY LICENSE into the image. "
+            "The image is how QueryGate is distributed, and BSL 1.1 requires the licence on "
+            "each copy."
+        )
 
     required_wheel = {
         "querygate/__init__.py",

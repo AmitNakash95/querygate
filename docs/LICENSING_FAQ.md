@@ -6,7 +6,8 @@
 > `LICENSE` ever disagree, `LICENSE` governs. Drafting notes for counsel are in
 > [`LICENSE_NOTES.md`](LICENSE_NOTES.md).
 
-## Internal production use is free, forever, with no limit.
+## Internal production use is free, forever, for every version released under this
+licence, with no limit.
 
 That is the headline and it has no asterisk. Run QueryGate in production, inside
 your organisation, against as many databases, with as many users, at whatever
@@ -14,7 +15,8 @@ scale you like, for as long as you like. Pay nothing. There is no user cap, no
 database cap, no core cap, no seat count, no trial period, and no licence key to
 obtain.
 
-QueryGate is licensed under the **Business Source License 1.1** (BSL 1.1). BSL
+QueryGate **will be** licensed under the **Business Source License 1.1** (BSL 1.1)
+— `LICENSE` is a draft not yet in force. BSL
 is a source-available licence, not an open-source licence — the difference is
 that one specific commercial use is restricted, and that after a fixed date each
 version becomes fully open source under Apache-2.0.
@@ -23,7 +25,8 @@ version becomes fully open source under Apache-2.0.
 
 ## What exactly is prohibited?
 
-One thing: **selling QueryGate itself to other people as a service.**
+One thing: **providing QueryGate itself to third parties** — hosted, managed,
+or embedded, whether or not you charge for it.
 
 The grant permits production use "provided that you do not provide the Licensed
 Work to third parties on a hosted, managed, or embedded basis, whether or not
@@ -40,21 +43,29 @@ So this is not allowed:
 And this **is** allowed, without asking anyone:
 
 - Running it in production for your own organisation, at any scale.
-- Running it for your subsidiaries, your parent, and your sister companies — the
-  licence's definition of "You" covers everything under common control with you.
+- Running it for your subsidiaries, your parent, and your sister companies. The
+  licence's definition of "You" covers everything under common control with you;
+  note that clause is drafted to stop a group structure being used to *fragment*
+  the grant, and affiliate use follows from it as a consequence.
 - Running it for your internal customers: other teams, other departments, other
   business units.
 - Reading, modifying, forking, and rebuilding the source for your own use.
 - Evaluating it, benchmarking it, and publishing what you find.
 - Running it behind a product you sell, as part of your own internal
   infrastructure, where your customers are not being given access to QueryGate.
+  **⚠️ This last one is our reading, not something the grant text settles.** The
+  grant prohibits providing the Licensed Work on an "embedded" basis and does not
+  define that word; HashiCorp's equivalent grant needs roughly twenty lines of
+  definitions to draw the same line. If your product's value depends on
+  QueryGate being in it, **ask us in writing before relying on this.**
 
 The line is not scale. The line is whether QueryGate itself is the thing being
 supplied to a third party.
 
 ## Can our MSP / consultancy / systems integrator run it for us?
 
-**Yes.** This is explicitly carved out.
+**Yes — that is what the carve-out is for**, with one caveat we would rather
+state than have you discover.
 
 The grant says: "except that a third party may install, operate, or manage the
 Licensed Work solely on behalf of, and for the internal use of, a single
@@ -62,8 +73,14 @@ licensee."
 
 So a managed service provider, a consultancy, or a contractor can deploy,
 operate, upgrade, and administer QueryGate for you. They are working on your
-behalf, for your internal use, and that is a permitted deployment — no separate
-licence required, for you or for them.
+behalf, for your internal use, and that is a permitted deployment.
+
+**⚠️ The caveat:** the open question counsel is being asked (see
+[`LICENSE_NOTES.md`](LICENSE_NOTES.md)) is whether this wording achieves the
+carve-out *without* also permitting a multi-tenant hosted offering dressed up as
+an MSP arrangement. A single MSP running a single instance for a single licensee
+is squarely what it is for. If your arrangement is less clear-cut than that, ask
+us in writing rather than relying on this page.
 
 What that same MSP may **not** do is stand up one QueryGate estate and resell
 access to it across their client base. Per client, on that client's behalf: fine.
@@ -136,6 +153,8 @@ product commitment as much as a licensing one: QueryGate sits in the request pat
 between an agent and your operational database, and a beacon originating inside
 a customer's network would contradict the entire premise.
 
+You do not have to take that on trust, and you should not: `tests/security/test_no_phone_home.py` fails the build if a QueryGate-controlled hostname, a licence-server or activation endpoint, or a telemetry URL ever appears in shipped source. Run `grep -rniE 'querygate\.(com|io|dev|net)' src/` yourself — it is a one-line check and it is meant to be run.
+
 There is also no kill switch, no time bomb, and no check that can refuse to start
 or block a query. If a licensing feature is ever added for the paid tier, it will
 be a locally-verified entitlement token that at most logs a warning — it will
@@ -175,8 +194,9 @@ using the Licensed Work"), and the alternative-arrangements contact is in
 
 ## Can we contribute?
 
-Yes — see [`../CONTRIBUTING.md`](../CONTRIBUTING.md). Contributions require a
-lightweight click-through Contributor Licence Agreement, for the ordinary reason:
+Yes — see [`../CONTRIBUTING.md`](../CONTRIBUTING.md). Contributions **will require** a
+lightweight click-through Contributor Licence Agreement — nothing enforces it yet
+(see `.github/cla/`) — for the ordinary reason:
 QueryGate is sold under commercial licences alongside BSL, and that is not
 possible over code the project does not hold the rights to relicense.
 

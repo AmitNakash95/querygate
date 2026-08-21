@@ -252,7 +252,8 @@ same tag gate as the image: publishing is never automatic on a `main` commit.
 
 ## Stamping the BSL Change Date
 
-QueryGate's licence is the Business Source License 1.1, converting to Apache-2.0
+QueryGate's licence **will be** the Business Source License 1.1 (`LICENSE` is a draft
+not yet in force), converting to Apache-2.0
 **four years after each release** (`docs/business/GTM_EXECUTION_PLAN.md` §2.3). That is
 per *release*, not a constant: `LICENSE` names the release it governs and carries that
 release's own Change Date, which is why `Licensed Work` reads `QueryGate <version>`
@@ -278,8 +279,9 @@ Two gates hold it:
   a half-filled draft, banner present but placeholders quietly removed, fails.
 - **`make change-date-check-release`** is the pre-tag gate: everything above, and it
   additionally refuses any remaining draft banner or `<LICENSOR>` / `<VERSION>` /
-  `<CHANGE_DATE>` placeholder. **Run it before tagging** — it is what stops a release
-  shipping a placeholder licence.
+  `<CHANGE_DATE>` placeholder. It runs in `.github/workflows/release.yml` before the
+  image is built, so a tag pushed against an unstamped licence fails the release
+  rather than publishing one. Run it locally before tagging too.
 
 `tests/unit/test_change_date.py` drift-tests both, so the rules cannot rot silently.
 
