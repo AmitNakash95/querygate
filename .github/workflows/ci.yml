@@ -29,7 +29,10 @@ jobs:
         run: poetry install --no-interaction
 
       - name: black --check
-        run: poetry run black --check src/ tests/ examples/
+        # Call the Makefile target rather than re-listing the paths, so the
+        # formatter's scope has exactly one definition (it gained `scripts/`
+        # when the licence gate landed there, and this copy silently didn't).
+        run: make format-check
 
       # Full suite (unit + integration) never needs a real database or
       # docker — see CLAUDE.md's "Testing gotchas" — except

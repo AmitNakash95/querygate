@@ -1586,7 +1586,7 @@ or worked around.
 > Credentials never sit on any returned model, and that's asserted against the
 > live API schema, not by convention. And none of it is "trust us": every
 > guarantee is backed by a deny-by-default CI gate (static analysis, dependency
-> audit, SBOM, image and secret scanning, OpenAPI fuzzing, and a 260-case
+> audit, SBOM, image and secret scanning, OpenAPI fuzzing, and a 480-test
 > adversarial suite), and reviewers get a reproducible packet where each claim
 > names the command that reproduces it. The published container image is signed
 > (cosign keyless) and carries SLSA build provenance, both consumer-verifiable.
@@ -1880,7 +1880,7 @@ summary.
 
 The gates fall into three groups:
 
-- **The access boundary itself.** The adversarial security suite (260 cases,
+- **The access boundary itself.** The adversarial security suite (480 tests,
   `make test-security`) encodes specific known bypass classes as regressions —
   denied-column inference, undeclared-table smuggling, predicate-as-SQL,
   schema-discovery leaks, policy-cap breaches, audit no-leak. On top of that,
@@ -3642,8 +3642,8 @@ formatter — it removes style bikeshedding by only allowing one output
 format):
 
 ```bash
-poetry run black --check src/ tests/ examples/   # make format-check — fails if anything is unformatted
-poetry run black src/ tests/ examples/            # make format — rewrites files in place
+poetry run black --check src/ tests/ examples/ scripts/   # make format-check — fails if anything is unformatted
+poetry run black src/ tests/ examples/ scripts/          # make format — rewrites files in place
 ```
 
 CI is defined in `.github/workflows/ci.yml` and runs four jobs on every pull
@@ -3703,6 +3703,28 @@ A release is cut with two gates, run in order:
   Any known vulnerability that isn't a specifically reviewed, justified
   entry in `security/dependency-audit-allowlist.json` **fails the release**
   — deny-by-default, not silently ignored;
+- gates the **third-party licence inventory** (`make license-check`,
+  `scripts/check_licenses.py`). `docs/THIRD_PARTY_LICENSES.md` records the
+  licence of every Python package in `poetry.lock`, split by whether
+  QueryGate redistributes it (the `main` group — what the published
+  container image contains, and what a `pip install` resolves transitively
+  from PyPI, subject to environment markers and pip's own resolution)
+  or merely builds and tests with it. Deny-by-default three times over:
+  strong copyleft (GPL, AGPL) is blocking in either group and can't be
+  waived at all; weak copyleft (MPL, LGPL) needs a specifically reviewed
+  entry in `security/copyleft-license-allowlist.json`; and a licence string
+  the gate doesn't *recognise* is a failure rather than a guess, so a new
+  copyleft dependency can't slip in on a fuzzy match. The same check runs
+  in the unit suite, so a `poetry add`/`poetry update` that pulls in a
+  copyleft dependency fails at test time, not at release time. Each reviewed
+  exception carries a machine-checked `facts` block (which packages require
+  it; whether QueryGate declares it directly; whether any module under
+  `src/querygate/` imports it) verified against
+  the lockfile and the source tree every run, so a waiver can't outlive its
+  own premises — but a green gate is still not a settled legal question, and
+  every unconfirmed review prints a `NOTICE:` line on each run. `make sbom`
+  copies the report into `dist/` under `SHA256SUMS`, so it reaches a consumer
+  with the release rather than separately;
 - writes `dist/SHA256SUMS` so a downloaded artifact set can be checksummed
   against what CI actually produced.
 
@@ -4027,8 +4049,10 @@ report. Every guarantee is backed by an open-source, deny-by-default check
 that runs in CI on every change: static analysis (Bandit + Semgrep), a
 dependency-CVE audit of the exact shipped set (pip-audit), a CycloneDX SBOM
 per release, container-image scanning (Trivy), full-history secret scanning
-(gitleaks), and OpenAPI fuzzing (Schemathesis) on top of the 260-case
-adversarial suite. A regression that weakened any of them fails the build.
+(gitleaks), and OpenAPI fuzzing (Schemathesis) — plus two first-party
+deny-by-default gates: the adversarial regression suite and a third-party
+licence inventory over every locked Python package
+(`docs/THIRD_PARTY_LICENSES.md`, `make license-check`). A regression that weakened any of them fails the build.
 For a reviewer under NDA, `docs/SECURITY_POSTURE.md` is a reproducible packet
 — every claim names the command that reproduces it. The published image is
 signed (Sigstore/cosign keyless) with a SLSA build-provenance attestation,
@@ -4042,6 +4066,44 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-21 — The dependency-licence gate records copyleft findings rather
+  than blocking on them, and scopes itself to Python packages.** Ahead of the
+  planned source-available licence flip, `make license-check`
+  (`scripts/check_licenses.py`) now gates every package in `poetry.lock`
+  deny-by-default and emits `docs/THIRD_PARTY_LICENSES.md`. Three choices in it
+  are deliberate and non-obvious. **First, the authority is the lockfile, not
+  the ambient virtualenv** — for existence *and* for version. Every off-the-shelf
+  licence scanner reports whatever happens to be installed; this repo's own
+  `.venv` carried a stale `sniffio` that such a tool would have reported as a
+  QueryGate dependency, and reading a licence from a release the report does not
+  name would hide a relicensing that happened in exactly that bump. This mirrors
+  the rule `scripts/generate_sbom.py` already states for the SBOM. **Second,
+  strong copyleft (GPL/AGPL) is unwaivable in either group, while weak copyleft
+  (MPL/LGPL) passes on a recorded review** — and a recorded review that is still
+  a `draft` *passes the gate* while printing a `NOTICE:` on every run. The
+  alternative, failing the build until a lawyer answers, would redden every
+  unrelated CI run for weeks; the cost is that a green gate is not evidence a
+  licence question is closed, which is why the report leads with a count of
+  unconfirmed records and why the status row in `docs/SECURITY_POSTURE.md` is
+  amber rather than green. Promoting an unconfirmed redistributed finding to a
+  hard failure remains available and is the owner's call. What *is* mechanised
+  is the factual half: each record carries a `facts` block (its requirers,
+  whether QueryGate declares it directly, and whether any `src/querygate/`
+  module imports it) checked against the lockfile
+  and source tree on every run, so the unverifiable part is confined to the
+  legal reading and cannot quietly expand to cover stale evidence. The five
+  packages whose licence cannot be read from a local install are re-read from
+  PyPI nightly (`--verify-overrides`), so no record rests permanently on a
+  hand-typed snapshot; that mode needs network, so it stays out of the
+  per-commit gate deliberately. **Third, the inventory
+  covers Python packages only.** The published container image also layers a
+  Debian userland and Microsoft's `msodbcsql18` under `ACCEPT_EULA=Y`; that is
+  stated as an explicit scope limit in the report rather than silently implied
+  to be covered, and clearing it is tracked as TODO.md item 196 — needed before
+  the first paid pilot's security review, not before the flip. Related: the redistribution
+  boundary itself is the image, not the wheel — a wheel declares dependencies
+  and contains none of them, which is the premise the one open MPL-2.0 question
+  (`certifi`) rests on.
 - **2026-08-17 — Expressiveness is for discovery; narrowness is for
   production. QueryGate ships the bridge between them (item 195).** A standing
   tension had gone unresolved in the docs: the read AST is deliberately

@@ -83,6 +83,23 @@ All notable changes to QueryGate are documented here.
 
 ### Added
 
+- **A deny-by-default third-party licence gate over every locked Python package**
+  (`make license-check`, `scripts/check_licenses.py`), emitting
+  `docs/THIRD_PARTY_LICENSES.md` — the standard answer to the "list your third-party
+  components and their licences" question on a vendor security questionnaire. It runs in
+  the default test suite and in `make release-check`, and `make sbom` now copies the
+  report into `dist/` under `SHA256SUMS`, so it reaches a consumer with the release.
+  Strong copyleft (GPL/AGPL) fails in either dependency group and cannot be waived; weak
+  copyleft (MPL/LGPL) needs an individually recorded exception in
+  `security/copyleft-license-allowlist.json`; and a licence string the gate does not
+  recognise fails rather than being guessed. Each exception carries a machine-checked
+  `facts` block verified against `poetry.lock` and the source tree on every run, so a
+  waiver cannot outlive its own premises. Regenerate with `make license-report`.
+  **Open finding:** `certifi` (MPL-2.0) is in the redistributed set; its review — like all
+  five recorded — is still a draft awaiting confirmation, which the gate prints as a
+  `NOTICE:` on every run. The inventory covers Python packages only; the container image's
+  Debian and `msodbcsql18` layers are not assessed (TODO.md item 196).
+
 - **Two Prometheus counters put the WORM archive's chain-integrity findings on
   `/metrics`** (TODO.md item 177):
   `querygate_audit_worm_search_chain_breaks_total` and
@@ -502,7 +519,8 @@ All notable changes to QueryGate are documented here.
   standalone via `make sbom`. Builds a throwaway virtual environment from exactly
   `poetry.lock`'s `main` dependency group (not an unpinned resolve), generates a
   CycloneDX 1.6 SBOM and a `pip-audit` vulnerability report scoped to that locked set, and
-  writes SHA-256 checksums for the wheel, sdist, and SBOM to `dist/SHA256SUMS`. Any known
+  writes SHA-256 checksums for the wheel, sdist, SBOM, and third-party licence inventory
+  to `dist/SHA256SUMS`. Any known
   vulnerability without a reviewed entry in `security/dependency-audit-allowlist.json`
   fails the release (deny-by-default) — publishing to a registry and cryptographic
   signing remain phase 2, deferred until this project has a real publishing pipeline.

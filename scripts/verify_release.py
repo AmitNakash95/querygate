@@ -2,7 +2,8 @@
 
 TODO.md item 30 / 89 phase 2. This is the *verification* counterpart to
 `scripts/generate_sbom.py`'s checksum generation: given a `dist/` directory that
-contains a `SHA256SUMS` manifest (wheel, sdist, SBOM) plus the artifacts it
+contains a `SHA256SUMS` manifest (wheel, sdist, SBOM, third-party licence
+inventory) plus the artifacts it
 names, recompute each file's SHA-256 and confirm it matches — the exact
 tamper/corruption check a customer runs after downloading a release bundle,
 made a first-class, gating, cross-platform step instead of a doc snippet

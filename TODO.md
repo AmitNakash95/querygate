@@ -226,6 +226,7 @@ order-of-magnitude, not commitments.
 | 193 | `docs/product-guide.html` has no freshness gate against `docs/PRODUCT_GUIDE.md`, so the generated copy most likely to be shared goes stale silently | S | — |
 | 194 | Three crafted-or-corrupt WORM lines still escape `search_worm_archive` as a masked 500: a non-ASCII `hash` (reachable by ordinary corruption) and two unbounded recursions | S–M | 134 |
 | 195 | ✅ Narrow a principal from the general query surface to reviewed templates: `Policy.templates_only` enforcement plus an opt-in, redaction-safe observed-shape recorder (in-process + Redis-backed) that drafts a template from real traffic, with an admin-UI promotion panel | M–L | 48 |
+| 196 | The container image's non-Python layers have never been licence-assessed: `docs/THIRD_PARTY_LICENSES.md` covers `poetry.lock` only, while the shipped image also carries a Debian `bookworm` userland and Microsoft's `msodbcsql18` under `ACCEPT_EULA=Y` | M | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -429,7 +430,8 @@ into a throwaway venv (so the repo's own dev-tooling dependencies never
 pollute the SBOM or the audit), and produces three artifacts in `dist/`:
 a CycloneDX 1.6 SBOM (`querygate-<version>.cdx.json`), a `pip-audit`
 vulnerability report (`querygate-<version>.vuln-report.json`), and a
-`SHA256SUMS` checksum manifest covering the wheel, sdist, and SBOM.
+`SHA256SUMS` checksum manifest covering the wheel, sdist, SBOM, and (since the GTM
+WP1 licence gate) `THIRD_PARTY_LICENSES.md`.
 
 The dependency audit is a real, deny-by-default release gate, not a report
 nobody reads: any known vulnerability in the locked production dependency
@@ -3520,3 +3522,48 @@ dry-run binder bug that made a drafted BETWEEN template fail
 `querygate-validate-config` is fixed.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 195).
+
+### 196. The container image's non-Python layers have never been licence-assessed
+
+**Why.** `make license-check` (`scripts/check_licenses.py`, GTM WP1, 2026-08-21)
+gates every package in `poetry.lock` and emits `docs/THIRD_PARTY_LICENSES.md`.
+That inventory is deliberately scoped to **Python packages**, and says so in its
+own header — but the artifact QueryGate actually distributes is the container
+image, and `Dockerfile` layers two things the inventory never sees:
+
+- a full **Debian `bookworm`** userland from `python:3.11-slim-bookworm` (glibc
+  under LGPL-2.1, plus the usual GPL-licensed coreutils/bash), and
+- **`unixodbc`** plus Microsoft's **`msodbcsql18`**, installed with
+  `ACCEPT_EULA=Y` — proprietary terms accepted at build time, in the image
+  QueryGate hands to a customer.
+
+Nothing here is presumed to be a problem: redistributing a Debian base image is
+routine and the GPL components are separate programs, not linked into
+QueryGate. The defect is that **it has not been looked at**, while a
+customer-facing document now states a licence position for everything else. A
+security or procurement reviewer who asks "and the OS layer?" currently gets an
+explicit scope disclaimer rather than an answer, and the BSL flip is exactly
+when that question gets asked.
+
+**Definition of done.**
+
+- Enumerate the image's non-Python components and their licences from the built
+  image itself. Trivy already scans those layers in the `image-scan` job but
+  emits only vuln/secret/misconfig findings, no SBOM and no retained artifact —
+  so add `--format cyclonedx` to that existing step rather than introducing a
+  second scanner.
+- Establish whether `msodbcsql18`'s EULA permits redistribution inside a
+  commercial product image, and whether it must be an opt-in layer instead. This
+  is the one that could actually change the Dockerfile: if redistribution is not
+  permitted, the ODBC driver becomes a documented operator-installed step and
+  MSSQL support ships without it in the default image.
+- Fold the result into `docs/THIRD_PARTY_LICENSES.md` (or a sibling document it
+  links to) and delete the scope disclaimer once it is no longer true.
+- Gate whatever is established, in the spirit of the Python-side gate: a new
+  base-image component with an unreviewed licence should fail a build, not be
+  discovered by a customer.
+
+**Not before:** it does not block the flip on its own, but it must have an
+answer before the first paid pilot's security review — the north-star metric.
+Raised by the GTM WP1 licence pass, which found and scoped it rather than
+silently leaving it out.

@@ -1854,7 +1854,13 @@ Agent (MCP) / Client (REST)
   unpinned resolve), plus SHA-256 checksums for the built artifacts. Any known
   vulnerability without a reviewed, justified entry in
   `security/dependency-audit-allowlist.json` fails the release
-  (deny-by-default). See [`docs/RELEASING.md`](docs/RELEASING.md#software-bill-of-materials-and-dependency-audit).
+  (deny-by-default). Every `make release-check` also gates the **third-party
+  licence inventory** of every locked Python package
+  ([`docs/THIRD_PARTY_LICENSES.md`](docs/THIRD_PARTY_LICENSES.md)): strong
+  copyleft is blocking in either group and unwaivable, weak copyleft needs an
+  individually recorded exception, and an unrecognised licence string fails
+  rather than being guessed. See
+  [`docs/RELEASING.md`](docs/RELEASING.md#software-bill-of-materials-and-dependency-audit).
 - **Signed, provenance-attested releases.** On a maintainer-pushed version
   tag, `.github/workflows/release.yml` builds and pushes the container image to
   GHCR behind a pre-publish Trivy gate, then **signs it with cosign keyless

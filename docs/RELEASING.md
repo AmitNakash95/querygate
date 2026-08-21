@@ -46,8 +46,8 @@ It verifies the lock file and release metadata, rejects generated or legacy prod
 checks formatting, runs the default test suite, validates bundled configuration from the
 installed CLI path, runs the fixed-threshold offline semantic-memory benchmark, builds
 both wheel and source distribution into `dist/`, inspects their members for generated,
-secret, archived, or test-only files, and generates a software bill of materials and
-dependency vulnerability report (below).
+secret, archived, or test-only files, gates the third-party licence inventory, and
+generates a software bill of materials and dependency vulnerability report (both below).
 
 Then run the container/infrastructure gate:
 
@@ -83,8 +83,8 @@ are absent from tracked product inputs.
    code paths (e.g. an unused transport, a function QueryGate never calls) — a new vulnerable
    dependency fails the build until it is either upgraded or explicitly reviewed and added
    there, not silently ignored.
-4. Writes `dist/SHA256SUMS` — checksums for the wheel, the source distribution, and the SBOM
-   itself — so a downloaded artifact set can be verified against what this repository's CI
+4. Writes `dist/SHA256SUMS` — checksums for the wheel, the source distribution, the SBOM
+   itself, and the third-party licence inventory — so a downloaded artifact set can be verified against what this repository's CI
    produced:
 
    ```bash
@@ -97,6 +97,85 @@ missing manifest, a missing artifact, a digest mismatch, or a malformed manifest
 integrity check a consumer runs after downloading a release bundle. It checks *integrity*
 (the bytes are the ones this repo produced), not *authenticity*; authenticity of the
 published container image comes from the signature and provenance described next.
+
+## Dependency licence inventory
+
+`docs/THIRD_PARTY_LICENSES.md` records the licence of **every** Python package in
+`poetry.lock`, split by whether QueryGate actually redistributes it. It is gated on every release like the
+SBOM — though unlike the SBOM, `make release-check` only *checks* it; you regenerate
+it yourself with `make license-report`. `make sbom` then copies the checked-in report
+into `dist/` and covers it with `dist/SHA256SUMS`, so a consumer who downloads and
+verifies a release bundle gets the licence inventory with it rather than having to be
+sent it separately. It is the standard answer to the "list your third-party components and their
+licences" question on a vendor security questionnaire.
+
+"Redistributed" means the `main` group, precisely: the published container image contains
+those packages (`Dockerfile` runs `poetry install --no-root --only main`), while the wheel
+and source distribution contain none of them: QueryGate declares only its **direct**
+requirements and `pip` resolves the rest transitively, so a `pip install querygate`
+fetches them from PyPI — subject to the same environment markers, and to pip's own
+resolution against the declared version ranges rather than to this lockfile's pins. Packages carrying an environment marker
+(a Windows-only wheel, for instance) are installed only where their marker applies. The
+inventory covers Python packages only: the image additionally layers a Debian `bookworm`
+userland and Microsoft's `msodbcsql18` driver, installed under `ACCEPT_EULA=Y` on its own
+proprietary terms. Clearing the image's OS layer is separate, unfinished work.
+
+`make release-check` runs `make license-check` (`scripts/check_licenses.py --check`), which
+fails on any of:
+
+- a **strong**-copyleft dependency (GPL, AGPL) in *either* group. This one cannot be
+  waived at all: no reviewed entry makes it acceptable, and the gate does not consult one;
+- a **weak**-copyleft dependency (MPL, LGPL) with no reviewed entry in
+  `security/copyleft-license-allowlist.json` — deny-by-default, the same posture
+  `security/dependency-audit-allowlist.json` takes for CVEs;
+- a licence string the gate does not **recognise**, which is a failure rather than a guess,
+  so a new copyleft licence cannot slip through on a fuzzy match. The overrides file below
+  is not a way around this: an override contradicted by an unrecognised declared licence
+  fails too;
+- a locked package whose licence cannot be read locally and has no evidence-backed record
+  in `security/third-party-license-overrides.json` — either because it cannot be installed
+  here (a Windows-only wheel, or a marker that does not apply) or because it declares no
+  licence metadata at all;
+- an installed package whose **version** differs from the locked pin, so a licence is never
+  attributed to a release it was not read from;
+- a reviewed record that has gone **stale** — its package left the lock, relicensed to
+  something permissive, or moved between the redistributed and dev-only sets; or
+- **drift** — the checked-in report no longer matching `poetry.lock`. Regenerate it with
+  `make license-report`.
+
+Passing the gate is **not** the same as the licence questions being settled. Each reviewed
+record carries a `review_status`, and `make license-check` prints a `NOTICE:` line for every
+record still marked `draft` — analysis written but not confirmed by the owner. Every
+record is still a draft today, including `certifi` (MPL-2.0), the one in the
+redistributed set.
+
+This follows the SBOM's design rather than a licence scanner's default: `poetry.lock` is
+the authority for which packages exist and at which version, not the ambient virtualenv —
+an environment scanner reports whatever happens to be installed, including stale leftovers
+QueryGate does not ship. `dev`-group packages are build/test/CI tooling that is never
+distributed, so their licences constrain how QueryGate is developed rather than how it may
+be licensed.
+
+The same gate runs in the default unit suite (`tests/unit/test_third_party_licenses.py`),
+so a `poetry add` or `poetry update` that pulls in a copyleft dependency fails at test
+time, not at release time.
+
+Five packages cannot have their licence read locally — four are Windows-only or
+marker-excluded, and one declares no licence metadata at all — so theirs are recorded
+with evidence in `security/third-party-license-overrides.json`. Those records do not
+rest on a hand-typed snapshot: the nightly workflow runs
+`scripts/check_licenses.py --verify-overrides`, which re-reads each release's declared
+licence from PyPI and fails on a mismatch. That mode needs network, which is why it is
+deliberately not part of `make license-check` — the per-commit gate stays hermetic and
+a flaky network blocks nobody's commit.
+
+Each reviewed copyleft record also carries a machine-checked `facts` block — which
+packages require it, whether QueryGate declares it directly, and whether any module under
+`src/querygate/` imports it — and the
+gate verifies all three against `poetry.lock`, `pyproject.toml`, and the source tree on
+every run. The legal
+reading in `reason` cannot be verified that way and is explicitly a draft; its factual
+premises can be, and are.
 
 ## Scheduled security scans and soak
 
@@ -113,7 +192,9 @@ independent of any code change, and covers three jobs:
 
 - **`dependency-audit`** — `poetry check --lock` (lockfile drift) followed by
   `scripts/generate_sbom.py`, the same CycloneDX SBOM + `pip-audit` deny-by-default
-  CVE gate `make release-check` runs, over the exact locked ship set.
+  CVE gate `make release-check` runs, over the exact locked ship set — then
+  `scripts/check_licenses.py --verify-overrides`, which re-reads from PyPI the five
+  third-party licences that cannot be read from a local install.
 - **`image-scan`** — builds the production image and Trivy-scans it for HIGH/CRITICAL
   vulnerabilities, secrets, and misconfig (`--ignore-unfixed`, exceptions in
   `.trivyignore`).
