@@ -277,6 +277,18 @@ license-report: ## Regenerate docs/THIRD_PARTY_LICENSES.md — every poetry.lock
 license-check: ## Gate: every locked dependency is permissively licensed or individually recorded (strong copyleft is never waivable), and the report is current (drift-tested by test_third_party_licenses.py)
 	poetry run python scripts/check_licenses.py --check
 
+.PHONY: stamp-change-date
+stamp-change-date: ## Stamp LICENSE with this version's BSL Change Date (release date + 4 years, derived from CHANGELOG.md — never typed by hand)
+	poetry run python scripts/check_change_date.py --stamp
+
+.PHONY: change-date-check
+change-date-check: ## Gate: LICENSE's Change Date is 4 years after this version's CHANGELOG release date, and names this version (drift-tested by test_change_date.py)
+	poetry run python scripts/check_change_date.py --check
+
+.PHONY: change-date-check-release
+change-date-check-release: ## The pre-tag gate: as change-date-check, and additionally refuses a draft banner or any unfilled placeholder
+	poetry run python scripts/check_change_date.py --check --release
+
 .PHONY: verify-release
 verify-release: ## Verify dist/ artifact integrity against dist/SHA256SUMS (the check a consumer runs after download). Pass ARGS="--dist-dir path".
 	poetry run python scripts/verify_release.py $(ARGS)
@@ -295,6 +307,7 @@ release-check: ## Run deterministic source/package release gates and build artif
 	poetry build
 	poetry run python scripts/check_release_artifacts.py
 	$(MAKE) license-check
+	$(MAKE) change-date-check
 	$(MAKE) sbom
 
 .PHONY: release-smoke
