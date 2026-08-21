@@ -509,11 +509,12 @@ class Policy(pyd.BaseModel):
     # also what catches a caller varying `limit`/`offset` to manufacture a
     # fresh shape bucket.
     #
-    # SET THE PER-TABLE CAP. `max_shape_repeats_per_window` does not currently
-    # deliver its bound (TODO.md item 186): the fingerprint does not
-    # canonicalize a referenced select alias, a cte rename, a nested-scope
-    # alias, or list order, so a prober mints a fresh bucket per probe. The
-    # backstop is unaffected — its key carries no fingerprint at all.
+    # Set BOTH: they are belt and braces, not alternatives. (TODO.md item 186
+    # closed a period in which `max_shape_repeats_per_window` did not deliver
+    # its bound — the fingerprint did not canonicalize a referenced select
+    # alias, a cte rename, a nested-scope alias, or list order, so a prober
+    # minted a fresh bucket per probe. `shape_fingerprint` now normalizes all
+    # four; each vector has a regression test with a paired control.)
     #
     # Both default to None (disabled) and BOTH only ever apply on a connection
     # that also sets `min_group_size`: with no k-floor there is nothing to

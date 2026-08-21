@@ -187,15 +187,24 @@ contribution (multi-query differencing).
   `tests/integration/test_disclosure_budget_e2e.py`, whose headline test runs an
   actual salary-differencing probe and proves it is cut off partway through.
 
-  **Known gap (2026-08-12, TODO.md item 186): the per-shape cap is currently
-  evadable.** `shape_fingerprint` does not canonicalize a select-alias
-  *reference* (nor a CTE rename, a nested-scope alias, or list order), so a
-  prober who walks the alias alongside the sliding constant lands in a fresh
-  bucket every probe and `max_shape_repeats_per_window` never trips — measured
-  at 20 distinct fingerprints for 20 probes. **`max_aggregate_queries_per_window`
-  is unaffected by all four of those vectors — its key carries no fingerprint at
-  all — so until item 186 lands, set the per-table cap and do not rely on the
-  per-shape cap alone.** It is not a general bound: it does not cover the
+  **Closed gap (found 2026-08-12, fixed 2026-08-21, TODO.md item 186): the
+  per-shape cap used to be evadable.** `shape_fingerprint` did not canonicalize a
+  select-alias *reference* (nor a CTE rename, a nested-scope alias, or list
+  order), so a prober who walked the alias alongside the sliding constant landed
+  in a fresh bucket every probe and `max_shape_repeats_per_window` never tripped
+  — measured at 20 distinct fingerprints for 20 probes.
+  `max_aggregate_queries_per_window` was unaffected by all four vectors (its key
+  carries no fingerprint at all), which is why it was the load-bearing cap in the
+  interim. The fingerprint now collapses every bare reference to a
+  caller-authored name to one token, resolves table aliases from every scope, and
+  sorts every list; the same twenty probes measure as **one** fingerprint, and
+  each vector has its own regression test with a paired control proving genuinely
+  different shapes still separate. **Set both caps.** Two scoping residuals are
+  deliberate and pinned by tests: a cross-connection joined table is charged
+  under the *requesting* connection (the same physical table reachable through
+  two connections carries two budgets), and under static API-key auth every
+  caller sharing a key is one principal, so the budget is per-key rather than
+  per-human. It is not a general bound: it does not cover the
   write-preview path (item 191), it partitions per declared purpose
   when the operator configured `allowed_purposes` (a caller cannot invent one
   to mint a fresh budget), and its in-process window is per serving process —

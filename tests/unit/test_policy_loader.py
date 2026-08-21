@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+from pydantic import ValidationError
+
 from querygate.core.auth import Actor, Principal
 from querygate.policy.loader import PolicyStore
 
@@ -124,3 +126,88 @@ def test_override_connection_ids_unaffected_by_principals_section():
         }
     )
     assert store.override_connection_ids() == ["demo"]
+
+
+# ---------------------------------------------------------------------------
+# TODO.md item 188 — a principal override must be validated against every merge
+# base it can actually land on, not just the default.
+# ---------------------------------------------------------------------------
+
+
+def _three_layer_raw() -> dict:
+    """The exact acceptance case from item 188.
+
+    Each layer is individually valid. `default:` sets a k-anonymity floor;
+    `connections.foo:` removes it; `principals.alice.foo:` sets a disclosure cap
+    that `Policy._disclosure_budget_needs_a_k_floor` requires a floor for. The
+    only invalid thing is the *combination* the request path actually builds.
+    """
+    return {
+        "default": {"min_group_size": 5},
+        "connections": {"foo": {"min_group_size": None}},
+        "principals": {"alice": {"foo": {"max_shape_repeats_per_window": 10}}},
+    }
+
+
+def test_a_principal_override_invalid_against_its_connection_base_fails_at_load():
+    """Before item 188 this loaded clean and `validate-config` passed, then the
+    first query alice issued on `foo` raised inside
+    `StructuredQueryService._get_policy()` and `mask_unexpected` turned it into a
+    generic 500 — one principal fully offline on a config the CLI accepted."""
+    with pytest.raises(ValidationError):
+        PolicyStore.from_dict(_three_layer_raw())
+
+
+def test_the_same_override_still_loads_when_its_connection_base_keeps_the_floor():
+    """The control: the failure must come from the real merge base, not from
+    rejecting the field outright. `foo` keeps the inherited floor here."""
+    raw = _three_layer_raw()
+    raw["connections"]["foo"] = {"max_joins": 2}
+    store = PolicyStore.from_dict(raw)
+    policy = store.get("foo", principal=Principal(subject="alice"))
+    assert policy.max_shape_repeats_per_window == 10
+    assert policy.min_group_size == 5
+
+
+def test_a_wildcard_override_is_checked_against_every_connection_base():
+    """A `"*"` entry lands on every connection, so one floorless connection is
+    enough to make it invalid — checking it against the default alone would miss
+    exactly the connection that breaks."""
+    raw = {
+        "default": {"min_group_size": 5},
+        "connections": {"floorless": {"min_group_size": None}},
+        "principals": {"alice": {"*": {"max_shape_repeats_per_window": 10}}},
+    }
+    with pytest.raises(ValidationError):
+        PolicyStore.from_dict(raw)
+
+
+def test_a_wildcard_override_loads_when_every_connection_base_is_compatible():
+    raw = {
+        "default": {"min_group_size": 5},
+        "connections": {"other": {"max_joins": 2}},
+        "principals": {"alice": {"*": {"max_shape_repeats_per_window": 10}}},
+    }
+    store = PolicyStore.from_dict(raw)
+    assert store.get("other", principal=Principal(subject="alice")).min_group_size == 5
+
+
+def test_a_typo_in_a_principal_override_still_fails_at_load():
+    """The check item 188 replaced existed to catch a misspelled field name.
+    That must survive the change — `Policy` is `extra="forbid"`, and the merge
+    base does not affect it."""
+    with pytest.raises(ValidationError):
+        PolicyStore.from_dict({"principals": {"alice": {"*": {"max_joinz": 3}}}})
+
+
+def test_every_connection_base_that_get_could_resolve_is_checked():
+    """`get()` falls back to the bare default for a connection with no
+    `connections:` entry, so a principal override naming such a connection is
+    checked against the default — not skipped for want of an override entry."""
+    raw = {
+        "default": {"min_group_size": None},
+        "connections": {"floored": {"min_group_size": 5}},
+        "principals": {"alice": {"unlisted": {"max_shape_repeats_per_window": 10}}},
+    }
+    with pytest.raises(ValidationError):
+        PolicyStore.from_dict(raw)

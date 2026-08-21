@@ -1237,7 +1237,13 @@ all. `docs/THREAT_MODEL.md`'s QG-08 row and residual-risk section were
 updated; `help/service.py`'s redacted policy summary now reports these new
 guardrail values (including `cost_estimation_mode`) like every other cap.
 
-**Phase 2 — MSSQL estimated-plan equivalent, not started:** SQL Server's
+**Phase 2 — MSSQL estimated-plan equivalent — SHIPPED** (this paragraph
+described it as "not started"; corrected 2026-08-21, TODO.md item 190 #5).
+`estimate_mssql_query_cost` lives in `execution/cost_estimation.py`, is
+dispatched by `StructuredQueryService._estimate_cost`, and is live-tested by
+`tests/integration/test_mssql_cost_estimation.py`. The design constraint the
+rest of this paragraph describes is exactly why it took the shape it did, so
+it is kept verbatim below rather than deleted: SQL Server's
 `SET SHOWPLAN_XML ON` can't be prefixed onto an already-compiled statement
 the way Postgres's inline `EXPLAIN (FORMAT JSON) <query>` can — once
 SHOWPLAN mode is set, it must be the *only* statement in its batch (the
@@ -6455,7 +6461,7 @@ engine to 10/10 expressiveness for a fluent SQL author **without weakening any
 safety invariant** — the deepening of the North Star **Structural** pillar (the
 "no raw SQL, ever" bet only wins if the AST rarely walls off a real SQL author).
 The deep, authoritative design/test/validation spec lives in
-**[docs/ENGINE_EXPRESSIVENESS_PLAN.md](docs/ENGINE_EXPRESSIVENESS_PLAN.md)** — each
+**[docs/ENGINE_EXPRESSIVENESS_PLAN.md](ENGINE_EXPRESSIVENESS_PLAN.md)** — each
 item below is scoped there (§4) with its AST shape, compiler seam, validation
 wiring, caps, dialect handling, adversarial cases, and per-item Definition of
 Done. Build them in the order 99 → 106; the plan's §3 checklist and §5 canonical

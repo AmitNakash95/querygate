@@ -9,6 +9,36 @@ authors = [{ name = "Amit Nakash" }]
 readme = "README.md"
 requires-python = ">=3.11,<4.0"
 dynamic = ["dependencies"]
+# PEP 639: ship the licence file of record in the sdist and wheel. Today that
+# file is a DRAFT that grants nothing and says so in its own banner — shipping
+# it is what makes that visible to whoever installs the package.
+#
+# There is deliberately NO `license = "..."` SPDX expression and NO
+# `License :: ...` classifier here yet. Declaring `BUSL-1.1` would tell every
+# compliance scanner, package index, and SBOM consumer that QueryGate is
+# licensed under terms that are not in force — a false statement, and exactly
+# the kind an automated tool propagates without a human ever re-reading
+# LICENSE. Both are added in the same change that removes the draft banner
+# from LICENSE; `make change-date-check-release` is the gate that refuses a
+# release while the banner is still there.
+license-files = ["LICENSE"]
+classifiers = [
+    # Only the Python version CI actually runs is claimed. `requires-python`
+    # permits 3.12+, but nothing verifies it, so nothing asserts it here.
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Database",
+    "Topic :: Database :: Front-Ends",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
 
 [project.scripts]
 querygate = "querygate.run:main"
