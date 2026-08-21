@@ -28,6 +28,11 @@ jobs:
       - name: Install dependencies
         run: poetry install --no-interaction
 
+      # The BSL Change Date is arithmetic on a legal document, and a wrong one
+      # is invisible on inspection. Gate it on every push, not only at release.
+      - name: BSL Change Date gate
+        run: make change-date-check
+
       - name: black --check
         # Call the Makefile target rather than re-listing the paths, so the
         # formatter's scope has exactly one definition (it gained `scripts/`
