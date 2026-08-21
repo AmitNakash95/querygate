@@ -56,6 +56,15 @@ def main() -> None:
     if not any(name.endswith("/LICENSE") for name in sdist_members):
         raise SystemExit("release artifact check failed: the sdist carries no LICENSE")
     dockerfile = (ROOT / "Dockerfile").read_text()
+    # msodbcsql18 is proprietary and its EULA is declared by the package but
+    # path-excluded by the slim base image, so it silently did not ship. See
+    # docs/CONTAINER_IMAGE_LICENCES.md (TODO item 196).
+    if "msodbcsql18" in dockerfile and "path-include /usr/share/doc/msodbcsql18" not in dockerfile:
+        raise SystemExit(
+            "release artifact check failed: Dockerfile installs msodbcsql18 without the "
+            "dpkg path-include that keeps its EULA in the image. The slim base image "
+            "path-excludes /usr/share/doc/*, so the driver would ship with no licence text."
+        )
     if not re.search(r"^COPY\s+LICENSE\b", dockerfile, re.M):
         raise SystemExit(
             "release artifact check failed: Dockerfile does not COPY LICENSE into the image. "

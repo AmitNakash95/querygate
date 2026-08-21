@@ -226,7 +226,7 @@ order-of-magnitude, not commitments.
 | 193 | `docs/product-guide.html` has no freshness gate against `docs/PRODUCT_GUIDE.md`, so the generated copy most likely to be shared goes stale silently | S | — |
 | 194 | Three crafted-or-corrupt WORM lines still escape `search_worm_archive` as a masked 500: a non-ASCII `hash` (reachable by ordinary corruption) and two unbounded recursions | S–M | 134 |
 | 195 | ✅ Narrow a principal from the general query surface to reviewed templates: `Policy.templates_only` enforcement plus an opt-in, redaction-safe observed-shape recorder (in-process + Redis-backed) that drafts a template from real traffic, with an admin-UI promotion panel | M–L | 48 |
-| 196 | The container image's non-Python layers have never been licence-assessed: `docs/THIRD_PARTY_LICENSES.md` covers `poetry.lock` only, while the shipped image also carries a Debian `bookworm` userland and Microsoft's `msodbcsql18` under `ACCEPT_EULA=Y` | M | — |
+| 196 | ✅ The container image's non-Python layers have never been licence-assessed: `docs/THIRD_PARTY_LICENSES.md` covers `poetry.lock` only, while the shipped image also carries a Debian `bookworm` userland and Microsoft's `msodbcsql18` under `ACCEPT_EULA=Y` | M | — |
 | 197 | Offline entitlement token for the paid tier (not-before-customers) | S | — |
 | 198 | QueryGate Notary — append-only transparency log for the audit ledger's chain head (not-before-customers) | M | — |
 
@@ -3525,7 +3525,7 @@ dry-run binder bug that made a drafted BETWEEN template fail
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 195).
 
-### 196. The container image's non-Python layers have never been licence-assessed
+### 196. The container image's non-Python layers have never been licence-assessed ✅ DONE (phase 1)
 
 **Why.** `make license-check` (`scripts/check_licenses.py`, GTM WP1, 2026-08-21)
 gates every package in `poetry.lock` and emits `docs/THIRD_PARTY_LICENSES.md`.
@@ -3569,6 +3569,38 @@ when that question gets asked.
 answer before the first paid pilot's security review — the north-star metric.
 Raised by the GTM WP1 licence pass, which found and scoped it rather than
 silently leaving it out.
+
+---
+
+**Phase 1 ✅ DONE 2026-08-21** — the assessment is written up in
+[`docs/CONTAINER_IMAGE_LICENCES.md`](docs/CONTAINER_IMAGE_LICENCES.md), measured
+against a locally built image (124 OS packages; aarch64, so re-take the package
+list on an amd64 build before quoting it to a counterparty).
+
+Two things were found and one is fixed:
+
+- **The driver was shipping with no licence text.** `msodbcsql18` declares
+  `/usr/share/doc/msodbcsql18/LICENSE.txt`, but the slim base image
+  path-excludes `/usr/share/doc/*`, so it never landed. `Dockerfile` now writes
+  a `path-include` before installing, and `scripts/check_release_artifacts.py`
+  fails the release if that line is ever removed while the driver is installed.
+- **The Debian userland is not a problem.** GPL there is aggregation, not a
+  combined work — the position every Debian-derived image relies on. The
+  source-offer obligation is discharged the customary way (unmodified upstream,
+  available from Debian's archives); that customary answer is the one line in
+  the assessment counsel should confirm rather than take on trust.
+
+**Phase 2 — open, and it needs counsel, not code.** Microsoft's EULA §2
+expressly permits redistribution, but §2(b) attaches three conditions and
+QueryGate meets one of them. §2(b)(ii) requires that end users be made to "agree
+to terms that protect it and Microsoft at least as much as this agreement" —
+BSL 1.1 has no pass-through clause, so a user pulling the image agrees to
+nothing on Microsoft's behalf. §2(b)(iii) requires indemnifying Microsoft, which
+nothing currently does. The assessment proposes a third-party-notices file plus
+a pass-through clause as the ordinary fix, with making the driver an opt-in
+layer as the fallback. Fold the indemnity question into the existing
+indemnification/insurance conversation (`GTM_EXECUTION_PLAN.md` §3 Layer 3)
+rather than running a separate one.
 
 ### 197. Offline entitlement token for the paid tier — not-before-customers
 
