@@ -227,6 +227,8 @@ order-of-magnitude, not commitments.
 | 194 | Three crafted-or-corrupt WORM lines still escape `search_worm_archive` as a masked 500: a non-ASCII `hash` (reachable by ordinary corruption) and two unbounded recursions | S–M | 134 |
 | 195 | ✅ Narrow a principal from the general query surface to reviewed templates: `Policy.templates_only` enforcement plus an opt-in, redaction-safe observed-shape recorder (in-process + Redis-backed) that drafts a template from real traffic, with an admin-UI promotion panel | M–L | 48 |
 | 196 | The container image's non-Python layers have never been licence-assessed: `docs/THIRD_PARTY_LICENSES.md` covers `poetry.lock` only, while the shipped image also carries a Debian `bookworm` userland and Microsoft's `msodbcsql18` under `ACCEPT_EULA=Y` | M | — |
+| 197 | Offline entitlement token for the paid tier (not-before-customers) | S | — |
+| 198 | QueryGate Notary — append-only transparency log for the audit ledger's chain head (not-before-customers) | M | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -3567,3 +3569,90 @@ when that question gets asked.
 answer before the first paid pilot's security review — the north-star metric.
 Raised by the GTM WP1 licence pass, which found and scoped it rather than
 silently leaving it out.
+
+### 197. Offline entitlement token for the paid tier — not-before-customers
+
+**Effort: S. NOT BEFORE CUSTOMERS — do not claim or implement. Logged per
+`docs/business/GTM_EXECUTION_PLAN.md` §3 Layer 2 (owner decision, 2026-08-21);
+build it when a paying customer needs it, alongside item 198 (QueryGate
+Notary), not before.**
+
+**Why it matters:** Shape A (the BSL Additional Use Grant — unlimited internal
+production use, no database ceiling) removed the reason this used to be
+pre-launch work: there is no production threshold left for a customer to
+self-check, so a licence key stops being a compliance tool and becomes an
+**entitlement token for the paid tier** (support, indemnification, Notary
+access) instead. `docs/LICENSE_ENFORCEMENT.md`'s enforcement-model survey
+already covers the mechanism in depth; this item is the pointer from the
+worklist to that design, not a new design.
+
+**What it is, when built:**
+- **Ed25519-signed, offline-verifiable token** encoding customer, tier, and
+  expiry. The public key ships in the distribution; verification is local,
+  with **zero network calls** — no phone-home, ever, for licensing or
+  analytics, matching the "credentials and data never leave your network"
+  claim the product pitch is built on.
+- **Soft enforcement only.** An absent, expired, or unverifiable token
+  produces a startup `WARN` log line, a field on the health endpoint, and a
+  redaction-safe audit event. It must **never** refuse to start and must
+  **never** block or degrade a query. QueryGate sits in the request path of a
+  production system; a licence check able to interrupt data access is itself
+  an availability risk a security review can find and fail — the opposite of
+  the product's own north-star metric.
+- **No kill switch, no time-bomb, no hard fail, no obfuscation.** The source
+  is public under BSL; hiding the check would be theatre, and any of the above
+  would contradict `docs/business/GTM_EXECUTION_PLAN.md` §3's explicit
+  anti-patterns.
+- **`querygate license status`** prints the current tier and expiry; renewal
+  is re-issuance from an offline-held signing key with a plain issuance
+  record (customer, entitlement, expiry, date, key id).
+
+**Definition of done, when this is picked up:** a narrow `LicenseValidator`
+Protocol (the repo's composable-interface convention — `SecretResolver`/
+`DialectAdapter`/`Authenticator`/`AuditSink` precedent) with a
+`SignedTokenLicenseValidator` concrete variant; one non-blocking check point at
+startup and on a timer; the health-endpoint field and audit event; a
+`security-invariant-check` pass confirming the token never carries or exposes
+a credential and opens no second path to the database.
+
+### 198. QueryGate Notary — append-only transparency log for the audit ledger's chain head — not-before-customers
+
+**Effort: M. NOT BEFORE CUSTOMERS — do not claim or implement. Logged per
+`docs/business/GTM_EXECUTION_PLAN.md` §4 (owner decision, 2026-08-21); pitch it
+now, build it when a customer asks, not before.**
+
+**Why it matters:** the shipped hash-chained audit ledger (item 91) is
+tamper-evident, but `docs/business/NORTH_STAR.md` and `docs/PRODUCT_GUIDE.md`
+both already record the honest limit: **unkeyed, it is tamper-evident only
+against an externally anchored head** — without a third party attesting to the
+chain head at a point in time, an operator with write access to the ledger
+file can still rewrite history and re-derive a consistent chain from genesis.
+That documented dependency implies a natural product, named for the first
+time in the GTM plan: a hosted service that anchors the head hash
+independently of the operator who could otherwise rewrite it. A customer
+cannot substitute self-hosting it — an anchor a customer runs themselves is
+their own infrastructure attesting to their own logs, which proves nothing;
+third-partyness is the product, the same way the Structural pillar is won by
+construction rather than by policy.
+
+**What it is, when built:**
+- **Receives only chain head hashes** — no queries, rows, schema, or
+  credentials ever leave the customer's network; bytes meaningless in
+  isolation. This does not touch the data plane and does not weaken the
+  Reach pillar.
+- **Asynchronous, never in the request path.** Audit must never depend on
+  Notary's uptime, for the same reason item 197's entitlement check must never
+  block a query: an availability dependency on a third-party service is a
+  security-review finding.
+- **An append-only transparency log from day one, with published keys.** A
+  notary able to forge or retro-edit an attestation is a security-review
+  finding *about the vendor* — the one failure mode this product cannot
+  afford. Signed receipts, no PII, no data-residency question.
+
+**Definition of done, when this is picked up:** the anchoring client lives
+outside `execution/service.py`'s request path entirely (a background
+publisher reading committed chain heads, never awaited by a query); the
+service itself (receipt issuance, key publication, the transparency log) is
+out of `src/querygate/`'s request-serving surface and scoped as its own
+component; `security-invariant-check` confirms no query/row/schema/credential
+data is ever included in an anchored payload.
