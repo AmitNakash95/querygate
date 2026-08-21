@@ -130,7 +130,7 @@ counsel first.
 
 ### 2. Decide what CI does for a fork PR
 
-`PRE_BSL_CLEANUP_PLAN.md` Phase 4 raises this as "secrets-dependent jobs (live
+An internal planning note raised this as "secrets-dependent jobs (live
 MSSQL/MySQL/Snowflake) will fail for an outside contributor". **Checked against
 the workflows as they stand today, that premise does not hold, and the decision
 is smaller than it looks:**
