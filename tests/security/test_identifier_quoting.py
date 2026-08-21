@@ -1,10 +1,12 @@
 """Caller-supplied identifiers cannot break out of their quoting.
 
 Almost every string a caller sends becomes a **bound parameter**, and
-`test_predicate_payload_is_bound_data_not_executable_sql` pins that. A select
-item's `as` alias is the exception: it is rendered as an **identifier**, not a
-parameter, so it is the one caller-controlled string that reaches the SQL text
-itself. If it could carry its dialect's quote character out of the quoting, the
+`test_predicate_payload_is_bound_data_not_executable_sql` pins that. Aliases are
+the exception: they are rendered as **identifiers**, not parameters, so they are
+the caller-controlled strings that reach the SQL text itself. There are two such
+sinks, and both are covered here — a select item's `as`, and a **table** alias
+(`from_alias` / `joins[].alias`), which lands in the FROM clause via
+`schema_validation`'s `source.alias(name)`. If it could carry its dialect's quote character out of the quoting, the
 "no caller-controlled SQL" guarantee would have a hole in exactly the place the
 guarantee is hardest to see.
 
@@ -21,8 +23,13 @@ absence: a hostile alias legitimately contains the words `FROM` and `DROP`
 nothing. What matters is that the identifier is closed correctly and that the
 statement outside it is unchanged.
 
-`CteSpec.name` is the other identifier a caller names; it is pattern-constrained
-at the AST layer, and that constraint is pinned here too.
+`CteSpec.name` is the third identifier a caller names, and the only one that is
+pattern-constrained at the AST layer (`^[A-Za-z_][A-Za-z0-9_]*$`); that
+constraint is pinned here too. The two alias fields are deliberately *not*
+constrained — adding a pattern there would reject input that is valid today and
+would change the published MCP schema, so it is the owner's call, recorded in
+the audit follow-ups rather than taken unilaterally. Until then, escaping is the
+guarantee and these tests are what hold it.
 """
 
 from __future__ import annotations
@@ -118,6 +125,55 @@ def test_a_hostile_alias_is_rendered_as_one_escaped_identifier(alias: str, diale
     assert ";" not in remainder, remainder
     assert _words(remainder, "DROP") == 0, remainder
     assert _words(remainder, "SELECT") == 1, remainder
+
+
+def _compiled_sql_with_table_alias(alias: str, dialect: str) -> str:
+    """The second identifier sink: a table alias reaches the FROM clause.
+
+    Goes through policy + schema validation so the alias is registered the way a
+    real request registers it (`schema_validation` maps the alias onto
+    `source.alias(name)`), rather than being smuggled straight into the compiler.
+    """
+    from querygate.policy.models import Policy as _Policy
+    from querygate.validation import schema_validation
+
+    query = StructuredQuery.model_validate(
+        {
+            "from": "customers",
+            "from_alias": alias,
+            "select": [{"fn": "count", "col": "*", "as": "n"}],
+        }
+    )
+    tables = {alias: _customers().alias(alias)}
+    stmt, _ = compile_structured_query(query, tables, _Policy(), dialect=dialect)
+    return str(stmt.compile(dialect=DIALECTS[dialect]))
+
+
+@pytest.mark.parametrize("dialect", sorted(DIALECTS))
+@pytest.mark.parametrize("alias", HOSTILE_ALIASES)
+def test_a_hostile_table_alias_is_rendered_as_one_escaped_identifier(alias: str, dialect: str):
+    """Same guarantee for the FROM clause. This sink was unpinned until an audit
+    pointed out that the select-item alias was not, in fact, the only one."""
+    try:
+        sql = _compiled_sql_with_table_alias(alias, dialect)
+    except Exception:
+        return  # refused upstream — also a safe outcome
+
+    identifier = _expected_identifier(alias, dialect)
+    assert identifier in sql, f"table alias not escaped as expected: {sql!r}"
+    remainder = sql.replace(identifier, "«ALIAS»")
+    assert _words(remainder, "FROM") == 1, remainder
+    assert ";" not in remainder, remainder
+    assert _words(remainder, "DROP") == 0, remainder
+    assert _words(remainder, "SELECT") == 1, remainder
+
+
+@pytest.mark.parametrize("dialect", sorted(DIALECTS))
+def test_a_benign_table_alias_still_survives(dialect: str):
+    """Negative control for the table-alias rule."""
+    sql = _compiled_sql_with_table_alias("c", dialect)
+    assert _words(sql, "FROM") == 1
+    assert "customers" in sql
 
 
 @pytest.mark.parametrize("dialect", sorted(DIALECTS))

@@ -82,6 +82,26 @@ def test_live_changelog_release_heading_is_parseable():
     assert check_change_date.release_date("0.1.0") == date(2026, 7, 18)
 
 
+def test_live_the_current_version_has_a_dated_changelog_entry():
+    """Binds pyproject to CHANGELOG. Without it, a version bump with no changelog
+    entry keeps the gate green and only fails later, at stamp time."""
+    version = check_change_date.project_version()
+    assert check_change_date.release_date(version) is not None, (
+        f"pyproject version {version} has no `## [{version}] — YYYY-MM-DD` heading in "
+        f"CHANGELOG.md, so its Change Date cannot be derived"
+    )
+
+
+def test_live_wiring_reaches_pyproject_and_the_changelog():
+    """Overrides only `license_text`, so `project_version()` and `release_date()`
+    both execute against the real files rather than being supplied by the test."""
+    version = check_change_date.project_version()
+    released = check_change_date.release_date(version)
+    stamped = check_change_date.change_date_for(released).isoformat()
+    text = _stamped(work=f"QueryGate {version}", change_date=stamped)
+    assert check_change_date.check(license_text=text) == []
+
+
 def test_live_grant_matches_the_decided_shape_a_text():
     """The licence must carry the grant the owner decided, not a paraphrase."""
     license_text = " ".join(check_change_date.LICENSE_FILE.read_text().split())
@@ -104,10 +124,12 @@ def test_change_date_is_exactly_four_years_after_release():
 
 
 def test_a_leap_day_release_does_not_crash_or_slip_a_year():
-    """29 Feb + 4 years is 29 Feb again; the non-leap fallback is the guard for a
-    different `CHANGE_DATE_YEARS`, and must land in the same year either way."""
+    """29 Feb + 4 years is normally 29 Feb again — but not across a century that
+    is not a leap year, which IS reachable with the production constant: 2096 +
+    4 = 2100, and 2100 is not a leap year. The fallback must land in the same
+    year, never slip into March or the next year."""
     assert check_change_date.change_date_for(date(2028, 2, 29)) == date(2032, 2, 29)
-    assert check_change_date.change_date_for(date(2028, 2, 29), years=1) == date(2029, 2, 28)
+    assert check_change_date.change_date_for(date(2096, 2, 29)) == date(2100, 2, 28)
 
 
 def test_an_undated_version_has_no_release_date():
@@ -137,10 +159,11 @@ def test_a_change_date_that_is_not_four_years_out_fails():
     assert "must be 2030-07-18" in problems[0]
 
 
-def test_an_off_by_one_day_stamp_fails():
-    """The realistic typo, and the one a human eye slides over."""
+def test_a_non_iso_or_off_by_one_day_stamp_fails():
+    """Two realistic typos: a human-readable date, and a one-day slip that the
+    eye slides over."""
     problems = check_change_date.check(
-        license_text=_stamped(change_date="2030-07-ights"),
+        license_text=_stamped(change_date="July 18, 2030"),
         version="1.2.3",
         released=date(2026, 7, 18),
     )
@@ -187,6 +210,35 @@ def test_an_unstamped_draft_passes_normally_but_fails_release_mode():
     assert check_change_date.check(license_text=draft, version="1.2.3") == []
     problems = check_change_date.check(license_text=draft, version="1.2.3", release=True)
     assert any("must not ship it" in p for p in problems)
+
+
+def test_a_stamped_licence_that_still_carries_the_draft_banner_is_refused():
+    """The banner half of `is_draft` had no test: every draft fixture was a draft
+    by virtue of its `<CHANGE_DATE>` placeholder. Without this, dropping the
+    `DRAFT_BANNER` operand passes the whole suite, and a tagged release ships a
+    legal document that declares itself NOT YET IN FORCE."""
+    banner = f"===\n {check_change_date.DRAFT_BANNER}. NOT YET IN FORCE.\n===\n\n"
+    stamped_but_bannered = banner + STAMPED
+    problems = check_change_date.check(
+        license_text=stamped_but_bannered,
+        version="1.2.3",
+        released=date(2026, 7, 18),
+        release=True,
+    )
+    assert any("must not ship it" in p for p in problems)
+    # And in normal mode it is a half-filled draft: banner present, no placeholder.
+    normal = check_change_date.check(
+        license_text=stamped_but_bannered, version="1.2.3", released=date(2026, 7, 18)
+    )
+    assert any("half-filled" in p for p in normal)
+
+
+def test_the_live_draft_is_a_draft_by_banner_as_well_as_by_placeholder():
+    """Pins the wording too: rewording the banner in LICENSE without updating
+    DRAFT_BANNER would silently disarm that operand."""
+    text = check_change_date.LICENSE_FILE.read_text()
+    if check_change_date.is_draft(text):
+        assert check_change_date.DRAFT_BANNER in text
 
 
 def test_a_half_filled_draft_fails_even_in_normal_mode():
@@ -268,6 +320,10 @@ def test_main_release_flag_reaches_the_check(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["check_change_date.py", "--check", "--release"])
     assert check_change_date.main() == 0
     assert seen["release"] is True
+    # ...and the negative: a bare --check must not silently enable release mode.
+    monkeypatch.setattr(sys, "argv", ["check_change_date.py", "--check"])
+    assert check_change_date.main() == 0
+    assert seen["release"] is False
 
 
 def test_stamp_writes_the_derived_date(monkeypatch, tmp_path):
@@ -291,6 +347,19 @@ def test_stamp_writes_the_derived_date(monkeypatch, tmp_path):
         check_change_date.check(license_text=written, version="2.0.0", released=date(2027, 3, 1))
         == []
     )
+
+
+def test_stamp_refuses_a_licence_with_no_parameter_to_stamp(monkeypatch, tmp_path):
+    """Otherwise a failed stamp reports success: the file is written back
+    unchanged and `main()` prints "stamped LICENSE: ..." anyway."""
+    license_file = tmp_path / "LICENSE"
+    license_file.write_text("Parameters\n")
+    monkeypatch.setattr(check_change_date, "LICENSE_FILE", license_file)
+    monkeypatch.setattr(check_change_date, "project_version", lambda: "1.2.3")
+    monkeypatch.setattr(check_change_date, "release_date", lambda v, **k: date(2026, 7, 18))
+    with pytest.raises(SystemExit, match="no `Licensed Work:`"):
+        check_change_date.stamp()
+    assert license_file.read_text() == "Parameters\n", "a refused stamp must not write"
 
 
 def test_stamp_refuses_a_version_with_no_release_date(monkeypatch, tmp_path):

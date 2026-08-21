@@ -2036,3 +2036,22 @@ kept outside the product surface under `archive/extraction/`.
 <p align="center">
   <img src="landing/assets/favicon.svg" alt="QueryGate app icon" width="64">
 </p>
+
+## Licence
+
+QueryGate **will be** licensed under the **Business Source License 1.1**,
+converting to Apache-2.0 four years after each release. `LICENSE` currently holds
+that text as a **draft that is not yet in force** — until its banner is removed,
+QueryGate remains proprietary and all rights are reserved.
+
+The headline of the intended grant: **internal production use is free, forever,
+for every version released under it, with no limit** — no user cap, no database
+cap, no seat count. The only restriction is providing QueryGate itself to third
+parties on a hosted, managed, or embedded basis, with a carve-out for an MSP
+running it on a single licensee's behalf.
+
+- [`LICENSE`](LICENSE) — the draft terms
+- [`docs/LICENSING_FAQ.md`](docs/LICENSING_FAQ.md) — what it means in practice
+- [`docs/THIRD_PARTY_LICENSES.md`](docs/THIRD_PARTY_LICENSES.md) — every dependency's licence
+
+None of this is legal advice, and the terms are not settled until reviewed.

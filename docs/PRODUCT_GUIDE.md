@@ -1586,7 +1586,7 @@ or worked around.
 > Credentials never sit on any returned model, and that's asserted against the
 > live API schema, not by convention. And none of it is "trust us": every
 > guarantee is backed by a deny-by-default CI gate (static analysis, dependency
-> audit, SBOM, image and secret scanning, OpenAPI fuzzing, and a 518-test
+> audit, SBOM, image and secret scanning, OpenAPI fuzzing, and a 550-test
 > adversarial suite), and reviewers get a reproducible packet where each claim
 > names the command that reproduces it. The published container image is signed
 > (cosign keyless) and carries SLSA build provenance, both consumer-verifiable.
@@ -1880,7 +1880,7 @@ summary.
 
 The gates fall into three groups:
 
-- **The access boundary itself.** The adversarial security suite (518 tests,
+- **The access boundary itself.** The adversarial security suite (550 tests,
   `make test-security`) encodes specific known bypass classes as regressions —
   denied-column inference, undeclared-table smuggling, predicate-as-SQL,
   schema-discovery leaks, policy-cap breaches, audit no-leak. On top of that,
@@ -4079,7 +4079,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   enough that the 90-minute evaluation the whole go-to-market motion depends
   on fails outright. BSL dissolves the tension instead of choosing a side of
   it: everything is visible, runnable, and evaluable under one licence, and
-  the restriction is on **scale and resale**, never on **capability** — the
+  the restriction is on **resale** — providing QueryGate itself to third parties on a hosted, managed, or embedded basis — never on **capability or scale** — the
   right axis for an enforcement product, since a crippled security tool is
   dismissed rather than evaluated. Revisit only via a NORTH_STAR-level
   decision, the same bar CLAUDE.md non-negotiable #8 sets for the non-goals

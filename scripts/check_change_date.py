@@ -9,10 +9,9 @@ silently given away four years of grant or taken them back.
 
 **Why the Licensed Work names a version.** "4 years per release" and
 ``Licensed Work: QueryGate, all versions`` cannot both be true: one Change Date
-cannot govern releases stamped in different years. Every BSL adopter that stamps
-per release names the release in the parameter (CockroachDB's
-``Licensed Work: CockroachDB 22.2``, MariaDB MaxScale's per-version files), and
-each released artifact carries its own ``LICENSE``. So the stamper writes
+cannot govern releases stamped in different years. Adopters that stamp per
+release name the release in this parameter (CockroachDB 22.2, MariaDB MaxScale
+24.08), and each released artifact carries its own ``LICENSE``. So the stamper writes
 ``QueryGate <version>``, and the gate fails if that version drifts from
 ``pyproject.toml``. This resolves a contradiction between
 ``PRE_BSL_CLEANUP_PLAN.md`` Phase 0 ("all versions") and the per-release
