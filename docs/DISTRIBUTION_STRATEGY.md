@@ -171,10 +171,15 @@ Practically, you have a few options, roughly in order of cost:
 > relative to what it protects, and the wording (especially the
 > reverse-engineering and liability clauses) is what makes it enforceable.
 
-Note this is *separate* from the open-source-style license question. Right now
-the repo has no `LICENSE` file at all, which by default means "all rights
-reserved" — fine for a private product, but a deliberate commercial license is
-what you'd attach to a customer delivery.
+Note this is *separate* from the open-source-style license question. The repo
+already carries a top-level `LICENSE` file (currently a proprietary,
+all-rights-reserved grant); it is in the process of being replaced as part of
+the commercial/licensing work in `docs/business/GTM_EXECUTION_PLAN.md`, and
+this document takes no position on what the replacement's terms say — see
+that plan for the actual grant shape and its status. Regardless of which
+grant is in force at any given moment, a deliberate *commercial* license
+(the numbered options above) is a separate document you'd still attach to a
+customer delivery.
 
 ---
 

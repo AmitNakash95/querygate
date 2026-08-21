@@ -935,6 +935,16 @@ surface them for a human, never auto-start them.
   was reconciled against it. Needs a maintainer decision — reverse the
   non-goal with a recorded rationale, or close item 18 as will-not-build —
   before any implementation.
+- **197 · Offline entitlement token for the paid tier.** Added 2026-08-21
+  (GTM WP4, owner decision) — Shape A removed the production ceiling the
+  licence key existed to self-check, so this is now an entitlement token for
+  the paid tier, not pre-launch work. Gated on a paying customer needing it;
+  ships alongside item 198. Not-before-customers — do not claim or implement.
+- **198 · QueryGate Notary.** Added 2026-08-21 (GTM WP4/§4, owner decision) —
+  an append-only transparency log anchoring the audit ledger's chain head
+  (hashes only, asynchronous, never in the request path). Pitch it now, build
+  it only when a customer asks. Not-before-customers — do not claim or
+  implement.
 
 ## Coordination-gated (partly non-code — an agent can prep, not finish)
 
