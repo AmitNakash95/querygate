@@ -234,11 +234,54 @@ gh attestation verify oci://ghcr.io/agitmit/querygate:0.1.0 --repo AGitmit/Query
 ```
 
 **Still deferred to a maintainer decision (TODO.md item 30/89 phase 2):** the *first*
-signed+attested release is only produced when a maintainer actually pushes a version tag
-(publishing is never automatic on a commit), and **Python package-index (PyPI/private
-index) publishing** has no index chosen yet — the signing/provenance above cover the
-container image, which is how QueryGate is distributed; the Python wheel/sdist are verified
-by `SHA256SUMS`/`make verify-release` until an index is chosen.
+signed+attested release is only produced when a maintainer actually pushes a version tag —
+publishing is never automatic on a `main` commit.
+
+**Python package index: public PyPI.** The index question is closed (see the go-to-market
+plan's distribution decision): the Python wheel and sdist publish to **public PyPI**, and
+the container image to **GHCR** as already described above. A private index was rejected —
+distribution friction is adoption friction, and a source-available licence whose package
+cannot be `pip install`ed defeats its own purpose.
+
+The *decision* is made; the *mechanism* is not built. `.github/workflows/release.yml`
+today builds, scans, pushes, signs, and attests the container image only — it contains no
+PyPI upload step, and no index credential or trusted-publisher configuration exists yet.
+Until that step lands, the wheel and sdist are distributed as release artifacts and
+verified by `SHA256SUMS` / `make verify-release`. When it does land it must inherit the
+same tag gate as the image: publishing is never automatic on a `main` commit.
+
+## Stamping the BSL Change Date
+
+QueryGate's licence is the Business Source License 1.1, converting to Apache-2.0
+**four years after each release** (`docs/business/GTM_EXECUTION_PLAN.md` §2.3). That is
+per *release*, not a constant: `LICENSE` names the release it governs and carries that
+release's own Change Date, which is why `Licensed Work` reads `QueryGate <version>`
+rather than "all versions" — one date cannot govern releases stamped four years apart.
+
+The date is **derived, never typed**:
+
+```bash
+make stamp-change-date     # LICENSE <- this version + (CHANGELOG release date + 4 years)
+```
+
+It reads the version from `pyproject.toml` and the release date from that version's
+`CHANGELOG.md` heading (`## [0.1.0] — 2026-07-18`), so a version with no dated changelog
+entry is refused rather than stamped with a guess. Add the changelog entry first.
+
+Two gates hold it:
+
+- **`make change-date-check`** runs on every push (CI) and inside `make release-check`.
+  It fails if the Change Date is not exactly four years after the release date, if it is
+  not a real ISO date, if `Licensed Work` no longer names the current version (a version
+  bump without re-stamping), or if the Change License has been altered from Apache-2.0.
+  While `LICENSE` is still the unstamped draft it asserts the draft is *consistent* —
+  a half-filled draft, banner present but placeholders quietly removed, fails.
+- **`make change-date-check-release`** is the pre-tag gate: everything above, and it
+  additionally refuses any remaining draft banner or `<LICENSOR>` / `<VERSION>` /
+  `<CHANGE_DATE>` placeholder. **Run it before tagging** — it is what stops a release
+  shipping a placeholder licence.
+
+`tests/unit/test_change_date.py` drift-tests both, so the rules cannot rot silently.
 
 ## Tagging
 
