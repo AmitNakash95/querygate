@@ -165,14 +165,14 @@ test-cov: ## Run tests with coverage report
 # ─── Code quality ─────────────────────────────────────────────────────────────
 .PHONY: format
 format: ## Format code with Black
-	poetry run black src/ tests/ examples/
+	poetry run black src/ tests/ examples/ scripts/
 
 .PHONY: fmt
 fmt: format ## Alias for format
 
 .PHONY: format-check
 format-check: ## Check formatting without making changes
-	poetry run black --check src/ tests/ examples/
+	poetry run black --check src/ tests/ examples/ scripts/
 
 .PHONY: lint
 lint: format-check ## Alias for format-check (extend with ruff/mypy when added)
@@ -269,6 +269,14 @@ mcp-extension-schema: ## Regenerate the io.github.agitmit/structured-query-ast M
 sbom: ## Generate a CycloneDX SBOM, dependency vulnerability report, and SHA256SUMS from dist/ (run `poetry build` first)
 	poetry run python scripts/generate_sbom.py
 
+.PHONY: license-report
+license-report: ## Regenerate docs/THIRD_PARTY_LICENSES.md — every poetry.lock package's licence, split by whether QueryGate redistributes it
+	poetry run python scripts/check_licenses.py --write
+
+.PHONY: license-check
+license-check: ## Gate: every locked dependency is permissively licensed or individually recorded (strong copyleft is never waivable), and the report is current (drift-tested by test_third_party_licenses.py)
+	poetry run python scripts/check_licenses.py --check
+
 .PHONY: verify-release
 verify-release: ## Verify dist/ artifact integrity against dist/SHA256SUMS (the check a consumer runs after download). Pass ARGS="--dist-dir path".
 	poetry run python scripts/verify_release.py $(ARGS)
@@ -286,6 +294,7 @@ release-check: ## Run deterministic source/package release gates and build artif
 	poetry run python -m querygate.catalog_cli adaptive-learning-test
 	poetry build
 	poetry run python scripts/check_release_artifacts.py
+	$(MAKE) license-check
 	$(MAKE) sbom
 
 .PHONY: release-smoke
