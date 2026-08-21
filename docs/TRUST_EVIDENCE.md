@@ -500,7 +500,7 @@ guardrails behave against a corpus of boundary attacks — and how a naive
 raw-SQL-forwarding gateway behaves against the same attacks.**
 
 This document turns the adversarial "five-minute demo" from
-[`GO_TO_MARKET.md`](business/GO_TO_MARKET.md) — historically performed live by a
+the go-to-market plan (internal) — historically performed live by a
 salesperson — into a numbers-on-the-page artifact anyone can regenerate. It is
 the evidence behind the claim that structurally forbidding raw SQL is a
 categorically different posture from filtering or trusting a model-generated

@@ -862,7 +862,7 @@ position.
 - [x] **50 (phase 2)** — Per-principal rate limits / query quotas over time. ✅
   **Shipped** (`RedisQuotaLimiter` — cross-replica shared quota budget via Lua,
   closing the per-replica-multiplication gap).
-- [ ] **193** — `docs/product-guide.html` has no freshness gate against its
+- [x] **193** — `docs/product-guide.html` has no freshness gate against its
   markdown source. *Surfaced 2026-08-12 by `architecture-boundary-reviewer` and
   `claim-reviewer` when the item-179 merge landed with the generated copy stale
   — by three whole sections plus two Decision Log entries, and stale since
