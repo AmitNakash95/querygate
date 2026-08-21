@@ -1,8 +1,31 @@
 # Distributing QueryGate to a customer — a decision guide
 
 *A plain-language reference to re-read while deciding how you want to ship
-QueryGate. Nothing here is locked in; it captures the options and the honest
-trade-offs so you can pick a delivery model with eyes open.*
+QueryGate. It captures the delivery options and their honest trade-offs.*
+
+> **Read this first — the framing below is superseded, and kept for reference
+> only.** This document was written to answer *"how do I keep the source from
+> being exposed?"*. Under the intended Business Source License 1.1 that
+> question is closed: the source is **published on purpose**. The whole first
+> half — the three delivery models compared on "source exposure", and the
+> obfuscation survey — survives only as a record of why source-hiding was
+> abandoned, not as a live decision.
+>
+> The questions that actually matter now are different ones:
+>
+> | Old question | The question that replaced it |
+> |---|---|
+> | How do I stop the customer reading the code? | Nothing does; the licence is published so they can. |
+> | Which delivery model hides the source best? | Which delivery model is **easiest to adopt**? (Container image from GHCR, wheel from PyPI — see [`RELEASING.md`](RELEASING.md).) |
+> | How do I make a licence check bite? | It deliberately does not — enforcement is **soft, always**. See [`LICENSE_ENFORCEMENT.md`](LICENSE_ENFORCEMENT.md)'s superseding banner. |
+> | What does the licence forbid? | Only offering QueryGate *itself* as a hosted/managed service. Internal production use is unlimited. See [`LICENSING_FAQ.md`](LICENSING_FAQ.md). |
+> | How does a customer know the artifact is genuine? | Cosign keyless signature + SLSA provenance, both consumer-verifiable — see [`RELEASING.md`](RELEASING.md). |
+>
+> **A separately negotiated commercial agreement is still a real thing** — for
+> support, indemnification, and a paid tier — and the "Do you need a license
+> agreement?" section below is still current on that point. It is an *addition*
+> to the public licence, never a replacement for it. Nothing here is legal
+> advice, and [`../LICENSE`](../LICENSE) is a draft that is not yet in force.
 
 ---
 
@@ -171,15 +194,16 @@ Practically, you have a few options, roughly in order of cost:
 > relative to what it protects, and the wording (especially the
 > reverse-engineering and liability clauses) is what makes it enforceable.
 
-Note this is *separate* from the open-source-style license question. The repo
-already carries a top-level `LICENSE` file (currently a proprietary,
-all-rights-reserved grant); it is in the process of being replaced as part of
-the commercial/licensing work in `docs/business/GTM_EXECUTION_PLAN.md`, and
-this document takes no position on what the replacement's terms say — see
-that plan for the actual grant shape and its status. Regardless of which
-grant is in force at any given moment, a deliberate *commercial* license
-(the numbered options above) is a separate document you'd still attach to a
-customer delivery.
+Note this is *separate* from the public-licence question. The repo's top-level
+[`LICENSE`](../LICENSE) now holds a **draft** of the intended Business Source
+License 1.1 terms, behind a banner saying it is not yet in force; until that
+banner is removed, QueryGate remains proprietary and all rights are reserved.
+See [`LICENSING_FAQ.md`](LICENSING_FAQ.md) for what the intended grant means in
+practice and [`LICENSE_NOTES.md`](LICENSE_NOTES.md) for the drafting notes
+prepared for counsel. Whichever grant is in force at a given moment, a
+deliberate *commercial* agreement (the numbered options above) is a separate
+document you would still attach to a paid customer delivery — it buys support
+and indemnification, which no public licence provides.
 
 ---
 

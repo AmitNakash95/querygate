@@ -184,3 +184,43 @@ governs a version a customer is still running after its Change Date has passed b
 before they upgrade. The intended reading is that each release converts on its own date
 and conversion is irreversible for that release, but the licence text does not say so
 explicitly and it is the question a licensee's lawyer will ask first.
+
+## SPDX per-file headers — deliberately deferred (decided 2026-08-21)
+
+`PRE_BSL_CLEANUP_PLAN.md` Phase 5 asks for a decision on stamping
+`SPDX-License-Identifier: BUSL-1.1` into every source file, and notes correctly
+that consistency matters more than the choice. **The decision is: not yet, and
+for a specific reason, not inertia.**
+
+Writing that identifier into ~350 files today would assert, in machine-readable
+form and in 350 places, that QueryGate *is* licensed under BUSL-1.1. It is not:
+`LICENSE` is a draft behind a NOT-YET-IN-FORCE banner and grants nothing. This is
+the identical objection that keeps a `license = "BUSL-1.1"` SPDX expression and a
+`License :: ...` trove classifier out of `pyproject.toml` — an automated
+compliance scanner, an SBOM consumer, or a package index reads that field and
+propagates it without any human ever re-opening `LICENSE` to notice the banner.
+A false licence assertion is worse in 350 files than in one.
+
+**When it flips**, it should land in the same change that removes the draft
+banner, and it should be mechanical rather than hand-applied:
+
+- Add the header to `src/`, `tests/`, `scripts/` and `examples/` in one
+  scripted pass — never file-by-file, which is how a repository ends up with
+  three different header spellings.
+- Enforce it with a check in `.githooks/pre-commit` and a matching test, in the
+  same shape as `make license-check` and `make change-date-check`: a new file
+  without the header fails, so it cannot drift after the initial pass.
+- Skip generated files (`docs/SCOPE_CATALOG.md`, `docs/THIRD_PARTY_LICENSES.md`,
+  `docs/TRUST_EVIDENCE.md`, `docs/product-guide.html`) — their generators write
+  them, and a header would either be stripped on regeneration or have to be
+  taught to every generator.
+- Stamp the *version-independent* identifier only. The per-release Change Date
+  belongs in `LICENSE`, which `make stamp-change-date` already owns; duplicating
+  a date into every file would create 350 things to re-stamp per release and one
+  of them would eventually be missed.
+
+**For counsel:** confirm that per-file SPDX identifiers alongside the single
+`LICENSE` are compatible with BSL covenant 4 (do not modify the License text) —
+the reading here is that a header in a *source* file is a notice about the file,
+not a modification of the License text, but it is a cheap question to ask while
+the rest of the review is open.

@@ -2415,10 +2415,15 @@ Two caps, each `None` (off) by default, each applying per **(principal,
 connection, declared purpose, table)** over a rolling window:
 
 - `max_shape_repeats_per_window` — how many times one query shape may be re-run
-  against one table. Intended as the targeted probe cap, but **currently
-  evadable** (item 186) — the fingerprint does not canonicalize a referenced
-  select alias, a cte rename, a nested-scope alias, or list order, so a prober
-  can mint a fresh bucket per probe. Do not set this cap alone until that lands.
+  against one table. The targeted probe cap. It was **evadable as item 179
+  shipped** (item 186, closed 2026-08-21): the fingerprint did not canonicalize a
+  referenced select alias, a cte rename, a nested-scope alias, or list order, so
+  twenty probes differing only in `count(*) AS n1…n20` measured as twenty
+  distinct buckets and the cap never tripped. It now collapses a bare reference
+  to any caller-authored name to one token, resolves table aliases from every
+  scope, and sorts every list — the same twenty probes measure as one. Note this
+  **changed existing fingerprints**, so an in-flight rolling window reset once on
+  deploy.
 - `max_aggregate_queries_per_window` — how many aggregate queries may touch one
   table however the shape varies. The blunt backstop that catches a prober who
   varies its shape to dodge the first cap.
@@ -3045,8 +3050,8 @@ below:
 - `POST /{connection}/query/{admission_id}/cancel` — request cancellation of
   a `queue_mode=async` execution; free while still queued, gated on
   `Policy.allow_query_cancellation` for a running query (see
-  [Agent-visible capacity waiting](../README.md#agent-visible-capacity-waiting)
-  in the README for the full contract).
+  [Agent-visible capacity waiting](FEATURE_REFERENCE.md#agent-visible-capacity-waiting)
+  for the full contract).
 - `POST /{connection}/query/batch` — the same, for a list of queries against
   one connection in a single call.
 - `POST /admin/reload-config` — hot-reload connections/policy/catalog from

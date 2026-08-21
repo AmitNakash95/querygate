@@ -187,9 +187,15 @@ class DisclosureBudgetExceededError(QuotaExceededError):
 
     `quota_kind` is `"disclosure_shape"` (one query shape re-run too many times
     — the differencing-probe signature) or `"disclosure_table"` (too many
-    aggregate queries against one table however the shape varied). The message
-    deliberately names neither the table nor the shape: which table is close to
-    its budget is itself a disclosure channel.
+    aggregate queries against one table however the shape varied). It lives on
+    the exception object only, for `metrics.classify_rejection` and the
+    operator-facing breakdown — the caller-visible message is **byte-identical
+    for both kinds** and names neither the table, the shape, the cap that
+    tripped, its configured value, nor the window length. Telling a prober which
+    cap it hit answers "will varying my shape help?" for it (TODO.md item 187);
+    which table is close to its budget is itself a disclosure channel.
+    `execution/disclosure_budget.rejection_message` is where that is enforced,
+    and `test_the_two_caps_produce_a_byte_identical_refusal` pins it.
     """
 
 

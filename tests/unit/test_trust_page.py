@@ -72,6 +72,42 @@ def test_build_document_embeds_every_source_and_the_dependency_summary():
         assert f"## {title}" in doc
 
 
+def test_every_relative_link_in_the_generated_page_resolves():
+    """The trust packet embeds docs written for three different directories
+    (`docs/`, `docs/business/`, and the repo root), so every relative link in a
+    source doc has to be repointed at generation time or it 404s for the one
+    reader this page exists for. Before `_repoint_links` there were ten dead
+    links in the committed page."""
+    committed = _DOC.read_text(encoding="utf-8")
+    broken = []
+    for match in re.finditer(r"\]\(([^)\s]+)\)", committed):
+        target = match.group(1)
+        if target.startswith(("http://", "https://", "mailto:", "#")):
+            continue
+        path, _sep, _anchor = target.partition("#")
+        if not path:
+            continue
+        if not (_DOC.parent / path).resolve().exists():
+            broken.append(target)
+    assert not broken, f"docs/TRUST_EVIDENCE.md has unresolvable links: {sorted(set(broken))}"
+
+
+def test_repoint_links_rewrites_relative_targets_and_leaves_urls_alone():
+    text = (
+        "see [a](docs/THREAT_MODEL.md), [b](../INFERENCE_RISKS.md#x), "
+        "[c](https://example.test/x), [d](#anchor)"
+    )
+    rewritten = generate_trust_page._repoint_links(
+        text, generate_trust_page.ROOT / "docs" / "business"
+    )
+    # `docs/business/docs/THREAT_MODEL.md` does not exist, but the rewrite is
+    # purely positional and must still be relative to `docs/`, not to the source.
+    assert "](business/docs/THREAT_MODEL.md)" in rewritten
+    assert "](INFERENCE_RISKS.md#x)" in rewritten
+    assert "](https://example.test/x)" in rewritten
+    assert "](#anchor)" in rewritten
+
+
 def test_dependency_summary_reports_zero_when_allowlist_is_empty(tmp_path, monkeypatch):
     empty = tmp_path / "allowlist.json"
     empty.write_text("[]", encoding="utf-8")

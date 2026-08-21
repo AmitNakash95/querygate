@@ -11,7 +11,7 @@
 
 ## Security & reliability posture
 
-*Source: [`docs/SECURITY_POSTURE.md`](docs/SECURITY_POSTURE.md).*
+*Source: [`docs/SECURITY_POSTURE.md`](SECURITY_POSTURE.md).*
 
 # QueryGate — Security & Reliability Posture
 
@@ -312,7 +312,7 @@ point at a gate that exists and passes.*
 
 ## Compliance control mapping
 
-*Source: [`docs/COMPLIANCE_MAPPING.md`](docs/COMPLIANCE_MAPPING.md).*
+*Source: [`docs/COMPLIANCE_MAPPING.md`](COMPLIANCE_MAPPING.md).*
 
 # Compliance control mapping (SOC 2 / ISO 27001 readiness)
 
@@ -491,7 +491,7 @@ remainder.
 
 ## Adversarial benchmark report
 
-*Source: [`docs/business/SECURITY_BENCHMARK.md`](docs/business/SECURITY_BENCHMARK.md).*
+*Source: [`docs/business/SECURITY_BENCHMARK.md`](business/SECURITY_BENCHMARK.md).*
 
 # QueryGate adversarial security benchmark
 
@@ -500,7 +500,7 @@ guardrails behave against a corpus of boundary attacks — and how a naive
 raw-SQL-forwarding gateway behaves against the same attacks.**
 
 This document turns the adversarial "five-minute demo" from
-[`GO_TO_MARKET.md`](GO_TO_MARKET.md) — historically performed live by a
+[`GO_TO_MARKET.md`](business/GO_TO_MARKET.md) — historically performed live by a
 salesperson — into a numbers-on-the-page artifact anyone can regenerate. It is
 the evidence behind the claim that structurally forbidding raw SQL is a
 categorically different posture from filtering or trusting a model-generated
@@ -528,7 +528,7 @@ poetry run querygate-security-benchmark list
 
 Exit code is `0` iff the run is clean (every attack caught, no regressions), so
 the same command gates CI and a periodic integrity job. The corpus lives in
-[`benchmarks/security_boundary_v1.yaml`](../../benchmarks/security_boundary_v1.yaml);
+[`benchmarks/security_boundary_v1.yaml`](../benchmarks/security_boundary_v1.yaml);
 the runner is `querygate.security_benchmark`; the harness is regression-locked
 by `tests/unit/test_security_benchmark.py`.
 
@@ -548,7 +548,7 @@ by `tests/unit/test_security_benchmark.py`.
    reproducible by a third party. (Only the latency figures vary run to run and
    are reported as informational.)
 3. **It is honest by construction.** Documented inference residuals
-   ([`docs/INFERENCE_RISKS.md`](../INFERENCE_RISKS.md)) are carried in the
+   ([`docs/INFERENCE_RISKS.md`](INFERENCE_RISKS.md)) are carried in the
    corpus and reported in their own line — the benchmark discloses what
    QueryGate does *not* block rather than cherry-picking only its wins. The
    `test_every_attack_case_declares_a_vulnerable_baseline` test prevents the
@@ -629,14 +629,14 @@ comparison is scoped as phase 2 below.
 This benchmark is the **publishable subset** of QueryGate's adversarial QA. The
 full guarantee set — including error-masking, credential redaction, catalog
 disclosure, concurrency/DoS, and config-governance authorization — is
-regression-locked in [`tests/security/`](../../tests/security/) (TODO.md item
-28) and described in [`docs/THREAT_MODEL.md`](../THREAT_MODEL.md). The benchmark
+regression-locked in [`tests/security/`](../tests/security/) (TODO.md item
+28) and described in [`docs/THREAT_MODEL.md`](THREAT_MODEL.md). The benchmark
 exists to make the structural core of that posture *legible and reproducible to
 an outside reviewer*, not to replace the full suite.
 
 ## Responsible disclosure program
 
-*Source: [`SECURITY.md`](SECURITY.md).*
+*Source: [`SECURITY.md`](../SECURITY.md).*
 
 # Security Policy
 
@@ -754,9 +754,9 @@ new release rather than a backport unless otherwise agreed.
 ## How we back these guarantees
 
 The claims above are enforced by code and tested in CI, not asserted by
-convention. See [docs/SECURITY_POSTURE.md](docs/SECURITY_POSTURE.md) for the
+convention. See [docs/SECURITY_POSTURE.md](SECURITY_POSTURE.md) for the
 full, verifiable security posture (SAST, dependency/SBOM audit, container and
 secret scanning, OpenAPI fuzzing, the adversarial test suite, and the threat
-model), and [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the threat-by-threat
+model), and [docs/THREAT_MODEL.md](THREAT_MODEL.md) for the threat-by-threat
 control and test mapping.
 
