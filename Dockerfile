@@ -11,6 +11,13 @@ ENV POETRY_NO_INTERACTION=1 \
     POETRY_CACHE_DIR=/tmp/poetry_cache
 COPY pyproject.toml poetry.lock ./
 COPY README.md ./
+# `poetry build` needs LICENSE here, not just in the runtime stage: pyproject
+# declares `license-files = ["LICENSE"]`, so the wheel build fails with
+# "No files found for license file glob pattern 'LICENSE'" without it. This
+# broke every image build the moment that declaration landed, and only
+# `make release-smoke` catches it — the wheel builds fine on the host, where
+# the file is present.
+COPY LICENSE ./
 COPY src ./src
 COPY examples ./examples
 RUN poetry install --no-root --only main \
