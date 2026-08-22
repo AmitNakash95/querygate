@@ -150,13 +150,16 @@ _VOLATILE_SHAPE_KEYS = frozenset(
 )
 
 # Every bare reference to a caller-authored output name collapses to this single
-# constant rather than to a positional token. Deliberately: a positional scheme
+# constant rather than to a positional marker. (Named `..._MARKER`, not
+# `..._TOKEN`: "token" means a bearer credential everywhere else in this
+# codebase, and Bandit's B105 flagged the old name as a hardcoded password —
+# a false positive, but the ambiguity was real in a security product.) Deliberately: a positional scheme
 # has to agree with the list sorting below on *which* position, and a caller who
 # reorders their select list would otherwise shift every token. One constant
 # cannot be gamed by any reordering, and the only cost is that `ORDER BY
 # <alias-a>` and `ORDER BY <alias-b>` share a bucket — the trips-sooner
 # direction this module already commits to.
-_ALIAS_REFERENCE_TOKEN = "#alias"
+_ALIAS_REFERENCE_MARKER = "#alias"
 
 # Keys under which `normalize_query_shape` records a caller-*authored* name: a
 # select item's output alias and a cte's name. Both are dropped by
@@ -242,7 +245,7 @@ def _canonicalize(node: Any, aliases: Dict[str, str], authored: set) -> Any:
       plus a sliding predicate constant produced **twenty distinct
       fingerprints** — `max_shape_repeats_per_window` never tripped at any
       value, measured. Every such reference now collapses to
-      `_ALIAS_REFERENCE_TOKEN`.
+      `_ALIAS_REFERENCE_MARKER`.
     * **List order.** `select` items, `and_terms`/`or_terms`, `joins`, `group_by`
       and set-operation arms were all order-*sensitive* here while being
       semantically order-insensitive (or, for a left join / `EXCEPT`, merely
@@ -267,7 +270,7 @@ def _canonicalize(node: Any, aliases: Dict[str, str], authored: set) -> Any:
         # Checked before the dotted rewrite, and it cannot shadow it: an
         # authored name is a bare identifier, so it never contains a dot.
         if folded in authored:
-            return _ALIAS_REFERENCE_TOKEN
+            return _ALIAS_REFERENCE_MARKER
         prefix, sep, rest = folded.partition(".")
         # A cte's columns are referenced `<cte name>.<column>`, and
         # `effective_name_map` maps a cte name to ITSELF (it is the scope's
@@ -275,7 +278,7 @@ def _canonicalize(node: Any, aliases: Dict[str, str], authored: set) -> Any:
         # cte rename walked straight through. Checked first, for the same reason
         # the bare case is: the authored name is the caller-varied part.
         if sep and prefix in authored:
-            return f"{_ALIAS_REFERENCE_TOKEN}{sep}{rest}"
+            return f"{_ALIAS_REFERENCE_MARKER}{sep}{rest}"
         if sep and prefix in aliases:
             return f"{aliases[prefix]}{sep}{rest}"
         return folded
