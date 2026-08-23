@@ -231,6 +231,16 @@ order-of-magnitude, not commitments.
 | 198 | QueryGate Notary — append-only transparency log for the audit ledger's chain head (not-before-customers) | M | — |
 | 199 | ✅ Human SSO: OIDC authorization-code sign-in for the browser surfaces across eleven provider presets, a built-in local identity provider (scrypt + TOTP) for air-gapped and break-glass use, a deny-by-default file-configured claim→scope mapping, CSRF-bound sessions, and an RFC 8628 device grant for CLI callers | L | 10, 90, 95 |
 | 200 | ✅ Per-surface credential-type policy: an allowlist over `Principal.auth_method` for the console / REST / MCP surfaces, whose default closes the admin control plane to static API keys the moment SSO is enabled | S–M | 199 |
+| 210 | Proprietary licence transition: retire the BSL apparatus (LICENSE body, EULA becomes the licence of record with subscription clauses, Change-Date targets + script + test + both CI call sites, and ~30 documents asserting a source-available future) | M | — |
+| 211 | Subscription layer — the entitlement gate: two enforcement funnels (reads via `_validate_and_compile`, writes at the three write *service* entry points), 402 registered in seven registries, observe/enforce as a signed field, wall-clock high-water mark and serial floor | L | 210, 212 |
+| 212 | Control plane — accounts, Stripe subscriptions, KMS-signed entitlement issuance, enrolment, append-only issuance ledger, in `control-plane/` with its own lockfile and mirror CI gates | XL | — |
+| 213 | Activation — bind a deployment to a subscription via OAuth2 (Google/Microsoft) + MFA, browser and device flows, control-plane-assigned `deployment_id`, unactivated deployments inert | L | 199, 212 |
+| 214 | Single obfuscated compiled binary — Nuitka feasibility spike first (pydantic-core, SQLAlchemy dispatch, MCP annotation resolution), then reproducible build preserving cosign + SLSA provenance | XL | — |
+| 215 | One-command install and first-boot self-configuration — no operator-authored file needed to reach activation; safe-by-default starter policy; first connection added through the UI | M | 213 |
+| 216 | Renewal countdown and lapse UX — banner with day countdown in both UIs under 30 days when auto-renew is off, email, coarse health field, metric, CLI line; accessible by construction | M | 211 |
+| 217 | Customer portal — OAuth2 signup, Stripe Checkout, subscription and deployment management, cancellation flow stating the no-refund terms before confirming, downloads and docs | XL | 212 |
+| 218 | Setup guides and quickstart docs for the SaaS motion — one-screen quickstart, per-target deploy guides, air-gapped guide, troubleshooting, rewritten `CUSTOMER_README.md` and landing/sales copy | M | 215 |
+| 219 | Pre-launch codebase cleanup pass — `repo-audit`, `dep-audit`, `test-gap`, `claim-verify`, `security-invariant-check`; delete BSL dead code; close open defects 192 and 194; full CI matrix green | L | 210 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -3836,3 +3846,641 @@ design partner actually mandates SAML, and record that decision first.
 A per-surface allowlist over `Principal.auth_method` (console / REST / MCP) whose default drops static API keys from the admin control plane the moment SSO is enabled.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 200).
+---
+
+## SaaS subscription work packages (items 210–219)
+
+Owner decision, 2026-08-23: QueryGate ships **proprietary, closed-source, as a
+paid monthly subscription**. See `docs/business/GTM_SAAS.md`, which supersedes
+`GTM_EXECUTION_PLAN.md` and the Shape A / BSL decision of 2026-08-21 in full.
+
+**Numbering note:** 199–209 are deliberately reserved for the concurrent human
+SSO / identity work stream (item 199 and its phases). These items start at 210
+to avoid a collision. Per CLAUDE.md item numbers are permanent and file-global;
+a reserved gap is intentional, like the unused 98.
+
+**Items 197 and 198 are superseded in premise.** 197 (offline entitlement token,
+soft-warn, not-before-customers) is replaced by items 210–213 — the token is no
+longer a receipt that warns, it is a subscription that blocks. 198 (Notary) keeps
+its scope and stays deferred. Both bodies need rewriting as part of item 210.
+
+### 210. Proprietary licence transition — retire the BSL apparatus
+
+**Effort: M.** Blocks everything else that touches licensing text.
+
+**Why it matters:** the repo is wired end-to-end for a BSL flip that will now
+never happen — two CI jobs, three Make targets, a script, a test, and roughly
+thirty documents assert a source-available future and unlimited free production
+use. Shipping a paid product while `LICENSING_FAQ.md` promises *"no licence key
+to obtain"* and *"no check that can refuse to start or block a query"* is not a
+doc bug; it is a written promise that is the exact inverse of what the product
+will do.
+
+**What it is:**
+- **Replace `LICENSE`'s BSL body with the proprietary notice. Do not delete the
+  file** — `pyproject.toml`'s `license-files`, `check_release_artifacts.py`'s
+  wheel/sdist/image assertions, and the Dockerfile's `COPY LICENSE` all require
+  it to exist.
+- **`docs/legal/EULA.{en,he}.md` becomes the licence of record.** Add, for
+  counsel, in both languages: term/renewal/fees/invoicing; **no-refund on
+  cancellation with access to end of the paid period**; effect of non-payment;
+  **suspension distinct from termination**; a cure period consistent with the
+  grace window; **anti-circumvention** (disabling or patching the entitlement
+  check is a material breach — this clause does not exist today and the whole
+  enforcement argument assumes it); notice that the Software enforces the term
+  technically; **licence-data transmission disclosure** (what leaves, how often,
+  retention); licence-service availability; and a **post-termination
+  audit-retrieval carve-out** so exporting one's own records is not a breach.
+- **Delete the Change-Date apparatus**: `make stamp-change-date`,
+  `change-date-check`, `change-date-check-release`, its `release-check` wiring,
+  `scripts/check_change_date.py`, `tests/unit/test_change_date.py`, the
+  `RELEASING.md` sections — **and both CI call sites**, `ci.yml`'s
+  `make change-date-check` and `release.yml`'s direct
+  `python3 scripts/check_change_date.py --check --release`. Removing only the
+  Make targets breaks the tagged-release job.
+- **Preserve two assertions from the deleted test**: the pyproject↔dated-CHANGELOG
+  binding (nothing else asserts it) and the placeholder-refusal release gate,
+  **retargeted at the EULA**, which carries unfilled placeholders and today has
+  no test, script, or CI job referencing it anywhere. The gate must match **any
+  `[…]` span in either language file, not an ASCII-uppercase pattern** —
+  `EULA.he.md`'s placeholders are Hebrew, so the obvious `\[[A-Z_ ]+\]` regex
+  gives a green build on an entirely unfilled Hebrew licence of record.
+- **⚠️ Retarget `tests/security/test_no_phone_home.py` — this must land before
+  item 211's first commit.** It is `pytestmark = [security, unit]`, so it runs in
+  `pytest -m unit`, in `make release-check`, in CI, and in the project pre-commit
+  hook; and its patterns match `licen[cs]e_server|entitlement_(url|endpoint|
+  server)|activation_*|heartbeat_url` plus any vendor hostname in `src/`. Item
+  211's client cannot be written without turning the suite red **mid-item**,
+  where it reads as a mystery failure and the cheapest reaction is to delete the
+  file — taking with it two assertions that become *more* valuable under this
+  model, one of which is the mechanism `GTM_SAAS.md` §8 sells. Narrow it instead:
+  keep both assertions, add the subscription source module to the `allowed` set
+  with its endpoint named, scope the vendor-host and vocabulary rules to "outside
+  `subscription/`", and add the positive payload assertion. Note it also shifts
+  the adversarial-suite count pinned across eight documents.
+- **Rewrite `docs/LICENSING_FAQ.md` end to end** — roughly thirteen claims go
+  false. Highest exposure: the "no kill switch, no time bomb, no check that can
+  refuse to start or block a query" promise.
+- **⚠️ Do not sweep by hand — the repo already has the tool and the scar.**
+  `scripts/claim_drift_sites.py` exists precisely because five consecutive
+  `claim-reviewer` rounds found every hand-assembled list shorter than reality
+  (it names `src/` comments and docstrings, `examples/`, and
+  `docs/TODO_ARCHIVE.md` as the usual misses). Add a `licensing` class to it
+  — patterns `BSL|BUSL|Business Source|Change Date|Additional Use Grant|
+  source-available|free forever|no outbound calls|licence flip` — run `--all`,
+  fix every hit, re-run to empty. **The list below is a starting checklist, not
+  the scope.** Two files whose BSL text is executable rather than prose and that
+  a prose sweep misses: `pyproject.toml`'s `license-files` comment block (which
+  also defers the SPDX expression and classifier that now become truthful) and
+  `scripts/check_release_artifacts.py`'s three BSL-specific rationale strings and
+  error messages, which would otherwise instruct a future maintainer to satisfy a
+  licence that no longer applies.
+- **Sweep the rest**: `NORTH_STAR.md` (Reach pillar narrowing **and** the
+  non-goal list — add "no hosted query execution" as a recorded decision, and
+  reconcile `GTM_SAAS.md` §2 to carry all seven; the two lists currently disagree
+  in both directions),
+  `PRODUCT_GUIDE.md` Decision Log, a superseded-by banner on
+  `GTM_EXECUTION_PLAN.md`, `LICENSE_ENFORCEMENT.md`, `LICENSE_NOTES.md`,
+  `DISTRIBUTION_STRATEGY.md`, `PRE_BSL_CLEANUP_PLAN.md`,
+  `BSL_EXECUTION_PROMPT.md`, `GTM_EXECUTION_PROMPT.md`,
+  `CONTAINER_IMAGE_LICENCES.md`, `docs/README.md`, `CONTRIBUTING.md` +
+  `.github/cla/` (the CLA exists for outside contributors to a public repo —
+  there are none), `README.md`, `CUSTOMER_README.md`, `landing/`,
+  `sales/index.html`. Rewrite items 197/198's bodies.
+- **Regenerate the gated artifacts in the same commits**: `make
+  product-guide-html`, `make trust-page`, and the adversarial-suite count that
+  `test_security_suite_count_claims.py` pins across eight documents.
+
+**Definition of done:** `make release-check` green; no `BSL`/`Change Date`/
+`Additional Use Grant`/"free forever"/"no outbound calls" claim survives outside
+a superseded-by banner; `claim-verify` clean.
+
+### 211. Subscription layer — the entitlement gate
+
+**Effort: L.** Depends on 210 for the licence text, on 212 for real entitlements.
+
+**Why it matters:** this is the wrapper that makes the product a subscription.
+It must stop the product when unpaid without ever becoming an availability risk
+when *we* fail, and without lying in the customer's audit ledger.
+
+**What it is:**
+- **`src/querygate/subscription/`** — a peer package to `audit/` and `secrets/`:
+  `models.py`, `verify.py` (pure, no I/O), `state.py` (module singleton),
+  `gate.py`, `sources.py` (the registry above; the only modules doing outbound
+  HTTP), `manager.py`, `cache.py`, and **`cli.py` exposed as `querygate-license`
+  in `[project.scripts]`** — `status` renders `SubscriptionStatus` and is the
+  only place that formats the model. That console script does not exist today and
+  two documents already reference it.
+  **`cache.py`'s Protocol is `async def` from the first commit**, per CLAUDE.md
+  and the `admin/observed_shapes.py` precedent, even though the in-process
+  implementation needs no `await` — it is exactly the shape that grows a shared
+  backend under multi-replica, and a sync-then-widened Protocol is what broke the
+  compensation store. **`gate.py`'s read is the one deliberate synchronous
+  exception**: it reads an already-evaluated in-memory `SubscriptionStatus`,
+  never a store, so it adds no await point to the request path — and it must
+  never read `cache.py` directly.
+- **Two enforcement funnels, not one.** Reads:
+  `StructuredQueryService._validate_and_compile` — its own comment already names
+  it as "the four ways an ad-hoc AST reaches a database". Writes: the three write
+  **service** entry points (`WriteExecutionService.execute`,
+  `_execute_many_atomically`, `WritePreviewService.preview`) via one shared
+  helper in `execution/`. **`WriteExecutionService` and `WritePreviewService` are
+  separate classes and `_execute_many_atomically` opens its own `session_scope`;
+  a gate only in `StructuredQueryService` leaves every governed
+  INSERT/UPDATE/DELETE running.**
+  **Do *not* put the write gate in `validation/write_policy_validation`** — it is
+  a pure function of (AST, Policy) with no I/O and no process state. Gating there
+  makes every existing shape-validation unit test depend on the subscription
+  singleton, and makes any non-executing caller (a linter, the admin candidate
+  simulator, a dry-run) receive a 402 for asking whether a *shape* is legal.
+- **Third surface: schema discovery.** `list_tables`, `describe_table` and
+  `search_catalog` reach the live database via `list_live_tables`/reflection and
+  pass through **neither** funnel — `_validate_and_compile`'s comment is precise
+  that it covers the ways an *AST* reaches a database, and these carry no AST.
+  Same for `catalog/refresh.py`'s background reflection. Either gate them as a
+  third funnel or record the exemption with a one-line rationale, and mirror the
+  decision into `GTM_SAAS.md` §5 so the two documents cannot disagree. Do not
+  leave it implicit.
+- **The forbidden-edge guard is bidirectional.** Acceptable: `execution/` →
+  `subscription.gate`; `api/`/`mcp/` → `core.exceptions` plus one narrow
+  read-only status accessor for item 216; `subscription/` → `core/` and
+  `metrics.py`; the lifespan → `subscription.manager`. **Forbidden in either
+  direction:** `validation/`, `compiler/`, `connections/`, `policy/`, `catalog/`,
+  `schema/`, `query_ast/`, `write_ast/` ↔ `subscription/`. Compilation and
+  session guardrails must not vary by entitlement, and `policy/` importing
+  `subscription/` would put observe/enforce inside the customer-reloadable
+  `Policy` — the customer-settable bypass this design exists to prevent. Also
+  forbid `subscription/` → `execution/`, `validation/`, `audit/`.
+- **Acquisition varies; verification does not.** Two real backends are in scope —
+  HTTP refresh and the air-gapped offline entitlement file — so this is a genuine
+  Protocol + registry case, not ceremony: an `EntitlementSource` Protocol
+  (`async def fetch() -> bytes`) with `HttpEntitlementSource` and
+  `OfflineFileEntitlementSource` behind a `_SOURCES` registry keyed on the
+  configured mode. Without it the offline mode lands as an inline
+  `if cfg.offline_entitlement_file:` in `manager.py` and every downstream
+  question (does the high-water mark apply? what is `RefreshHealth` for a file?
+  how does the serial floor advance?) grows its own branch. `verify.py`'s rules
+  and the serial floor then apply to both by construction.
+- **Two orthogonal state axes**, so the gate can never depend on refresh health:
+  `EntitlementState{VALID,GRACE,EXPIRED}` and
+  `RefreshHealth{OK,DEGRADED,FAILING}`, combined in a frozen
+  `SubscriptionStatus` computed by one pure `evaluate()`. The gate reads
+  `.allows_queries`; health reads `.entitlement`; the CLI renders the model.
+  Nobody else compares a datetime.
+- **`SubscriptionExpiredError` in `core/exceptions.py`**, not in
+  `subscription/` — `api/_errors.py` and `mcp/exceptions.py` import only from
+  `core.exceptions`. It must not subclass `ValueError`/`PolicyViolationError`
+  (existing handling would map it to 422 and label it `policy`). Register it in
+  **seven** places or it degrades silently: `_ACTIONABLE` + a 402 handler
+  (`api/_errors.py`); `_error_code_from_exception` before the `INTERNAL`
+  fall-through (`mcp/exceptions.py`, which also logs a traceback);
+  `classify_rejection` (`metrics.py`); **`public_error_message`
+  (`core/exceptions.py`)** — a closed isinstance allow-list that both transports
+  render every message through, so without it the 402 body is "An unexpected
+  error occurred." and item 216's "the message names the renewal URL" is
+  unsatisfiable; the **`policy_decision` bucket** (`execution/service.py`), or
+  the persisted event records `policy_decision="unknown"`; and
+  **`_DENIAL_GUIDANCE`** (`help/personal_denials.py`), or the caller's
+  self-service explanation reads "the specific reason wasn't recorded". Getting
+  `classify_rejection` alone fixes the metric and stops the WORM ledger blaming
+  `db_error`, but stops three registries short.
+- **Four surfaces swallow the gate, not three.** `_execute_batch_item`,
+  `explain_many` and `WriteExecutionService._batch_error` turn it into a per-item
+  string inside an HTTP 200 — **and `verdict()`/`verdict_many` are worse**: their
+  deliberate, documented catch-all returns HTTP 200
+  `{"allowed": false, "reason": "not-available-to-you"}` and writes
+  `policy_decision="denied"` into the tamper-evident ledger, telling the customer
+  their *policy* refused a query it actually permits, permanently. Re-raise
+  `SubscriptionExpiredError` ahead of every one of them, and check the gate once
+  per request **before** the quota reservation and the concurrency slot, so an
+  expired deployment neither spends a caller's quota nor holds a slot per refused
+  request.
+- **Observe/enforce is a field in the signed entitlement**, on the
+  `CostEstimationMode.OBSERVE/ENFORCE` precedent — not a config flag (a
+  customer-settable bypass), not a build flag (the enforce path would never run
+  in the shipped image), not absent code (go-live day becomes the first
+  execution of a new hot-path call site). Observe emits
+  `querygate_subscription_would_block_total`.
+- **Wall-clock high-water mark, not monotonic.** `time.monotonic()` is
+  boot-relative and cannot be persisted; a fresh container would read a
+  catastrophic regression and expire on first restart. Tolerance in hours;
+  regression enters **grace**, never expiry; absent mark is fail-open; clamp a
+  mark implausibly far ahead; per-process, monotone-max on write; a persistent
+  write failure is visible, not silent. Written by the timer only — never from
+  `audit/logger.py` or an `AuditSink`, both of which run per-query.
+- **A serial floor** (`max_seen_serial`, strictly increasing) is the primary
+  anti-replay control: it needs no trustworthy clock and has no false-positive
+  mode.
+- **Verification:** strict parse (unknown fields at a known `schema_version`,
+  duplicate JSON keys, base64 `validate=True`); verify over the exact decoded
+  bytes then parse; domain-separated signatures; manifest binding; freshness and
+  max-term bounds as compiled-in constants; typed failure reason per rule; **the
+  disk cache holds signed bytes re-verified on every read**, never a parsed
+  structure.
+- **`SubscriptionManager`, not `LeaseManager`** — `CredentialLeaseMonitor`
+  already owns that word and emits `action="lease_refresh"`. Copy its four
+  properties: I/O off the loop, fail-open per iteration, **only the exception
+  type logged never its message**, and a `system:` principal.
+
+**Definition of done:** `security-invariant-check` clean; mutation verification
+on each verification rule individually; `tests/conftest.py`'s autouse fixture
+clears every new process-wide item (verdict, wall-clock mark and its file, the
+serial floor, cache path, manager, task, event, HTTP client, failure counter,
+manifest cache, `app.state`, **and the observe-mode Prometheus counter** — the
+collector lives in the process-global `REGISTRY`, which conftest resets nothing
+in today, so any absolute assertion on it is order-dependent); the bidirectional
+import guard above; **a schema-level test asserting the refresh request body's
+key set is exactly what `GTM_SAAS.md` §8 publishes** — built in the shape of
+`test_credential_redaction.py`, not as a mock-call assertion, because that
+sentence is the load-bearing answer to the phone-home objection and is currently
+unbacked; and a test that the rendered 402 body and the MCP error message both
+name the renewal URL.
+
+### 212. Control plane — accounts, Stripe subscriptions, entitlement issuance
+
+**Effort: XL.**
+
+**Why it matters:** the vendor side. Without it there is no revenue and item 211
+has nothing to verify.
+
+**What it is:**
+- **Lives in `control-plane/`**, its own Poetry project with its own lockfile —
+  Stripe, KMS and session dependencies must not enter the product's lock, SBOM,
+  or `dep-audit` scope. **Mirror CI gates are part of this item**, and the
+  specific root settings matter: the Makefile's `bandit -r src/` and semgrep
+  `src/` scopes mean the mirror must be **new targets, not a widened scope** (or
+  control-plane findings land in the product's SAST job);
+  `tests/unit/test_security_posture_commands.py` asserts **exactly one** semgrep
+  invocation in `ci.yml`, so adding the mirror step fails it with a drift message
+  that looks unrelated; `testpaths = ["tests"]` correctly excludes
+  `control-plane/tests` from a root `pytest` and must **stay** that way, because
+  the natural "fix" drags Stripe and KMS imports into the product test
+  environment; add `"control-plane"` to `check_release_artifacts.py`'s
+  `FORBIDDEN_PARTS` (the cheapest possible guarantee the signing plane can never
+  ship in a wheel or sdist) and to `.dockerignore` (the Dockerfile's COPY
+  allowlist makes the image safe today, but the ignore entry survives a Dockerfile
+  edit). `[tool.poetry] packages` and `--cov=src` need **no** change — say so, so
+  nobody "fixes" them.
+- **Define `deployment_id` once, normatively** — it currently means three things
+  across items 212, 213 and 215. One *logical* deployment holds one entitlement
+  and one cap slot; an ephemeral per-replica `instance_id` rides alongside it.
+  Otherwise a ten-replica Kubernetes Deployment is simultaneously "one deployment
+  refreshing from N sources" (item 213's abuse signal) and ten times the
+  per-deployment refresh rate against a limit sized for one — while a
+  per-container id would consume N cap slots on every rolling deploy and break
+  item 213's rebuild guarantee. Restate item 213's detection heuristic as "N
+  *unrelated* source networks", and note that item 211's high-water mark and
+  serial floor are per-process, so a fleet's floors must converge rather than
+  fight.
+- **Stack:** FastAPI + SQLAlchemy 2 + Alembic + Postgres; Stripe SDK; cloud KMS.
+- **Stripe is the source of truth for paid status.** Do not rebuild subscription
+  lifecycle, dunning, proration, tax, or invoices.
+- **Six tables:** `org`, `subscription`, `entitlement`, `deployment`,
+  `enrolment_token`, `entitlement_issuance` (append-only), plus `webhook_event`
+  for idempotency.
+- **Billing semantics:** monthly prepaid; cancellation is immediate for renewal
+  purposes but the entitlement's `expires_at` stays at the end of the paid
+  period; **no proration, no refund**.
+- **Endpoints:** Stripe webhook (signature-verified, idempotent), `POST /v1/enrol`
+  (one-time token → per-deployment key), `GET /v1/entitlement` (per-deployment
+  bearer key). Admin/minting endpoints bind to a private network behind SSO or
+  mTLS. **Rate-limit per deployment, not per org** — a per-org limit is
+  self-abusable to force refresh failure and ride the fail-open window.
+- **Keys:** offline Ed25519 root on hardware signs a key manifest; issuing keys
+  in KMS with `sign` permission only. **Ed25519 signing is available on GCP
+  Cloud KMS and not on AWS KMS** — verify all vendor facts with a dated note
+  before committing to a provider.
+- **The control plane resolves plan/features from the entitlement, never from
+  the request.** A client must not assert its own tier.
+
+**Definition of done:** webhook replay and signature tests; enrolment token is
+single-use; issuance ledger is append-only and never updated; no credential,
+query, row, or schema is stored anywhere in the plane; tenancy isolation tests.
+
+### 213. Activation — bind a deployment to a subscription via OAuth2 + MFA
+
+**Effort: L.** Builds directly on item 199's `identity/` package.
+
+**Why it matters:** this is the customer's first five minutes and the moment the
+product becomes theirs. It is also the security boundary: an unactivated
+deployment must be inert.
+
+**Depends on item 199 (`identity/`), which is NOT in this branch** — it is
+uncommitted work on the identity stream. Do not start 213 until 199 merges.
+
+**What it is:**
+- **⚠️ Activation must prove *entitlement to bind this box*, not merely a signed-in
+  identity.** As first drafted this item authenticated a human and then bound the
+  deployment to whatever org that human belongs to — so anyone who reaches a
+  fresh container before the operator (a VPC co-tenant, someone scanning the cloud
+  VM just started, a contractor on the LAN) completes OAuth with **their own**
+  account and becomes administrator of a gateway inside the customer's network
+  that is about to hold production database credentials. Required: the portal
+  issues a **single-use ≥128-bit claim code** at checkout; the activation screen
+  demands it *before* any OIDC redirect starts; the control plane refuses to bind
+  to any org but the code's holder. Add a **local-presence factor** for the
+  browser flow — a one-time secret printed to the container's stdout on first
+  boot — so network reach alone is insufficient.
+- **⚠️ "Nothing else" is unreachable with the gate an implementer will naturally
+  write.** A router-level `Depends` — the pattern the whole `api/` package uses —
+  does **not** cover `app.mount()`ed sub-apps, so the MCP surface and both static
+  UIs stay live; and no request-scoped gate reaches the four lifespan monitors
+  (`HealthMonitor`, `CatalogRefreshMonitor`, `CatalogUsageLearningMonitor`,
+  `CredentialLeaseMonitor`), which dial every configured database and resolve
+  secrets from the secret backend at boot, before any human has authenticated.
+  Required: a **pure-ASGI middleware installed on the app**, a **default-deny
+  closed allowlist** of path prefixes, and a lifespan that starts **no**
+  connection-touching monitor until the activation transition.
+- **Bound the unauthenticated surface.** Activation is the first unauthenticated
+  REST endpoint in the product, and **no per-source rate limiter exists anywhere
+  in the codebase** (the only limiter is per-principal quota, and there is no
+  principal here). It needs: failure counting per source address *and* per claim
+  code with lock-after-N; a slot consumed only on **successful** enrolment, never
+  on attempt; a failed attempt that cannot lock out the legitimate operator; and
+  an explicit `Content-Length` and structural-depth cap before parsing — reuse
+  `mcp/transport_guard.py`'s `_structural_depth_exceeds`, do not write a second.
+- **Reuse the identity *mechanism*, not the store.** `identity/` is
+  deployment-side: its OAuth client lives in the customer's `identity.yaml`, and
+  `sso_enabled` is off by default. Activation must authenticate against **the
+  control plane's own** authorization server (item 212 owns the client and the
+  RFC 8628 endpoints) and must work with `sso_enabled=false` and no
+  `identity.yaml`. Reuse `oidc.py`'s hardened primitives — PKCE-S256, state
+  binding, nonce comparison, asymmetric-only algorithms — as a library. Note
+  `identity/device.py`'s device grant requires approval **in that deployment's
+  admin UI**, which an unactivated deployment does not serve, so it cannot
+  bootstrap activation as-is.
+- **Enforce audience binding** on any token the deployment accepts, the same
+  posture `core/config.py` already requires for the MCP resource server —
+  otherwise a token minted for the internet-facing portal authorises
+  administration of a gateway inside the customer's network. And do **not**
+  register a per-deployment `redirect_uri` at Google/Microsoft: a wildcard
+  covering every customer hostname makes code interception straightforward.
+- **MFA is not currently verifiable on the external path.** MFA enforcement
+  exists only for the built-in local IdP (`local_auth.py`'s `require_mfa`,
+  `totp.py`); there is **no `amr`/`acr` check anywhere** for Google/Microsoft. So
+  either request `acr_values` and verify the `amr` claim carries a second factor,
+  rejecting the session otherwise — preferred, this is the activation boundary —
+  or stop writing "MFA enforced" and say the customer's IdP enforces it.
+- **`deployment_id` is assigned by the control plane**, never proposed by the
+  client, with a **deployment cap** enforced at enrolment.
+- **What binding actually buys, split honestly.** *Enforced:* enrolment count
+  (single-use token means N is a hard ceiling) and per-deployment revocation
+  (each deployment holds a distinct bearer key). *Only detected:* runtime
+  instance count — one enrolled key copied to N containers is invisible.
+- **The persisted deployment key is a credential.** Re-activation without
+  consuming a slot forces it onto a mounted volume; document its location and
+  file mode, state that its compromise equals entitlement theft, and forbid it
+  from entering the config-version store or any audit event.
+- **Emit an activation audit event** carrying org id, deployment id and operator
+  subject — and **never** the enrolment token, the OIDC `id_token`, or the
+  per-deployment key.
+- **Re-activation and transfer**: a documented path for rebuilt hosts, restored
+  backups, and blue/green deploys that does not require a support ticket.
+
+**Definition of done:** activation is reachable and completable from a clean
+`docker run` with no config file; an unactivated deployment provably refuses
+every data path; device flow works on a headless host; re-activation after a
+container rebuild does not consume a new deployment slot.
+
+### 214. Single obfuscated compiled binary — spike first, then build
+
+**Effort: XL, and the spike is the first thing done in the whole programme.**
+
+**Why it matters:** the enforcement story depends on the gate not being one
+editable Python line, and the product's IP is now the business. But this
+codebase is a hostile compilation target and finding that out in month three
+would invalidate the packaging plan.
+
+**What it is:**
+- **Phase 1 — the spike (XS/S, do it first).** Attempt a Nuitka build of the
+  full application and answer: does `pydantic-core` (a Rust extension) survive?
+  Does SQLAlchemy's dynamic dispatch? Do the six MCP tool modules still register
+  — CLAUDE.md documents that `MCPServer` resolves each tool's forward references
+  against the *wrapping* function's `__globals__`, which is exactly the
+  introspection compilers break. Do console-script entry points and
+  `importlib.metadata` still resolve? Report go/no-go with evidence before any
+  further work.
+- **Phase 2 — the build.** Reproducible compile in CI; the subscription layer
+  and the app compiled together so enforcement call sites are inside the
+  artifact; the image is the only distribution channel; cosign signature and
+  SLSA provenance preserved (both already exist in `release.yml`).
+- **Accept and document the costs**: stack traces become far less useful for
+  support, and a native extension complicates the SBOM and pip-audit story that
+  §7 of `GTM_SAAS.md` leans on. Decide how support debugging works *before*
+  shipping, not after the first incident.
+- **No obfuscation theatre.** Compilation raises the bar; it does not make the
+  gate unbypassable, and the EULA's anti-circumvention clause (item 210) is the
+  layer that actually holds.
+
+**Definition of done:** the compiled image passes the full test suite and
+`make release-smoke`; a documented support-debugging procedure exists; the spike
+report is committed even if the answer is no.
+
+### 215. One-command install and first-boot self-configuration
+
+**Effort: M.**
+
+**Why it matters:** "single command or action and it's automatically set up" is
+the promise. Today a deployment needs two YAML files (connections, policy) plus
+env configuration before it does anything.
+
+**What it is:**
+- **One copy-pasteable `docker run`** (plus an equivalent compose file and a
+  Helm values snippet) shown on the checkout success page and in the portal.
+- **⚠️ The image must not ship the anonymous-auth bypass. This is the single
+  highest-severity item in the phase.** `api/auth.py` appends
+  `AnonymousAuthenticator` whenever `cfg.is_local` and no `api_keys` and no JWT
+  — and `is_local` is true for the default environment, the Dockerfile sets no
+  `ENVIRONMENT`, and `_validate_production_auth` only fires on
+  `environment == "production"`. So `docker run <registry>/querygate:latest`, the
+  exact command this item promises, currently yields a deployment where every
+  request resolves to an anonymous principal, FastAPI `debug` is on, and the
+  OpenAPI schema is public — and the first connection added below is then
+  queryable by anyone who can reach the port. Fix: `ENV ENVIRONMENT=production`
+  in the Dockerfile, satisfied by the generated admin credential below, with
+  `debug`/`openapi_url`/`docs_url` off in the shipped image regardless of
+  environment.
+- **First-boot self-configuration**, with the mechanics named rather than
+  implied: secrets generated with `secrets.token_urlsafe`/`os.urandom` (never
+  `random`, never derived from a hostname); written **once, atomically,
+  create-if-absent (`O_EXCL`)** so concurrent workers and replicas cannot race
+  and so a restart never regenerates; to a documented path and file mode on a
+  volume the non-root `querygate` user can actually write; **never regenerated
+  if present**, because silently rotating on a rebuilt image turns an upgrade
+  into an unplanned re-activation and breaks item 213's re-activation guarantee.
+- **Seed-once, then one writer.** First boot seeds `connections.yaml`,
+  `policy.yaml` and an empty `catalog.yaml` **only when absent**, before any
+  store is constructed, and never mutates an existing file. Every subsequent
+  write — including "add the first connection" — goes through the existing
+  `admin/service.py` stage/apply path, which works for a single operator at
+  `require_config_approvals=0`. **Do not add a second connections writer**, and
+  never route catalog content through `ConfigVersionStore`; catalog mutations go
+  through `CatalogFileRepository`'s lock.
+- **⚠️ "Safe-by-default starter policy" is not expressible at table granularity
+  and the item must not pretend otherwise.** `Policy.table_allowed` returns
+  `True` when `allowed_tables` is empty — **an empty allow-list means allow-all**
+  — and `denied_tables` has no wildcard. The only real deny-all lever is
+  `default: {enabled: false}`, which is all-or-nothing: the operator flips one
+  connection on and gets its entire schema. Choose and record one: (a) ship
+  `enabled: false` plus a documented per-connection enable step, accepting that
+  table/column narrowing cannot be pre-seeded before a schema is known; or (b)
+  add a `Policy` field with no allow-all fallback (e.g.
+  `require_explicit_table_allowlist`) as a scoped sub-task so "enabled, zero
+  tables" becomes expressible.
+- **⚠️ "The credential goes straight to the configured secret backend" has no
+  implementation today** and must not be written as if it does. On a fresh
+  install the only registered backend is `env:` (Vault is off by default), which
+  is not writable from a request, and `ConnectionRegistry` has no runtime
+  mutation API. The only otherwise-reachable path writes the literal DSN into
+  `var/config_versions/.../connections.yaml` in plaintext and returns it verbatim
+  from `GET /admin/config/versions/{id}` under **read** scope — laundering a
+  credential through an untyped `str` that `test_credential_redaction.py` cannot
+  see, which engages non-negotiable 2. Therefore: this item ships the **write
+  side** of a secret resolver as a prerequisite; the UI stores only a `${...}`
+  reference in `connections_yaml`; and a literal connection string is **rejected
+  at the boundary**, never persisted.
+- **`querygate-quickstart` is not the bootstrap.** It is a read-only,
+  authenticated HTTP client against an already-running, already-configured
+  gateway that "never writes anything". It stays that way and the setup guide
+  links to it as the last step; first-boot self-configuration is new server-side
+  code.
+
+**Definition of done:** a clean machine goes from the command to a governed
+query in under ten minutes with no file editing; the flow works identically on
+Docker Desktop, a cloud VM, and Kubernetes; `build_authenticator` under the
+shipped image's own defaults contains **no** `AnonymousAuthenticator`; the
+starter policy denies by the recorded mechanism; a literal (non-`${...}`)
+connection string is rejected by the first-connection flow and never appears in
+any config-version response; first boot never overwrites an existing config;
+and a source-level test asserts `admin/service.py` is the only module that
+writes `connections.yaml`.
+
+### 216. Renewal countdown and lapse UX
+
+**Effort: M.** Depends on 211.
+
+**Why it matters:** a subscription that stops without warning is a support
+incident and a chargeback. The countdown is the product being honest.
+
+**What it is:**
+- **Trigger:** auto-renew off (or payment failing) **and** under 30 days
+  remaining.
+- **Surfaces:** a persistent banner in `admin_ui` and `access_ui` with a
+  **day countdown** and the exact expiry date; escalation under 7 days; an
+  email; a coarse field on the health endpoint; a Prometheus gauge; a line in
+  `querygate-license status`.
+- **Say exactly what happens at expiry**: every query and write is refused with
+  402, and audit export keeps working. Link straight to the renewal URL.
+- **The unauthenticated `/health` endpoint carries only a coarse state** — no
+  org, plan, dates, or counts. It is deliberately unauthenticated and returning
+  aggregate detail only; publishing an expiry date there tells any scanner
+  exactly when this customer's gateway stops.
+- **The same constraint binds the Prometheus gauge**, which is otherwise the
+  unguarded sibling: `metrics_require_auth` defaults to true but **false is
+  supported**, and a `days_remaining` gauge on such a deployment discloses
+  strictly more than the health field just forbade. The gauge is a coarse state
+  enum; the day countdown lives only on the authenticated UI banner, the email,
+  and `querygate-license status`.
+- The 402 body and the exception message carry a fixed operator-facing string:
+  no org id, deployment id, serial, plan, or date.
+- **Accessibility is part of this item**, not a follow-up: the banner is a live
+  region, dismissible without losing the information, and legible at the
+  contrast the rest of the UI meets.
+
+**Definition of done:** `ui-a11y-reviewer` clean; a test per surface asserting
+the countdown appears at the right threshold and the 402 message names the
+renewal URL.
+
+### 217. Customer portal — signup, checkout, downloads, docs
+
+**Effort: XL.** Depends on 212.
+
+**Why it matters:** the commercial front door. Everything the customer touches
+before the product itself.
+
+**What it is:**
+- **Sign-up and sign-in via OAuth2 (Google/Microsoft) with MFA** — the same
+  identity the deployment activates against, so activation is a recognition
+  rather than a second account.
+- **Stripe Checkout** for the self-serve tiers; **Stripe's hosted billing
+  portal** for payment methods, invoices and cancellation — do not rebuild it.
+- **Post-checkout success page is the install page**: the one-line command, the
+  compose file, the Helm snippet, and a link to the quickstart.
+- **Subscription management**: plan, seats, connections, renewal date,
+  auto-renew toggle, invoices, and the **cancellation flow that states plainly —
+  before confirming — that there is no refund and access runs to the end of the
+  paid period**.
+- **Deployments view**: which deployments are enrolled, last seen, and a
+  revoke/rotate action.
+- **Docs and download links**, versioned, with release notes.
+- **No customer secrets in the portal database** beyond what Stripe and the
+  identity provider already hold.
+
+**Definition of done:** a stranger with a card can go from landing page to a
+governed query without contacting anyone; cancellation, renewal, and card
+failure are all exercised end to end against Stripe test mode.
+
+### 218. Setup guides and quickstart docs for the SaaS motion
+
+**Effort: M.**
+
+**Why it matters:** the existing docs are written for an operator who clones a
+repo and edits YAML. Every one of them is now wrong about how the product is
+obtained and started.
+
+**What it is:** a one-screen quickstart (checkout → command → activate →
+first query); per-target deploy guides (Docker, compose, Kubernetes/Helm, a
+major cloud); connecting the first database; writing a first policy; connecting
+an agent over MCP; the air-gapped/offline-entitlement guide; a troubleshooting
+page whose first entry is "my subscription lapsed"; and a rewrite of
+`CUSTOMER_README.md` and the landing/sales copy to match the new motion.
+
+**Definition of done:** `claim-verify` clean against the new docs; the
+quickstart is verified by following it on a clean machine, not by reading it.
+
+### 219. Pre-launch codebase cleanup pass
+
+**Effort: L, and it is a real item, not a tidy-up afterthought.**
+
+**Why it matters:** the codebase is about to stop being a prototype with a
+public future and start being a product people pay for. Everything a customer
+cannot see still has to be right, because nobody outside can review it any more.
+
+**What it is:** run the repo's own audit skills and fix what they find, rather
+than improvising a definition of clean —
+- **`repo-audit`** — whole-repo invariant drift.
+- **`dep-audit`** — CVEs, lockfile drift, the deny-by-default allowlist.
+- **`test-gap`** — untested code and missing coverage classes.
+- **`claim-verify`** — every doc and marketing claim backed by code and a test.
+- **`security-invariant-check`** over the subscription and activation surfaces.
+- Delete dead code left by the BSL removal; reconcile `ROADMAP.md` to `TODO.md`;
+  archive fully-shipped items per the `ship-item` rules; make
+  `make release-check` and the full CI matrix green.
+- **Resolve the two open defects already logged**: item 192 (the disclosure
+  budget's Redis script passes multiple `KEYS` and fails `CROSSSLOT` on Redis
+  Cluster) and item 194 (three crafted-or-corrupt WORM lines escape
+  `search_worm_archive` as an unhandled exception the route masks as a 500).
+- **Three defects surfaced by the 2026-08-23 review of items 210–219**, logged
+  here rather than lost:
+  - `classify_rejection` returns `"templates_only"` but `_DENIAL_GUIDANCE` has no
+    such key, so a principal narrowed to templates who submits an ad-hoc query
+    gets "the specific reason wasn't recorded" — the least actionable message for
+    the most actionable rejection, and exactly what item 195's dedicated category
+    existed to prevent. Green today because the lookup has a `.get` fallback.
+  - **No shared type binds the rejection vocabulary.** `classify_rejection`,
+    `AuditEvent.error_category`, the `policy_decision` 4-tuple, and
+    `_DENIAL_GUIDANCE` are four parallel free-string maps; any new category
+    silently diverges in three places. The bullet above is one instance and item
+    211 will add the next. A `RejectionCategory(StrEnum)` in `core/` consumed by
+    all four — worth doing **before** 211 lands its value.
+  - `GET /admin/config/versions` and `/versions/{id}` return full
+    `connections_yaml` (which may hold a literal credential) under **read**
+    scope, while `GET /drafts/{id}` requires **write** scope for identical
+    content and encrypts at rest. Raise the versions endpoints to write scope, or
+    project the YAML out of the read-scoped model — the exclusion mechanism
+    already exists in `admin/store.py`. Item 215 makes this materially worse by
+    making literal credentials routine.
+
+**Definition of done:** all five skills report clean or with every finding
+triaged to a decision; `make release-check` and `make release-smoke` green; no
+`✅ DONE` item left unarchived.
