@@ -248,6 +248,11 @@ claim when the work ships or before explicitly handing the item back.
   CLI. **Only phase 4 remains open** in TODO.md: SAML 2.0, decision-gated until
   a design partner mandates it.
 
+- [ ] **202** — promote `digests_equal` to `core/` and apply it at the six
+  `hmac.compare_digest` sites outside the ledger (TOTP code, OIDC state/nonce,
+  CSRF token, PKCE challenge) — each turns a clean 401/403/422 into a masked
+  500 today. *Added 2026-08-23 by the items 184/194/185/201 audit;
+  pre-existing from the SSO work in 620d90d.*
 - [x] **201** — `AUDIT_WORM_S3_ENDPOINT_URL`, so the WORM archive tier
   works against any S3-API-compatible store with Object Lock (MinIO, Ceph
   RGW) and not AWS S3 alone — the Reach pillar, not cloud breadth.

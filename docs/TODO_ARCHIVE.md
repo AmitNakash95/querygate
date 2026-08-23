@@ -14608,9 +14608,12 @@ immutable copy.
 `AUDIT_WORM_S3_ENDPOINT_URL` (empty by default = AWS S3, resolved by region
 exactly as before) is threaded into **both** clients from the same
 `AppConfig` field, so an archive can never be written to one store and
-searched at another. MinIO and Ceph RGW implement S3 Object Lock in both
-`GOVERNANCE` and `COMPLIANCE` modes, so this is a genuine WORM tier there,
-not a degraded one.
+searched at another. MinIO and Ceph RGW both document S3 Object Lock support in
+`GOVERNANCE` and `COMPLIANCE` modes. That is a vendor claim, not a tested one:
+no CI job or live test in this repo has ever run against a non-AWS store, in
+contrast to the `postgres-live`/`mssql-live`/`mysql-live` precedent for dialect
+claims. The startup warning exists precisely because the tier's only guarantee
+cannot be verified from inside QueryGate.
 
 **Deliberately an endpoint override, not an "any object store" adapter.**
 Retention is still sent as `ObjectLockMode`/`ObjectLockRetainUntilDate`, so a

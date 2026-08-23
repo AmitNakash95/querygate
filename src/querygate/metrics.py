@@ -251,16 +251,23 @@ AUDIT_WORM_BUFFER_DROPPED_TOTAL = Counter(
 )
 
 # Managed search over the WORM archive (TODO.md item 134 phase 2,
-# audit/worm_search.py). `outcome` is one of "ok" | "rejected" | "error" —
-# "rejected" means a bound was violated and no S3 call was made at all.
-# It genuinely covers all three bound classes (TODO.md item 185): cursor
-# rejections are counted inside `search_worm_archive`, while a missing/
-# over-wide time range or an out-of-range limit is counted by
+# audit/worm_search.py). `outcome` is one of "ok" | "rejected" | "error" |
+# "disabled" — "rejected" means a bound was violated and no S3 call was made
+# at all; "disabled" means the request was served honestly (200) on a
+# deployment where WORM archiving is not enabled. "disabled" exists so the
+# four labels sum to the request count: without it, the natural
+# `rejected / total` alert read 100% on every non-WORM deployment.
+# It covers all three bound classes (TODO.md item 185): a missing/over-wide
+# time range and an out-of-range limit are counted by
 # `build_worm_search_result`, which runs `_validate_window`/`_validate_limit`
-# itself before the backend-enabled check and so never reaches the former.
-# Before item 185 the wrapper's rejections were counted nowhere, so this
-# label silently meant "cursor rejections only". "error" means S3 failed
-# mid-scan
+# itself before the backend-enabled check and so never reaches
+# `search_worm_archive`; cursor rejections are counted inside
+# `search_worm_archive`. The first two are unconditional; the CURSOR class is
+# counted only when the WORM backend is enabled, because a disabled
+# deployment short-circuits at the `source="disabled"` return before the
+# cursor is ever decoded. Before item 185 the wrapper's rejections were
+# counted nowhere, so this label silently meant "cursor rejections only".
+# "error" means S3 failed mid-scan
 # (unreachable, misconfigured bucket); "ok" covers every genuinely served
 # request, complete or truncated.
 AUDIT_WORM_SEARCH_REQUESTS_TOTAL = Counter(

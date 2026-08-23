@@ -93,13 +93,17 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
                 # cannot verify it here without a write, and the failure is
                 # silent and total — objects that look archived but are
                 # ordinary deletable blobs — so say so once at startup.
-                get_logger().warning(
+                log.warning(
                     "audit.worm.custom_endpoint",
                     detail=(
                         "AUDIT_WORM_S3_ENDPOINT_URL is set — WORM retention is only "
-                        "real if this store implements S3 Object Lock. Verify "
-                        "COMPLIANCE-mode retention against it before relying on the "
-                        "archive for compliance."
+                        "real if this store implements S3 Object Lock. AWS S3 itself "
+                        "REJECTS a PutObject carrying Object Lock headers against a "
+                        "bucket without Object Lock (surfacing as a counted flush "
+                        "failure), but an S3-compatible store that ignores those "
+                        "headers would accept the write and produce ordinary, "
+                        "deletable objects. Verify COMPLIANCE-mode retention against "
+                        "this store before relying on the archive for compliance."
                     ),
                 )
             await worm_flush_monitor.start()

@@ -74,7 +74,10 @@ the hash-chained ledger above, never replaces it: the local file is
 unaffected, and the two controls answer different questions — the chain
 proves nobody edited what was kept, WORM proves you can *produce* it on
 demand for the retention window even if the local file is later rotated or
-lost. Requires `AUDIT_WORM_S3_BUCKET` (with Object Lock enabled on the
+lost. Optionally set `AUDIT_WORM_S3_ENDPOINT_URL` to run the tier against an
+S3-API-compatible store that implements Object Lock rather than AWS S3 (item
+201; GCS and Azure Blob are not reachable this way, and no store is
+live-verified by QueryGate). Requires `AUDIT_WORM_S3_BUCKET` (with Object Lock enabled on the
 bucket — an S3 prerequisite this feature can't turn on for you) and
 `AUDIT_WORM_S3_REGION`.
 
