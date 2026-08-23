@@ -1309,6 +1309,21 @@ it (item 184). Before that fix such a cursor pointed back at the start of the
 same day, which made every segment past the budget unreachable, looped a
 good-faith pager, and re-counted that day's integrity findings on every lap.
 
+The archive tier is not AWS-only. `AUDIT_WORM_S3_ENDPOINT_URL` (empty by
+default, meaning AWS S3 proper) points both the flush monitor and the managed
+search at any S3-API-compatible store that implements Object Lock — MinIO and
+Ceph RGW both do, in `GOVERNANCE` and `COMPLIANCE` modes — so an on-prem or
+air-gapped deployment can have the immutable copy too, not just the local
+hash-chained ledger (item 201). Both clients read the same config field, so an
+archive is never written to one store and searched at another. It is an
+endpoint override, **not** an "any object store" adapter: retention is still
+sent as S3 Object Lock headers, so a store without Object Lock would produce
+ordinary deletable blobs while the deployment believed they were immutable —
+QueryGate logs a startup warning whenever the override is set for exactly that
+reason. Google Cloud Storage and Azure Blob are **not** reachable this way;
+their immutability models (Bucket Lock, immutable Blob Storage) are their own
+APIs rather than S3 Object Lock, and each would need a real second backend.
+
 **MCP as an OAuth 2.0 resource server (opt-in).** For deployments that put the
 MCP surface behind a real authorization server, QueryGate can run it as a
 conformant OAuth 2.0 *resource server* per the MCP `2026-07-28` spec (off by

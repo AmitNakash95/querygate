@@ -815,6 +815,7 @@ async def search_worm_archive(
     prefix: str,
     region: str,
     flush_interval_seconds: float,
+    endpoint_url: str = "",
     start_time: Optional[datetime],
     end_time: Optional[datetime],
     event_type: Optional[WormSearchEventType] = None,
@@ -976,7 +977,7 @@ async def search_worm_archive(
     try:
         import boto3  # deliberately lazy — see audit/worm_sink.py's identical rationale
 
-        client = boto3.client("s3", region_name=region or None)
+        client = boto3.client("s3", region_name=region or None, endpoint_url=endpoint_url or None)
 
         day = current_day
         # TODO.md item 184: the exclusive listing marker that applies to the
@@ -1347,6 +1348,8 @@ async def build_worm_search_result(
         bucket=cfg.audit_worm_s3_bucket,
         prefix=cfg.audit_worm_s3_prefix,
         region=cfg.audit_worm_s3_region,
+        # TODO.md item 201 — the same endpoint the flush monitor writes to.
+        endpoint_url=cfg.audit_worm_s3_endpoint_url,
         flush_interval_seconds=cfg.audit_worm_flush_interval_seconds,
         start_time=start_time,
         end_time=end_time,

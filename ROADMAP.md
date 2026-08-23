@@ -248,6 +248,10 @@ claim when the work ships or before explicitly handing the item back.
   CLI. **Only phase 4 remains open** in TODO.md: SAML 2.0, decision-gated until
   a design partner mandates it.
 
+- [x] **201** — `AUDIT_WORM_S3_ENDPOINT_URL`, so the WORM archive tier
+  works against any S3-API-compatible store with Object Lock (MinIO, Ceph
+  RGW) and not AWS S3 alone — the Reach pillar, not cloud breadth.
+  *Added 2026-08-23, filed and shipped together with items 184/194/185.*
 - [x] **200** — Per-surface credential-type policy. *Added 2026-08-23 by
   maintainer review of item 199: SSO was available but not enforced, so a
   static API key still opened the admin console and every action through it was

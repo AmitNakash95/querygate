@@ -85,7 +85,23 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
                 retention_days=conf.audit_worm_retention_days,
                 interval_seconds=conf.audit_worm_flush_interval_seconds,
                 ledger_key=worm_ledger_key,
+                endpoint_url=conf.audit_worm_s3_endpoint_url,
             )
+            if conf.audit_worm_s3_endpoint_url:
+                # TODO.md item 201: an S3-compatible endpoint is only a WORM
+                # archive if that store actually implements Object Lock. We
+                # cannot verify it here without a write, and the failure is
+                # silent and total — objects that look archived but are
+                # ordinary deletable blobs — so say so once at startup.
+                get_logger().warning(
+                    "audit.worm.custom_endpoint",
+                    detail=(
+                        "AUDIT_WORM_S3_ENDPOINT_URL is set — WORM retention is only "
+                        "real if this store implements S3 Object Lock. Verify "
+                        "COMPLIANCE-mode retention against it before relying on the "
+                        "archive for compliance."
+                    ),
+                )
             await worm_flush_monitor.start()
         app.state.worm_flush_monitor = worm_flush_monitor
 
