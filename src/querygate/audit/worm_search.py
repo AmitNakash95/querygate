@@ -121,8 +121,11 @@ leak" posture for every other forgery class below.
 these is REJECTED (422, `QueryValidationError`) before any S3 call is made;
 a request inside them that still can't finish scanning within one call is
 TRUNCATED with a `next_cursor` — resumable for every bound, including a day
-listing over `max_objects_scanned` (TODO.md item 184; see that bound below) —
-the same "stop and disclose
+listing over `max_objects_scanned` (TODO.md item 184; see that bound below)
+and an object past the per-object line cap (WS-134-1: that cap is a per-PAGE
+budget relative to the resume point, not an absolute ceiling, or a resumed
+page would consume nothing and re-emit its own cursor forever) — the same
+"stop and disclose
 honestly, never silently serve past a bound" posture
 `admin/anomaly.py`'s `max_lines_read`/`max_events_scanned` already
 established for the local reader:
@@ -147,6 +150,14 @@ established for the local reader:
   day, so a pager looped and segments past the budget were unreachable; the
   first follow-up left three of the other exits still advancing to the next
   day, which lost records while reporting `truncated=False`.
+**One honest limit on "resumable": a cursor is not a promise of forward
+PROGRESS.** If `request_timeout_seconds` is too small to complete even a day's
+first `ListObjectsV2`, the scan returns `truncated=True` with a cursor
+byte-identical to the one it received — the correct encoding of "no progress
+is possible under this budget", not a loop in the scan itself, and each lap
+gets a fresh budget. A client seeing the same cursor twice should raise
+`AUDIT_WORM_SEARCH_REQUEST_TIMEOUT_SECONDS` rather than keep paging.
+
 - `request_timeout_seconds` — wall-clock budget for one request's S3 work,
   checked between object fetches and day-prefix listings, AND periodically
   (every 1,000 lines) inside a single object's own line loop (TODO.md item
@@ -866,8 +877,14 @@ def _next_position_cursor(
     """
     if idx + 1 < len(keys):
         return _encode_cursor(day, keys[idx + 1], 0, fingerprint, after_key=after_key)
-    if listing_truncated and keys:
-        return _encode_cursor(day, None, 0, fingerprint, after_key=keys[-1])
+    if listing_truncated:
+        # `keys` is non-empty at both production call sites (each is inside
+        # `for idx in range(start_index, len(keys))`), so `keys[idx]` — the
+        # object just consumed — is always a valid marker. Using `keys[idx]`
+        # rather than `keys[-1]` is deliberate: they coincide today only
+        # because this branch is reached with `idx == len(keys) - 1`, and
+        # keying off `idx` stays correct if that ever stops holding.
+        return _encode_cursor(day, None, 0, fingerprint, after_key=keys[idx])
     next_day = day + timedelta(days=1)
     if next_day <= end_day:
         return _encode_cursor(next_day, None, 0, fingerprint)
@@ -1123,7 +1140,22 @@ async def search_worm_archive(
                 lines = text.splitlines()
 
                 consume_from = resume_line if (day == current_day and key == resume_key) else 0
-                last_line = min(len(lines), _MAX_LINES_PER_OBJECT)
+                # RELATIVE to the resume point, not absolute (WS-134-1).
+                # `min(len(lines), _MAX_LINES_PER_OBJECT)` made the cap a fixed
+                # ceiling rather than a per-page budget: a resumed page whose
+                # `consume_from` already equalled the cap computed the SAME
+                # `last_line`, so `range(consume_from, last_line)` was empty, no
+                # line was consumed, `last_line < len(lines)` still held, and
+                # the identical cursor was re-emitted forever — every line past
+                # the cap, every later object, and every later day in the window
+                # unreachable. Reachable without any forgery by raising
+                # AUDIT_WORM_MAX_BUFFERED_EVENTS above the cap, and by anyone
+                # holding s3:PutObject with a ~1 MB body of newlines, four
+                # orders of magnitude under _MAX_OBJECT_BYTES. Relative keeps
+                # the per-request work bound identical (still at most
+                # _MAX_LINES_PER_OBJECT lines read per page) while making every
+                # page strictly advance.
+                last_line = min(len(lines), consume_from + _MAX_LINES_PER_OBJECT)
                 # TODO.md item 172: chain-linkage state, scoped to THIS
                 # object/segment — `audit/worm_sink.py`'s `WormFlushMonitor`
                 # restarts every segment's own chain at seq=0/GENESIS_PREV_HASH
@@ -1166,7 +1198,9 @@ async def search_worm_archive(
                     if line_no % 1000 == 0 and time.monotonic() >= deadline:
                         return _finalize(
                             truncated=True,
-                            next_cursor=_encode_cursor(day, key, line_no, fingerprint),
+                            next_cursor=_encode_cursor(
+                                day, key, line_no, fingerprint, after_key=day_after_key
+                            ),
                         )
                     raw_line = lines[line_no]
                     if not raw_line.strip():

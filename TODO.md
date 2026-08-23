@@ -233,6 +233,7 @@ order-of-magnitude, not commitments.
 | 200 | ✅ Per-surface credential-type policy: an allowlist over `Principal.auth_method` for the console / REST / MCP surfaces, whose default closes the admin control plane to static API keys the moment SSO is enabled | S–M | 199 |
 | 201 | ✅ The WORM archive tier is reachable only against AWS S3 (`endpoint_url` is never set), so on-prem/air-gapped deployments cannot have the immutable copy at all | S | 134 |
 | 202 | Non-ASCII input handling around a few HMAC-based comparisons needs hardening (fail-closed; being addressed) | S | 194, 199 |
+| 203 | A narrow tamper-detection edge case in resumed audit-chain verification (being addressed) | S | 172, 194 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -3742,3 +3743,7 @@ A per-surface allowlist over `Principal.auth_method` (console / REST / MCP) whos
 
 A narrow, fail-closed input-handling gap: a handful of comparisons over caller-supplied strings can raise on non-ASCII input instead of cleanly rejecting it, turning what should be an ordinary 401/403/422 into a masked 500 on a few identity/SSO code paths. Every affected path already fails closed — the residual cost is availability and error-message clarity, not an authorization bypass. Being hardened.
 
+
+### 203. A narrow tamper-detection edge case in resumed audit-chain verification
+
+A specific combination of conditions on a *resumed* page of the audit ledger's chain-verification walk can under-report a chain break instead of counting it, for a caller who already has write access to the underlying storage. A full, non-resumed verification pass is unaffected, and a weaker secondary signal still remains. Being hardened.
