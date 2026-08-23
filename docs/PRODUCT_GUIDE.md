@@ -1300,9 +1300,14 @@ archive: a required, capped time range plus `event_type`/`connection_id`/
 `pii_customers` in the last 18 months" is answerable even once the local
 file has long since rotated that window out. Every bound (window width,
 objects scanned, wall-clock timeout, page size) is enforced server-side —
-an over-wide or missing range is rejected outright, a bound hit mid-scan
-degrades to a truncated, resumable page rather than an unbounded scan — except
-a day listing over `max_objects_scanned`, whose cursor does not advance (item 184).
+an over-wide or missing range is rejected outright, and a bound hit mid-scan
+degrades to a truncated, resumable page rather than an unbounded scan. That
+resumability is now unconditional: a day listing cut short by
+`max_objects_scanned` returns a cursor carrying an exclusive `after` marker
+naming the last segment it consumed, so the next page starts strictly beyond
+it (item 184). Before that fix such a cursor pointed back at the start of the
+same day, which made every segment past the budget unreachable, looped a
+good-faith pager, and re-counted that day's integrity findings on every lap.
 
 **MCP as an OAuth 2.0 resource server (opt-in).** For deployments that put the
 MCP surface behind a real authorization server, QueryGate can run it as a
@@ -4336,6 +4341,38 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-23 — A WORM search cursor resumes a truncated day EXCLUSIVELY,
+  and digest comparison fails closed instead of raising.** Three WORM-archive
+  defects shipped together because they share one failure mode: a bound that
+  reads as enforced while silently doing nothing. (1) Item 184 — the cursor
+  gained an `after` field, an exclusive `StartAfter` listing marker. The
+  alternative considered was re-listing the day and skipping by index, which
+  keeps the cursor format stable; it was rejected because the skip target may
+  itself sit past `max_objects_scanned`, so the bug would survive at a deeper
+  budget. `after` is only ever handed to `list_objects_v2` as `StartAfter`,
+  never dereferenced as a raw `GetObject` key, which preserves the module's
+  "a cursor key is never used as a raw key path" property; it is rejected as
+  an invalid cursor if it is not a string, since it is attacker-reachable in
+  a hand-crafted cursor. Cursors issued before this change simply have no
+  `after` and resume at their day's start, exactly as they did when issued.
+  (2) Item 194 defects 1-2 — `audit/ledger.py` gained `digests_equal`, used
+  by all five `hmac.compare_digest` sites across both readers rather than
+  patching only the site the report named. `compare_digest` accepts two
+  `str`s only when both are ASCII, and every digest field is an unconstrained
+  `str` reached through a body decoded with `errors="replace"` — so one
+  corrupted byte permanently 500-ed every future search covering that
+  immutable object. A non-ASCII digest can never equal a hex digest we
+  computed, so `False` is the answer `compare_digest` would give if it could.
+  Both `json.loads` handlers also widened to `RecursionError`, which is a
+  `RuntimeError` and so was never covered by `except json.JSONDecodeError`.
+  (3) Item 185 — the `outcome="rejected"` counter moved up into
+  `build_worm_search_result`, where window/limit rejections actually happen,
+  rather than narrowing `metrics.py`'s comment to match the broken behaviour;
+  the metric is more useful where the rejections are. Item 194's third defect
+  (`_contains_forbidden_content`'s uncapped walk) is deliberately still open:
+  the cap VALUE is a maintainer decision, since the screener is a security
+  control whose `True` means *reject* and must fail closed.
+
 - **2026-08-23 — Enabling SSO closes the console to shared secrets, by
   default.** The conservative choice was a permissive default with an opt-in
   allowlist, so nothing could break. It was rejected: a control nobody turns on
@@ -6394,11 +6431,12 @@ reasoning behind them, newest first. Added to incrementally as work happens
   exists for, still a real enforced ceiling), and one request's actual S3
   work is separately bounded by `AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` and
   `AUDIT_WORM_SEARCH_REQUEST_TIMEOUT_SECONDS` — a bound hit mid-scan
-  degrades to a truncated, resumable page — except a day listing over
-`max_objects_scanned`, whose cursor repeats that day (item 184) — (an opaque cursor encoding
-  `day`/`key`/`line` plus a fingerprint of the request's own filters, so
-  replaying a cursor against different filters is rejected rather than
-  silently returning a mismatched page) instead of continuing an
+  degrades to a truncated, resumable page (an opaque cursor encoding
+  `day`/`key`/`line`/`after` plus a fingerprint of the request's own filters,
+  so replaying a cursor against different filters is rejected rather than
+  silently returning a mismatched page; `after` is the exclusive listing
+  marker item 184 added so a day cut short by `max_objects_scanned` resumes
+  strictly past the segments already read) instead of continuing an
   expensive/slow scan; **(3) exploits the archive's own key structure
   instead of a full-bucket scan** — `WormFlushMonitor`'s segment keys
   (`audit/worm_sink.py`'s `_segment_key`) are `<prefix>/YYYY/MM/DD/<ts>.jsonl`,

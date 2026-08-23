@@ -21,6 +21,7 @@ from querygate.audit.ledger import (
     LedgerRecord,
     build_receipt,
     compute_record_hash,
+    digests_equal,
     extract_receipt_for_event_id,
     make_record,
     resolve_ledger_key,
@@ -434,3 +435,35 @@ def test_resolve_ledger_key_converts_a_non_blank_string_to_bytes():
 def test_resolve_ledger_key_treats_blank_as_no_key():
     assert resolve_ledger_key("") is None
     assert resolve_ledger_key("   ") is None
+
+
+class TestNonAsciiDigestsAreMismatchesNotCrashes:
+    """TODO.md item 194 defect (1) at the ledger layer. `hmac.compare_digest`
+    accepts two `str`s only when both are ASCII-only and raises `TypeError`
+    otherwise. Every digest field here is an unconstrained `str`, so ordinary
+    corruption (not just a crafted file) reaches it. `digests_equal` fails
+    closed: a non-ASCII digest can never equal a hex digest we computed, so
+    the answer is False, not an exception."""
+
+    def test_verify_envelope_hash_returns_false_for_a_non_ascii_hash(self):
+        record = make_record(0, GENESIS_PREV_HASH, {"a": 1})
+        raw = json.loads(record.model_dump_json())
+        raw["hash"] = raw["hash"][:-1] + "\ufffd"
+        assert verify_envelope_hash(raw) is False
+
+    def test_verify_chain_reports_a_non_ascii_hash_instead_of_raising(self, tmp_path):
+        record = make_record(0, GENESIS_PREV_HASH, {"a": 1})
+        raw = json.loads(record.model_dump_json())
+        raw["hash"] = raw["hash"][:-1] + "\ufffd"
+        path = tmp_path / "ledger.jsonl"
+        path.write_text(json.dumps(raw) + "\n")
+
+        result = verify_chain(str(path))
+
+        assert result.ok is False
+
+    def test_digests_equal_is_false_when_either_side_is_non_ascii(self):
+        assert digests_equal("abc", "abc") is True
+        assert digests_equal("abc", "ab\ufffd") is False
+        assert digests_equal("ab\ufffd", "abc") is False
+        assert digests_equal("ab\ufffd", "ab\ufffd") is False

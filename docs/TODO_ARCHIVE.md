@@ -14050,6 +14050,133 @@ walk needed to learn about co-required fields.
 security 480 — all passing.
 
 **Effort:** L. **Depends on:** 88, 145 (both shipped).
+### 184. A day holding more segments than `max_objects_scanned` returns a cursor that never advances, so part of the WORM archive is unreachable and both integrity counters inflate without bound ✅ DONE
+
+**Renumbered from 179 to 184 on 2026-08-12** when the item-177 branch and the
+disclosure-budget branch were merged into `main`. Both had been cut from the
+same base and each allocated 179 and 180 independently, so the two numbers
+genuinely collided. The disclosure budget kept 179/180 because it is shipped
+code referenced from ~30 files; these two were filed-only, so renumbering them
+was the cheaper and safer side. This is the sole deviation from CLAUDE.md's
+"item numbers are permanent" rule and is recorded in the PRODUCT_GUIDE
+Decision Log. Nothing outside TODO.md/ROADMAP.md/`docs/TODO_ARCHIVE.md`
+referenced the old numbers except two `metrics.py` comments, updated in the
+same merge.
+
+**Surfaced 2026-08-11 by three of the four `auditors` reviewers
+(`security-invariant-reviewer`, `architecture-boundary-reviewer`,
+`test-contract-reviewer`, independently) auditing item 177's own commit.**
+Pre-existing since item 134 phase 2 — item 177 neither caused it nor touched
+the code path; it is filed separately because the fix is a **cursor format
+change**, which deserves its own scoping and tests rather than riding in on a
+metrics commit.
+
+`_list_day_keys` is called with `max_keys=bounds.max_objects_scanned` and no
+`StartAfter`. When one day directory holds strictly more keys than that
+budget it returns the first N with `stopped_early=True`. The key loop then
+consumes exactly those N objects without re-tripping the
+`objects_scanned >= max` guard (checked at the top of each iteration, so it
+fires only at `idx == N`, which is out of range), falls through to
+`if listing_truncated:` and returns
+`next_cursor = _encode_cursor(day, None, 0, fingerprint)` — **the start of the
+same day**, discarding the within-day position. Replaying that cursor sets
+`resume_key = None`, so `start_index` stays 0, the same N keys are listed and
+fetched again, the same events are returned again, and the same cursor comes
+back. Three consequences:
+
+1. **Silently unreachable compliance records.** Every segment past key N in
+   that day can never be reached, while the response reports `truncated=True`
+   as if they were merely deferred — a compliance search cannot produce
+   records the archive holds.
+2. **An infinite paging loop** for a caller following `next_cursor` in good
+   faith, at `max_objects_scanned` real S3 GETs per lap.
+3. **Unbounded inflation of item 177's counters.** Each lap re-counts the
+   day's `chain_breaks`/`unverified`, so
+   `querygate_audit_worm_search_chain_breaks_total` climbs with how long the
+   pager ran rather than with how many segments actually broke. Item 177's
+   docs disclose per-scan counting, but this makes the magnitude untrustworthy
+   even within a single logical search.
+
+**When it triggers — corrected 2026-08-12 (`claim-reviewer`), and it is worse
+than first filed.** The original note said "not default-triggering", reasoning
+that the default `AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` (2000) exceeds the
+~1440 segments/day a default 60s flush interval produces. That arithmetic is
+per **flushing process**, not per deployment. Segment keys are
+`prefix/YYYY/MM/DD/<timestamp>-<microsecond>.jsonl` and every replica and every
+uvicorn worker runs its own interval-driven `WormFlushMonitor` writing into the
+*same* day prefix. So the per-process ceiling multiplies: two replicas — or one
+pod with `NUM_OF_WORKERS=2` — **can** produce ~2880 objects/day against the 2000
+default, on exactly the topology `deploy/HA_DR.md` recommends, with no knob
+lowered and no interval shortened.
+
+**State the precondition, don't drop it.** ~1440/day/process is an upper bound
+under *sustained* traffic, not a property of the configuration: `flush_once`
+returns immediately on an empty drain, so a segment is written only for an
+interval that actually had an event, and nothing in QueryGate emits audit events
+on a schedule. Reaching the ceiling needs ≥1 auditable event in essentially every
+60s window in each process for a day. A busy multi-replica deployment hits this
+at stock settings; an idle one does not. (An earlier revision of this note
+asserted the stock-settings trigger without that precondition — overstating a
+defect is its own inaccuracy, and the customer-facing copies inherited it.)
+It also triggers on any single-process deployment that lowers the object budget
+below its daily segment count or shortens the flush interval below ~43s.
+
+**What to do (when prioritized):** make the day-truncation cursor exclusive
+rather than day-resetting — add an `after_key` field to the cursor payload
+(the existing fingerprint already protects it, and it is only ever used as a
+`StartAfter` listing marker, never as a raw `GetObject` key, so the module's
+"a cursor key is never used as a raw key path" property is preserved), give
+`_list_day_keys` a `start_after` parameter, emit
+`_encode_cursor(day, key=None, after_key=keys[-1], line=0, ...)` when `keys`
+is non-empty, and pass it through on resume. Keep the current day-start cursor
+only when `keys` is empty.
+
+**Acceptance criteria:** a test putting 5 single-event segments in one day
+with `max_objects_scanned=2` follows `next_cursor` to exhaustion and sees all
+5 events exactly once, with no cursor repeating and the loop terminating; a
+companion test asserts `chain_breaks_total` rises by exactly 1 across a whole
+cursor chain over one broken segment. Both fail today.
+
+**Effort:** M. **Depends on:** 134 (shipped).
+
+### 185. `AUDIT_WORM_SEARCH_REQUESTS_TOTAL{outcome="rejected"}` is unreachable for the rejections its own comment claims to count ✅ DONE
+
+**Renumbered from 180 to 185 on 2026-08-12** — same merge-time collision as
+item 184; see that item's note for the full rationale.
+
+**Surfaced 2026-08-11 by `architecture-boundary-reviewer` auditing item 177's
+own commit.** Pre-existing since item 134 phase 2; unrelated to item 177's
+change beyond sitting in the same file.
+
+`build_worm_search_result` — the only production caller, from
+`api/admin_observability_routes.py` — runs `_validate_window` and
+`_validate_limit` **itself**, before deciding whether the backend is enabled
+and before calling `search_worm_archive`. So a missing `start_time`, an
+over-wide window, or an out-of-range `limit` raises there and never reaches
+`search_worm_archive`'s own
+`except QueryValidationError: ...labels(outcome="rejected").inc()`. In
+production that label therefore only ever counts cursor-fingerprint/day-range
+rejections — yet `metrics.py`'s comment on the counter explicitly lists
+"missing/over-wide time range, limit out of range" as what it counts. An
+operator alerting on a spike of bound-violating callers sees nothing.
+
+The existing test
+(`test_a_rejected_request_increments_the_rejected_outcome_not_ok`) passes
+because it calls `search_worm_archive` **directly**, exercising a path
+production never takes — so the gap is invisible to the suite.
+
+**What to do (when prioritized):** either move the counter up into
+`build_worm_search_result` (wrapping its two validation calls in the same
+`except QueryValidationError` + `.inc()`), or narrow `metrics.py`'s comment to
+say "cursor rejections only". The first is preferable — the metric is more
+useful where the rejections actually happen.
+
+**Acceptance criteria:** an integration test hitting
+`GET /api/v1/admin/observability/worm-search` with no `start_time` asserts the
+`rejected` counter rose by 1. Fails today.
+
+**Effort:** S. **Depends on:** 134 (shipped).
+
 ### 193. `docs/product-guide.html` has no freshness gate against `docs/PRODUCT_GUIDE.md` ✅ DONE
 
 **Surfaced 2026-08-12 by `architecture-boundary-reviewer` and `claim-reviewer`

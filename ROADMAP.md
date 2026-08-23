@@ -556,7 +556,7 @@ claim when the work ships or before explicitly handing the item back.
   but risks becoming "click here to buy unlimited disclosure", and item 179's
   own false-positive rate is uncalibrated — decide from real usage data, not
   taste.* **Depends on 92, 179.**
-- [ ] **184** — a day holding more segments than `max_objects_scanned` returns
+- [x] **184** — a day holding more segments than `max_objects_scanned` returns
   a cursor that never advances: part of the WORM archive becomes silently
   unreachable, a good-faith pager loops forever, and item 177's integrity
   counters inflate without bound. *Surfaced 2026-08-11 by three of the four
@@ -566,7 +566,7 @@ claim when the work ships or before explicitly handing the item back.
   format change (`after_key` + `StartAfter`), M effort, not a metrics-commit
   drive-by.* **Filed as item 179 on the item-177 branch; renumbered on merge
   (2026-08-12) — see TODO.md's note at item 184.** **Depends on 134.**
-- [ ] **185** — `AUDIT_WORM_SEARCH_REQUESTS_TOTAL{outcome="rejected"}` is
+- [x] **185** — `AUDIT_WORM_SEARCH_REQUESTS_TOTAL{outcome="rejected"}` is
   unreachable for the bound rejections its own comment claims to count,
   because `build_worm_search_result` validates before calling
   `search_worm_archive`. *Surfaced 2026-08-11 by

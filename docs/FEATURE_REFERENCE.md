@@ -109,7 +109,7 @@ that window out. `start_time`/`end_time` are required on every request (no
 scan is bounded by `AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` and
 `AUDIT_WORM_SEARCH_REQUEST_TIMEOUT_SECONDS` — an over-wide/missing range is
 rejected outright, a bound hit mid-scan degrades to a truncated, resumable
-(except a day listing over the object budget — TODO item 184)
+(including a day listing over the object budget, since TODO item 184)
 page rather than a slow or unbounded scan.
 
 That search also verifies each segment's internal hash-chain linkage, and
