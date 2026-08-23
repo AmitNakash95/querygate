@@ -82,6 +82,11 @@ independently eligible item, or stop if roadmap order/dependencies leave none.
 Never steal or auto-expire a claim based on its timestamp. Remove your own
 claim when the work ships or before explicitly handing the item back.
 
+### Phase S — Ship as a paid SaaS product (gates everything else) — REVERSED
+
+A 2026-08-23 owner decision to sell QueryGate as a closed-source paid subscription was reversed on 2026-08-28 in favor of the Apache-2.0 open-core model this repository ships under. See CLAUDE.md's North Star section and docs/PRODUCT_GUIDE.md's Decision Log. The subscription/entitlement/control-plane work built under this phase (TODO.md items 210-219) was removed from the open-source core; the surviving commercial products (third-party audit-chain anchoring, fleet management) live in a private control-plane service outside this repository.
+
+
 ### Phase 0 — Moat & proof (highest ROI: wins the security review)
 
 - [x] **90** — Delegated agent identity into policy + dual-identity audit (F1).
