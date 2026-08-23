@@ -209,7 +209,7 @@ from typing import Any, List, Literal, Optional, Tuple, get_args
 
 import pydantic as pyd
 
-from querygate.audit.events import PersistableEvent
+from querygate.audit.events import PersistableEvent, persistable_event_types
 from querygate.audit.ledger import (
     GENESIS_PREV_HASH,
     resolve_ledger_key,
@@ -233,11 +233,9 @@ def _persistable_event_types() -> Tuple[str, ...]:
     event_type` (tests/unit/test_worm_search.py) fails if they ever
     disagree; a new `PersistableEvent` variant automatically both parses
     (see `_EVENT_ADAPTER` below) and becomes filterable with zero edits
-    here."""
-    return tuple(
-        get_args(member.model_fields["event_type"].annotation)[0]
-        for member in get_args(PersistableEvent)
-    )
+    here. The derivation itself now lives in `audit/events.py` so the admin
+    UI's filter reads the same one."""
+    return persistable_event_types()
 
 
 WormSearchEventType = Literal[_persistable_event_types()]

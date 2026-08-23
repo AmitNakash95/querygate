@@ -4,7 +4,7 @@ SHELL         := /bin/bash
 # ─── Help ─────────────────────────────────────────────────────────────────────
 .PHONY: help
 help:
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
+	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}' \
 		| sort
 
@@ -342,3 +342,7 @@ clean: ## Remove .venv, __pycache__, .pytest_cache, coverage artifacts
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	find . -type d -name ".pytest_cache" -exec rm -rf {} + 2>/dev/null || true
 	rm -rf htmlcov .coverage
+
+# ─── Partner demo (demo/) ─────────────────────────────────────────────────────
+-include demo/db/Makefile.include
+-include demo/Makefile.include

@@ -227,6 +227,34 @@ claim when the work ships or before explicitly handing the item back.
   directly unblocks SSO-based pilot onboarding. **Depends on 10 + 90 (both
   shipped).*** ✅ **Shipped** (full-vocabulary RFC 9728 `scopes_supported` +
   generated `docs/SCOPE_CATALOG.md` with role bundles, drift-tested).
+- [ ] **199** — Human SSO: OIDC sign-in for the browser surfaces, a built-in
+  local identity provider, and a file-configured claim→scope mapping. *Added
+  2026-08-23 at the maintainer's request. Items 10/90/95 let an agent or
+  service authenticate as a human; a **human** still had to paste a bearer
+  token into the admin UI, which is the credential-handling practice a security
+  review flags first. Completes the "bring your IdP" story the Proof pillar
+  claims.* ✅ **Shipped (phase 1)** — one OIDC authorization-code + PKCE
+  implementation across nineteen named provider presets (plus a first-class
+  `generic` path for any other OIDC issuer) with discovery, a built-in
+  local IdP (scrypt + TOTP + lockout) for air-gapped and break-glass use,
+  deny-by-default claim→scope mapping applied to browser sessions *and* bearer
+  JWTs, CSRF-bound sessions that re-derive authority per request, an RFC 8628
+  device grant for CLI callers, `admin:identity:*` administration, and a new
+  redaction-safe `identity.authentication` audit event. ✅ **Phase 1b** — a
+  built-in development identity provider so the real redirect flow runs with no
+  external IdP to register (fenced to local environments three independent
+  ways). ✅ **Phase 2** — Redis-backed session/login-flow/device stores, so SSO
+  works across replicas. ✅ **Phase 3** — `querygate-login`, the device-grant
+  CLI. **Only phase 4 remains open** in TODO.md: SAML 2.0, decision-gated until
+  a design partner mandates it.
+
+- [x] **200** — Per-surface credential-type policy. *Added 2026-08-23 by
+  maintainer review of item 199: SSO was available but not enforced, so a
+  static API key still opened the admin console and every action through it was
+  attributable to a config entry rather than a person.* ✅ **Shipped** — an
+  allowlist over `Principal.auth_method` for the console / REST / MCP surfaces,
+  whose default drops shared secrets from the control plane the moment SSO is
+  enabled. **Depends on 199.**
 
 ### Phase 2 — Enterprise procurement unlocks (pull-driven — do when a partner's security team engages)
 

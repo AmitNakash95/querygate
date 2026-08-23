@@ -401,6 +401,15 @@ dialog form > small { display: block; margin-top: 15px; text-align: center; }
 .checkbox-row input { width: 15px; min-height: 15px; accent-color: var(--accent); }
 .form-error { padding: 10px; border: 1px solid rgba(255, 124, 112, .4); border-radius: 5px; background: var(--bad-soft); color: var(--bad) !important; font-size: 11px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 25px; }
+/* Sign-in (item 199): SSO providers, the local-account form, and the device
+   approval summary. */
+.sso-providers { display: flex; flex-direction: column; gap: 9px; margin-top: 20px; }
+.sso-button { display: flex; align-items: center; justify-content: center; text-decoration: none; }
+.auth-divider { display: flex; align-items: center; gap: 12px; margin-top: 26px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+.auth-divider::before, .auth-divider::after { flex: 1; height: 1px; background: var(--line-strong); content: ""; }
+.device-summary { display: grid; grid-template-columns: max-content 1fr; gap: 8px 18px; margin-top: 20px; padding: 14px; border: 1px solid var(--line-strong); border-radius: 6px; font-size: 12px; }
+.device-summary dt { color: var(--muted); }
+.device-summary dd { margin: 0; overflow-wrap: anywhere; }
 .toast-region { position: fixed; z-index: 200; right: 18px; bottom: 18px; display: flex; width: min(380px, calc(100vw - 36px)); flex-direction: column; gap: 8px; }
 .toast { padding: 13px 15px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface-3); box-shadow: 0 16px 42px rgba(0, 0, 0, .35); color: var(--ink); font-size: 11px; animation: toast-in .2s ease-out; }
 .toast.bad { border-color: rgba(255, 124, 112, .55); }

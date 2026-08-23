@@ -1335,6 +1335,11 @@ async def apply(
         # (paths.templates is None); fall back to the deployment's static
         # template file rather than clobbering it to empty on an old rollback.
         template_file=paths.templates if paths.templates is not None else cfg.template_file,
+        # Identity is not part of a governed config version — applying one must
+        # re-read the deployment's own identity files, never leave them out
+        # (which would drop every provider and mapping rule from the process).
+        identity_file=cfg.identity_file if cfg.sso_enabled else None,
+        local_users_file=cfg.local_users_file if cfg.local_idp_enabled else None,
         resolver_registry=build_secret_resolver_registry(cfg),
     )
     updated_version = store.mark_active(version_id, actor=principal.subject)

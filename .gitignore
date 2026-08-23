@@ -238,3 +238,5 @@ __marimo__/
 
 # Generated demo fixtures (Postgres is the supported runnable demo target)
 examples/demo_db/*.db
+demo/.run/
+demo/config/var/

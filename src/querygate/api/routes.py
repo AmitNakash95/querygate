@@ -611,6 +611,8 @@ def build_router(
                 policy_file=cfg.policy_file,
                 catalog_file=cfg.catalog_file,
                 template_file=cfg.template_file,
+                identity_file=cfg.identity_file if cfg.sso_enabled else None,
+                local_users_file=cfg.local_users_file if cfg.local_idp_enabled else None,
                 resolver_registry=build_secret_resolver_registry(cfg),
             )
         except pyd.ValidationError as exc:

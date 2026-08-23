@@ -14410,3 +14410,56 @@ and surfaced — but not recorded.
 
 **Effort:** M–L overall. **Depends on:** 48, 50 phase 2 (the Redis wiring
 precedent).
+
+### 200. Per-surface credential-type policy: enabling SSO must actually close the console to shared secrets ✅ DONE
+
+**Effort: S–M.** Requested by the maintainer 2026-08-23, after item 199 shipped.
+
+**Why it mattered:** item 199 made SSO *available*; it did not make it
+*enforced*. Every configured credential scheme still worked on every surface,
+so a deployment that had completed a full IdP integration still had a static
+`API_KEYS` entry that opened the admin console — and every action taken through
+it was attributable to a config entry, not to a person. The Proof pillar's
+claim is per-human attribution; leaving that to operator convention was the
+wrong call, and the maintainer's review caught it: *"do we want to support all
+these (cookie, token, api key, jwt)?"*
+
+Removing API keys outright was considered and rejected on two concrete cases:
+the quickstart (the only way anyone evaluates the product), and **unattended
+agents**, which have no browser to approve a device grant and would otherwise
+need the customer's IdP to issue client-credentials tokens before they could
+run at all. Restricting per surface gets the outcome that matters — no shared
+secret on the control plane — without a cliff for callers that have no
+alternative yet.
+
+**What shipped:**
+- `core/auth_policy.py` — a closed vocabulary of the five `auth_method` values
+  an authenticator can actually stamp on a `Principal`, a `SHARED_SECRET_METHODS`
+  set (`api_key`, `anonymous` — the two that identify a deployment rather than a
+  person), and an `AuthMethodPolicy` per surface. `CONSOLE_AUTH_METHODS` /
+  `REST_AUTH_METHODS` / `MCP_AUTH_METHODS` configure it; an unknown method name
+  is refused at startup, the same posture as an unknown scope in a mapping rule.
+- **The default closes the console when SSO is on.** A permissive default with
+  opt-in tightening was rejected: a control nobody turns on protects nobody, and
+  the deployments most likely to leave the default are exactly the ones that
+  just finished an IdP integration and *believe* the console is SSO-gated.
+- **Enforcement is on the resolved principal**, not on which authenticators got
+  built — so a scheme added later is governed automatically rather than
+  inheriting access to everything.
+- Refusal is **403, not 401**: the caller authenticated, and retrying the same
+  credential kind can never work.
+
+*Mutation-verified. It found the defect worth having the discipline for: the
+policy was enforced on the bearer chain's return but **not** on `api/auth.py`'s
+session-cookie early return, so a tightened console policy could be bypassed by
+exactly the credential type SSO introduced. Both that path and the device-token
+path now have their own tests. It also showed a "would accept no credential"
+config guard was unreachable dead code — an empty configured list falls back to
+the surface default, and a non-empty one is non-empty by construction — so the
+guard was deleted and replaced with a property test rather than left as a
+security check that never fires.*
+
+**Known bound:** a method refusal is logged (`auth.method_not_permitted`) but
+not written to the durable audit sink, matching how the existing 401 paths
+behave. If per-surface refusals should be durably auditable, that is a
+deliberate follow-up rather than something this item silently assumed.

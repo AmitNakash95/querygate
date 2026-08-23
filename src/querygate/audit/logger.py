@@ -16,6 +16,8 @@ from querygate.audit.events import (
     AuditDecision,
     AuditEvent,
     AuditSurface,
+    AuthenticationAction,
+    AuthenticationEvent,
     CatalogGovernanceAction,
     CatalogGovernanceEvent,
     ConfigChangeAction,
@@ -288,6 +290,65 @@ def audit_catalog_governance(
         auth_method=auth_method,
         surface=surface,
         outcome=event.outcome,
+        error_category=error_category,
+    )
+    _persist(event, log)
+
+
+def audit_authentication(
+    *,
+    action: AuthenticationAction,
+    outcome: str,
+    principal: Optional[str] = None,
+    principal_scopes: Optional[List[str]] = None,
+    auth_method: str = "unknown",
+    surface: AuditSurface = "rest",
+    provider_id: Optional[str] = None,
+    mfa_used: Optional[bool] = None,
+    client_name: Optional[str] = None,
+    target_principal: Optional[str] = None,
+    duration_ms: Optional[int] = None,
+    error_category: Optional[str] = None,
+) -> None:
+    """Record a sign-in, sign-out, device grant, or local-account change
+    (TODO.md item 199) — the same durable sink as `audit_query` and
+    `audit_config_change`, so one trail answers both "who queried what" and
+    "how did that person come to be trusted".
+
+    Callers pass a stable `error_category` (`invalid_credentials`,
+    `nonce_mismatch`, `locked_out`, …), never an exception string: a failure
+    reason must never be able to carry a submitted username, password, code, or
+    token into the audit file.
+    """
+    log = get_logger()
+    event = AuthenticationEvent(
+        correlation_id=log.extra.get("request_id"),
+        surface=surface,
+        action=action,
+        provider_id=provider_id,
+        principal_id=principal,
+        auth_method=auth_method,
+        principal_scopes=principal_scopes or [],
+        mfa_used=mfa_used,
+        client_name=client_name,
+        target_principal_id=target_principal,
+        outcome="success" if outcome == "success" else "rejected",
+        error_category=error_category,
+        duration_ms=max(duration_ms or 0, 0),
+    )
+    log.info(
+        "audit.authentication",
+        audit_event_id=event.event_id,
+        action=action,
+        provider=provider_id,
+        principal=principal,
+        principal_scopes=principal_scopes,
+        auth_method=auth_method,
+        surface=surface,
+        outcome=event.outcome,
+        mfa_used=mfa_used,
+        client_name=client_name,
+        target_principal=target_principal,
         error_category=error_category,
     )
     _persist(event, log)

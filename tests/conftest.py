@@ -79,6 +79,12 @@ from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, set_registry
 from querygate.execution.async_execution import async_execution_store
 from querygate.execution.concurrency import clear_redis_limiter, in_process_limiter
+from querygate.identity.config_store import IdentityConfigStore, set_identity_store
+from querygate.identity.device import clear_in_process_device_state
+from querygate.identity.discovery import clear_discovery_cache
+from querygate.identity.local_auth import clear_login_attempt_state
+from querygate.identity.local_store import LocalUserStore, set_local_user_store
+from querygate.identity.sessions import clear_in_process_identity_state
 from querygate.execution.disclosure_budget import (
     clear_redis_disclosure_budget_limiter,
     in_process_disclosure_budget_limiter,
@@ -126,6 +132,17 @@ def reset_state(tmp_path):
     async_execution_store().clear()
     in_process_observed_shape_store().clear_sync()
     clear_redis_observed_shape_store()
+    # Identity state (item 199): sessions, in-flight logins, device grants,
+    # issued tokens, login-attempt/lockout counters, cached OIDC discovery, and
+    # the identity/local-user config stores. Same discipline the concurrency and
+    # quota limiters follow — and the login-attempt semaphore is bound to the
+    # event loop, so it must be reset per test for the same reason.
+    set_identity_store(IdentityConfigStore.empty())
+    set_local_user_store(LocalUserStore.empty())
+    clear_in_process_identity_state()
+    clear_in_process_device_state()
+    clear_login_attempt_state()
+    clear_discovery_cache()
     yield
     reset_audit_sink()
     reset_engines()

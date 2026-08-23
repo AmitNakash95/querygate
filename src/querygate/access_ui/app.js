@@ -3,8 +3,15 @@
 
   const API = "/api/v1";
 
+  // Must match AppConfig.sso_csrf_header.
+  const CSRF_HEADER = "X-QueryGate-CSRF";
+
   const state = {
     token: "",
+    // Set when an SSO/local session is active; its presence selects cookie mode.
+    csrf: "",
+    session: null,
+    signIn: null,
     access: null,
     connections: [],
     selectedConnection: null,
@@ -35,9 +42,18 @@
 
   async function api(path, options = {}) {
     const headers = new Headers(options.headers || {});
-    if (state.token) headers.set("Authorization", `Bearer ${state.token}`);
+    // Two credential modes, never both. An SSO session authenticates with an
+    // HttpOnly cookie plus the CSRF token the server issued; the server requires
+    // that header on every cookie-authenticated request, so a cross-site page
+    // holding only the cookie gets nothing.
+    if (state.csrf) headers.set(CSRF_HEADER, state.csrf);
+    else if (state.token) headers.set("Authorization", `Bearer ${state.token}`);
     if (options.body !== undefined) headers.set("Content-Type", "application/json");
-    const response = await fetch(`${API}${path}`, { ...options, headers });
+    const response = await fetch(`${API}${path}`, {
+      ...options,
+      headers,
+      credentials: state.csrf ? "include" : "same-origin",
+    });
     const isJson = (response.headers.get("content-type") || "").includes("json");
     const body = isJson ? await response.json() : null;
     if (!response.ok) throw new ApiError(response.status, detailText(body, response.statusText));
@@ -212,12 +228,90 @@
     }
   }
 
+  const SSO_ERROR_TEXT = {
+    provider_denied: "Your identity provider declined the sign-in.",
+    no_login_flow: "That sign-in link has expired. Start again.",
+    state_mismatch: "The sign-in could not be verified. Start again.",
+    nonce_mismatch: "The sign-in could not be verified. Start again.",
+    id_token_invalid: "Your identity provider's token failed verification.",
+    email_domain_not_allowed: "This account's email domain is not permitted here.",
+    email_unverified: "Your identity provider reports this email as unverified.",
+    discovery_failed: "The identity provider is unreachable. Try again shortly.",
+    token_exchange_failed: "The identity provider rejected the sign-in.",
+    claims_too_large: "Your identity provider returned too many claims. Ask an administrator to filter the groups claim.",
+  };
+
+  async function loadSignInOptions() {
+    // 404 means SSO is off on this deployment — a normal configuration, not an
+    // error, so the dialog simply stays token-only.
+    try {
+      state.signIn = await api("/auth/providers");
+    } catch (error) {
+      state.signIn = null;
+      return;
+    }
+    const providers = (state.signIn.providers || []);
+    if (!providers.length) return;
+    $("#sso-block").hidden = false;
+    $("#sso-providers").innerHTML = providers
+      // Everything except the local account form takes the redirect flow —
+      // including the development provider, which is deliberately not a
+      // special case here: it exists to exercise the real path.
+      .filter((provider) => provider.kind !== "local")
+      .map((provider) => `<a class="button primary wide sso-button" href="${API}/auth/sso/login?provider=${encodeURIComponent(provider.id)}&return_to=${encodeURIComponent(window.location.pathname)}">Continue with ${escapeHtml(provider.display_name)}${provider.kind === "dev" ? " (development)" : ""}</a>`)
+      .join("");
+    $("#local-login-form").hidden = !state.signIn.local_provider_id;
+  }
+
+  function consumeSsoErrorParam() {
+    const params = new URLSearchParams(window.location.search);
+    const category = params.get("sso_error");
+    if (!category) return;
+    const node = $("#sso-notice");
+    node.textContent = SSO_ERROR_TEXT[category] || "Sign-in failed. Contact your administrator.";
+    node.hidden = false;
+    params.delete("sso_error");
+    const query = params.toString();
+    window.history.replaceState({}, "", window.location.pathname + (query ? `?${query}` : ""));
+  }
+
+  async function resumeSession() {
+    // The session cookie survives a reload, unlike a pasted token, so ask the
+    // server who we are before prompting.
+    if (!state.signIn) return false;
+    let session;
+    try {
+      session = await api("/auth/session");
+    } catch (error) {
+      return false;
+    }
+    if (!session || !session.authenticated) return false;
+    state.session = session;
+    state.csrf = session.csrf_token;
+    state.token = "";
+    await loadAccess();
+    return true;
+  }
+
+  async function signOut() {
+    if (state.csrf) {
+      try { await api("/auth/logout", { method: "POST" }); } catch (error) { /* already gone */ }
+    }
+    disconnect();
+  }
+
   async function connect(token) {
     // The bearer token lives only in memory (state.token) for the lifetime of
     // the tab — never in any web storage — so it cannot be exfiltrated from
     // browser storage by an XSS. Closing or reloading the tab clears it and
     // requires re-authentication.
+    state.csrf = "";
+    state.session = null;
     state.token = token.trim();
+    await loadAccess();
+  }
+
+  async function loadAccess() {
     state.access = await api("/help/my-access");
     state.connections = state.access.visible_connections || [];
     setBanner("");
@@ -236,6 +330,8 @@
 
   function disconnect() {
     state.token = "";
+    state.csrf = "";
+    state.session = null;
     state.access = null;
     state.connections = [];
     $("#session-state").className = "status-chip neutral";
@@ -258,7 +354,8 @@
   }
 
   function bindEvents() {
-    $("#disconnect-button").addEventListener("click", disconnect);
+    // signOut ends the SERVER-side session too when there is one.
+    $("#disconnect-button").addEventListener("click", signOut);
     $("#connection-select").addEventListener("change", (event) => selectSchemaConnection(event.target.value));
     $("#table-list").addEventListener("click", (event) => {
       const button = event.target.closest("[data-table-name]");
@@ -279,12 +376,48 @@
         errorNode.hidden = false;
       } finally { setBusy(button, false); }
     });
+    $("#local-login-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const button = $("#local-login-form .button");
+      const errorNode = $("#local-error");
+      errorNode.hidden = true;
+      setBusy(button, true, "Signing in…");
+      try {
+        const session = await api("/auth/local/login", {
+          method: "POST",
+          body: JSON.stringify({
+            username: $("#local-username").value,
+            password: $("#local-password").value,
+            totp_code: $("#local-totp").value,
+          }),
+        });
+        $("#local-password").value = "";
+        $("#local-totp").value = "";
+        state.session = session;
+        state.csrf = session.csrf_token;
+        state.token = "";
+        await loadAccess();
+        $("#auth-dialog").close();
+        toast(`Signed in as ${state.access.principal}.`);
+      } catch (error) {
+        errorNode.textContent = error.message;
+        errorNode.hidden = false;
+      } finally { setBusy(button, false); }
+    });
   }
 
   async function initialize() {
     bindEvents();
-    // No token is ever persisted, so there is nothing to restore — every load
-    // starts with an in-memory-only authentication prompt.
+    consumeSsoErrorParam();
+    // A pasted bearer token is never persisted. An SSO session is different: it
+    // lives in an HttpOnly cookie the page cannot read but the browser still
+    // sends, so the server is asked first — otherwise every reload would prompt
+    // someone who is already signed in.
+    await loadSignInOptions();
+    if (await resumeSession()) {
+      toast(`Signed in as ${state.access.principal}.`);
+      return;
+    }
     $("#auth-dialog").showModal();
   }
 

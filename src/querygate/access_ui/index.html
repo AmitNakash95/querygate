@@ -98,10 +98,25 @@
   </div>
 
   <dialog id="auth-dialog" class="auth-dialog" aria-labelledby="auth-title">
+    <div class="dialog-brand"><img class="brand-wordmark" src="/admin/logo-wordmark.svg" alt="QueryGate;"></div>
+    <p class="eyebrow">My access</p>
+    <h2 id="auth-title">See your own QueryGate access</h2>
+    <p id="sso-notice" class="form-error" role="alert" hidden></p>
+
+    <div id="sso-block" hidden>
+      <p>Sign in with your organisation's identity provider. This page shows only what is visible to you — never other principals, raw configuration, or admin controls.</p>
+      <div id="sso-providers" class="sso-providers"></div>
+      <form id="local-login-form" hidden autocomplete="on">
+        <label><span>Username</span><input id="local-username" type="text" autocomplete="username" required></label>
+        <label><span>Password</span><input id="local-password" type="password" autocomplete="current-password" required></label>
+        <label><span>Authentication code <small>(if enrolled)</small></span><input id="local-totp" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]*" maxlength="6" placeholder="123456"></label>
+        <p id="local-error" class="form-error" role="alert" hidden></p>
+        <button class="button primary wide" type="submit">Sign in</button>
+      </form>
+      <p class="auth-divider"><span>or use a bearer token</span></p>
+    </div>
+
     <form id="auth-form" method="dialog">
-      <div class="dialog-brand"><img class="brand-wordmark" src="/admin/logo-wordmark.svg" alt="QueryGate;"></div>
-      <p class="eyebrow">My access</p>
-      <h2 id="auth-title">See your own QueryGate access</h2>
       <p>Use your own bearer token. This page shows only what is visible to you — never other principals, raw configuration, or admin controls.</p>
       <label><span>Bearer token</span><input id="auth-token" type="password" autocomplete="off" required placeholder="Paste token"></label>
       <p id="auth-error" class="form-error" role="alert" hidden></p>

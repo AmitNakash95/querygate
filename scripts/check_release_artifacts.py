@@ -12,7 +12,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
 FORBIDDEN_SUFFIXES = (".db", ".sqlite", ".sqlite3", ".pyc")
-FORBIDDEN_PARTS = {".env", ".git", ".venv", "__pycache__", "archive", "tests"}
+# "demo" carries the partner-demo stack, including a deliberately unsafe
+# execute_sql MCP server that exists only as the counter-example QueryGate
+# replaces (demo/baseline_mcp/). It must never reach a release artifact.
+FORBIDDEN_PARTS = {".env", ".git", ".venv", "__pycache__", "archive", "tests", "demo"}
 
 
 def _invalid_members(members: list[str]) -> list[str]:

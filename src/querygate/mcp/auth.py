@@ -29,6 +29,11 @@ from querygate.core.auth import (
     Principal,
     extract_bearer_token,
 )
+from querygate.core.auth_policy import (
+    MCP_SURFACE,
+    AuthMethodNotPermitted,
+    AuthMethodPolicy,
+)
 from querygate.core.config import AppConfig
 from querygate.core.jwt_auth import build_jwt_authenticator
 from querygate.core.logging import get_logger
@@ -127,13 +132,39 @@ class MCPAuthMiddleware:
         # Anonymous dev bypass only when NOTHING real is configured — see
         # api/auth.py's build_authenticator for why is_local alone isn't
         # the gate. (RS mode requires jwt_enabled, so it never reaches here.)
-        if settings.is_local and not settings.mcp_api_keys and jwt_auth is None:
+        # SSO counts as "something real": once it is on, a device token is a
+        # credential this surface accepts, and leaving the bypass open would
+        # make MCP anonymous on a deployment where REST is not.
+        if (
+            settings.is_local
+            and not settings.mcp_api_keys
+            and jwt_auth is None
+            and not settings.sso_enabled
+        ):
             authenticators.append(AnonymousAuthenticator())
         self._authenticator: Authenticator = (
             authenticators[0]
             if len(authenticators) == 1
             else CompositeAuthenticator(authenticators)
         )
+        # A QueryGate-issued device token (item 199) carries the identity of the
+        # human who approved it, so an agent started by `querygate login` acts as
+        # that person here exactly as it does over REST. Resolved before the sync
+        # chain because its lookup awaits a store read; browser session cookies
+        # are deliberately NOT accepted on this surface — MCP is an agent
+        # transport, and honouring a cookie here would hand it an ambient
+        # credential it should never carry.
+        # Which credential *kinds* this transport accepts (item 200). MCP is an
+        # agent transport, so the default stays permissive — but an operator who
+        # wants "agents present IdP tokens, never a shared key" can now say so.
+        self._method_policy = AuthMethodPolicy.build(
+            settings.mcp_auth_methods, surface=MCP_SURFACE, sso_enabled=settings.sso_enabled
+        )
+        self._device_authenticator = None
+        if settings.sso_enabled and settings.sso_device_grant_enabled:
+            from querygate.identity.authenticators import DeviceTokenAuthenticator
+
+            self._device_authenticator = DeviceTokenAuthenticator()
 
     def _resource_metadata_url(self, request: Request) -> str:
         """Absolute URL of the RFC 9728 metadata document for the challenge.
@@ -202,7 +233,11 @@ class MCPAuthMiddleware:
 
         request = Request(scope)
         token = extract_bearer_token(request.headers.get("Authorization"))
-        principal = self._authenticator.authenticate(token)
+        principal: Optional[Principal] = None
+        if self._device_authenticator is not None and token:
+            principal = await self._device_authenticator.authenticate(token)
+        if principal is None:
+            principal = self._authenticator.authenticate(token)
 
         if principal is None:
             get_logger().warning("mcp.auth.rejected", path=request.url.path)
@@ -214,6 +249,23 @@ class MCPAuthMiddleware:
                 )
                 response = _unauth_response(challenge)
                 await response(scope, receive, send)
+            return
+
+        try:
+            self._method_policy.check(principal)
+        except AuthMethodNotPermitted as exc:
+            get_logger().warning(
+                "mcp.auth.method_not_permitted",
+                auth_method=exc.method,
+                subject=principal.subject,
+                path=request.url.path,
+            )
+            if scope["type"] == "http":
+                refusal = JSONResponse(
+                    content={"error": {"code": "FORBIDDEN", "message": exc.message}},
+                    status_code=status.HTTP_403_FORBIDDEN,
+                )
+                await refusal(scope, receive, send)
             return
 
         if self._rs_enabled:
