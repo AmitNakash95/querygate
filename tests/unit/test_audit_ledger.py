@@ -460,7 +460,7 @@ class TestNonAsciiDigestsAreMismatchesNotCrashes:
         path = tmp_path / "ledger.jsonl"
         path.write_text(json.dumps(raw) + "\n")
 
-        result = verify_chain(str(path))
+        result = verify_chain(path.read_text().splitlines())
 
         assert result.ok is False
 
@@ -472,29 +472,48 @@ class TestNonAsciiDigestsAreMismatchesNotCrashes:
         receipt, where a `TypeError` is a 500. This is the source-level guard
         the claim actually needs, in the style of item 192's hash-slot test."""
         source = pathlib.Path(ledger_module.__file__).read_text()
-        calls = [ln.strip() for ln in source.splitlines() if "hmac.compare_digest(" in ln]
+        # Match the bare name, not `hmac.`-qualified: `from hmac import
+        # compare_digest` would otherwise reintroduce the hazard with this
+        # test green. The import form is banned outright for the same reason.
+        calls = [ln.strip() for ln in source.splitlines() if "compare_digest(" in ln]
 
+        assert "from hmac import" not in source, (
+            "importing compare_digest by name defeats this guard — "
+            "call it as hmac.compare_digest inside digests_equal"
+        )
         assert len(calls) == 1, f"expected one call inside digests_equal, found: {calls}"
         assert calls[0] == "return hmac.compare_digest(expected, actual)"
 
     def test_a_non_ascii_prev_hash_breaks_the_chain_instead_of_raising(self, tmp_path):
-        """The linkage comparison site, which no behavioural test reached."""
-        first = make_record(0, GENESIS_PREV_HASH, {"a": 1})
-        second = make_record(1, first.hash, {"b": 2})
-        raw = json.loads(second.model_dump_json())
-        raw["prev_hash"] = raw["prev_hash"][:-1] + "\ufffd"
-        path = tmp_path / "ledger.jsonl"
-        path.write_text(first.model_dump_json() + "\n" + json.dumps(raw) + "\n")
+        """The LINKAGE comparison site specifically.
 
-        assert verify_chain(str(path)).ok is False
+        The second record is built OVER the corrupt link, so its own hash
+        recomputes correctly and `verify_chain`'s own-hash check (which runs
+        first) passes — otherwise the walk short-circuits there and this never
+        reaches `digests_equal` at the linkage comparison at all. The `reason`
+        assertion is what pins that distinction: without it, `ok is False`
+        passes for the wrong reason."""
+        first = make_record(0, GENESIS_PREV_HASH, {"a": 1})
+        second = make_record(1, first.hash[:-1] + "\ufffd", {"b": 2})
+        path = tmp_path / "ledger.jsonl"
+        path.write_text(first.model_dump_json() + "\n" + second.model_dump_json() + "\n")
+
+        result = verify_chain(path.read_text().splitlines())
+
+        assert result.ok is False
+        assert "prev_hash" in result.reason, result.reason
 
     def test_a_non_ascii_expected_head_is_reported_not_raised(self, tmp_path):
-        """The head-anchor comparison site."""
+        """The head-anchor comparison site, which only runs after every record
+        has verified \u2014 so the chain below must be intact."""
         record = make_record(0, GENESIS_PREV_HASH, {"a": 1})
         path = tmp_path / "ledger.jsonl"
         path.write_text(record.model_dump_json() + "\n")
 
-        assert verify_chain(str(path), expected_head="ab\ufffd").ok is False
+        result = verify_chain(path.read_text().splitlines(), expected_head="ab\ufffd")
+
+        assert result.ok is False
+        assert "head" in result.reason, result.reason
 
     def test_a_non_ascii_receipt_hash_is_invalid_not_an_error(self):
         """The receipt site — reachable by an external party verifying a

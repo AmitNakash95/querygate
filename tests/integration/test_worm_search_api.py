@@ -508,4 +508,11 @@ async def test_every_served_or_rejected_request_lands_under_exactly_one_outcome(
         await _get(app_on, window)  # ok
 
     after = {o: _outcome_total(o) for o in before}
-    assert sum(after[o] - before[o] for o in before) == 3
+    # Per-label, not just the sum: a bare sum is label-blind and would pass if
+    # all three requests landed under the SAME outcome.
+    assert {o: after[o] - before[o] for o in before} == {
+        "disabled": 1,
+        "rejected": 1,
+        "ok": 1,
+        "error": 0,
+    }

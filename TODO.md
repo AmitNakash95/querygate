@@ -233,6 +233,7 @@ order-of-magnitude, not commitments.
 | 200 | ✅ Per-surface credential-type policy: an allowlist over `Principal.auth_method` for the console / REST / MCP surfaces, whose default closes the admin control plane to static API keys the moment SSO is enabled | S–M | 199 |
 | 201 | ✅ The WORM archive tier is reachable only against AWS S3 (`endpoint_url` is never set), so on-prem/air-gapped deployments cannot have the immutable copy at all | S | 134 |
 | 202 | The `digests_equal` non-ASCII hazard is unfixed at six `hmac.compare_digest` sites outside `audit/ledger.py` (TOTP code, OIDC state/nonce, CSRF token, PKCE challenge), turning a clean 401/403/422 into a masked 500 | S | 194, 199 |
+| 203 | An unparseable predecessor exempts one chain link on a resumed page (accept-as-given), while the blank-run walk fails closed for the same threat shape | S | 172, 194 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -3787,4 +3788,44 @@ what would have caught this class in the first place.
 three raise today.
 
 **Effort:** S. **Depends on:** 194 (defect 1 shipped), 199 (shipped, phase 1).
+
+### 203. An unparseable predecessor exempts one chain link on a resumed page, while an exhausted blank-run walk fails closed — same threat shape, opposite posture
+
+**Filed 2026-08-24 by `security-invariant-reviewer` (WS-172-9)**, re-reviewing
+the items 184/194/185/201 fixes. **Pre-existing since item 172's WS-172-1
+seed walk**; item 194 defect 2 only made it visible by adding `RecursionError`
+alongside the `json.JSONDecodeError` sibling that already behaved this way.
+
+`_seed_chain_state_from_predecessor` returns `(None, None, False)` — the
+ACCEPT-AS-GIVEN tuple — when the predecessor line is unparseable, so a resumed
+page's first incoming link is never checked. Its blank-run sibling returns
+`(None, None, True)` (fail-closed) for a threat of the same shape, on the
+reasoning that "a genuine segment has zero blank lines, so this only fires
+against a crafted/corrupted object". **A genuine segment also has zero
+unparseable lines**, so the same reasoning argues for the same posture.
+
+**Attack, and its narrowness.** An actor with `s3:PutObject` deletes a record
+from the middle of a segment (no forging, so this bites the keyed-HMAC
+configuration too), which breaks linkage at the following record. Overwriting
+the line immediately BEFORE that record with an unparseable blob makes the
+seed walk return accept-as-given, so a page resuming exactly at the following
+record reports `chain_breaks == 0`. Narrow because the attacker cannot choose
+where the auditor's page boundary falls — though a caller-supplied
+`limit`/`cursor` determine it — and one `malformed` count remains as a weak
+signal.
+
+**What to do:** this is a deliberate decision, not a drive-by — the comment at
+the `RecursionError` handler says so explicitly. The consistent change is
+`return None, None, True` at BOTH the `except (json.JSONDecodeError,
+RecursionError)` branch and the pre-existing sibling, making the resumed
+page's first link a counted `chain_break`. It is false-positive-free by the
+same argument the blank-run case already uses. If instead the exemption is
+deliberately kept, record it in the function's three-way contract docstring as
+an accepted residual alongside WS-172-3 (tail truncation).
+
+**Acceptance criteria:** a segment whose middle record is deleted and whose
+preceding line is unparseable, resumed at the following record, reports
+`chain_breaks == 1`. It reports 0 today.
+
+**Effort:** S. **Depends on:** 172 (shipped), 194 defect 2 (shipped).
 
