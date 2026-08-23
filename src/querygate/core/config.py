@@ -436,7 +436,9 @@ class AppConfig(BaseSettings):
     # archive is never written to one store and searched in another.
     #
     # The store must implement S3 Object Lock: this is an endpoint override,
-    # NOT an "any object store" adapter. Retention is still sent as
+    # NOT an "any object store" adapter. No CI job or live test in this repo
+    # runs against a non-AWS store, so any specific store's support is a
+    # vendor claim rather than something QueryGate has verified. Retention is still sent as
     # `ObjectLockMode`/`ObjectLockRetainUntilDate`, so pointing this at a
     # store without Object Lock would archive objects that are ordinary,
     # deletable blobs while the deployment still believed they were WORM —

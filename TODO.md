@@ -232,6 +232,7 @@ order-of-magnitude, not commitments.
 | 199 | ✅ Human SSO: OIDC authorization-code sign-in for the browser surfaces across eleven provider presets, a built-in local identity provider (scrypt + TOTP) for air-gapped and break-glass use, a deny-by-default file-configured claim→scope mapping, CSRF-bound sessions, and an RFC 8628 device grant for CLI callers | L | 10, 90, 95 |
 | 200 | ✅ Per-surface credential-type policy: an allowlist over `Principal.auth_method` for the console / REST / MCP surfaces, whose default closes the admin control plane to static API keys the moment SSO is enabled | S–M | 199 |
 | 201 | ✅ The WORM archive tier is reachable only against AWS S3 (`endpoint_url` is never set), so on-prem/air-gapped deployments cannot have the immutable copy at all | S | 134 |
+| 202 | Non-ASCII input handling around a few HMAC-based comparisons needs hardening (fail-closed; being addressed) | S | 194, 199 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -3311,7 +3312,7 @@ Shipped a drift guard that regenerates the page in memory and byte-compares it, 
 
 **Defects (1) and (2) shipped 2026-08-23.** A non-ASCII digest is now a mismatch rather than a `TypeError`: `audit/ledger.py` grew `digests_equal`, used by all five `hmac.compare_digest` sites (both readers), so ordinary corruption of one byte in a `hash` no longer permanently 500s every future search covering that immutable object. Both `json.loads` handlers (the line loop and the seed walk) now catch `RecursionError` alongside `json.JSONDecodeError`, so a deeply-nested line is counted `malformed` and the rest of the page survives.
 
-**Defect (3) remains open and is the reason this item is not fully done.** `_contains_forbidden_content` still walks `query_shape` with no depth cap. Measured on 2026-08-23 against the shipped tree (Python 3.11, `sys.getrecursionlimit()` 1000): LIST nesting raises at depth **333** (332 survives), DICT nesting at **998** (997 survives) — the ~3x gap is the structural generator-frame cost the original note describes, so any cap must be sized against the LIST cost. `Policy.max_where_depth` defaults to **5**, so a legitimate `query_shape` sits three orders of magnitude below the LIST threshold. The remaining decision is the cap VALUE and is a maintainer call, since the screener is a security control whose `True` means *reject* and the cap must fail closed (over-nested ⇒ `malformed`).
+**Defect (3) remains open and is the reason this item is not fully done.** `_contains_forbidden_content` still walks `query_shape` with no depth cap. Measured on 2026-08-23 against the shipped tree (Python 3.11, `sys.getrecursionlimit()` 1000): LIST nesting first raises around depth **~330**, DICT around **~1000** — the ~3x gap is the structural generator-frame cost the original note describes, so any cap must be sized against the LIST cost. The exact integer is harness-sensitive (±1 per intervening frame) and is LOWER inside an async request handler, so it is deliberately stated as an approximation: the cap must be chosen with margin, never tuned to a measured boundary. `Policy.max_where_depth` defaults to **5**, so a legitimate `query_shape` sits three orders of magnitude below the LIST threshold. The remaining decision is the cap VALUE and is a maintainer call, since the screener is a security control whose `True` means *reject* and the cap must fail closed (over-nested ⇒ `malformed`).
 
 **Surfaced 2026-08-12 by `security-invariant-reviewer` and `claim-reviewer`
 independently, auditing item 178's own commit, and measured — not reasoned —
@@ -3346,7 +3347,11 @@ poisons every future search whose window covers that day, permanently.
    available stack inside an async request handler is smaller than in a bare
    probe, so the production threshold is lower still.
 3. **`_contains_forbidden_content` walks `query_shape` with no depth cap.**
-   Measured through the real function, and the threshold is **shape-dependent**:
+   **Superseded 2026-08-23 — the ~480/~2x figures below were re-measured and
+   are wrong; see the depths recorded at the top of this item (~330 list,
+   ~1000 dict, a ~3x gap). The original text is kept only for the structural
+   explanation, which still holds.** Measured through the real function, and
+   the threshold is **shape-dependent**:
    LIST nesting raises at depth ~480 (300 is fine), while DICT nesting survives
    to ~1000. The ~2x gap is structural — the list branch is
    `any(_contains_forbidden_content(item) for item in node)`, costing a
@@ -3732,4 +3737,8 @@ A per-surface allowlist over `Principal.auth_method` (console / REST / MCP) whos
 `AUDIT_WORM_S3_ENDPOINT_URL` points both the WORM flush monitor and the managed search at any S3-API-compatible store with Object Lock (MinIO, Ceph RGW), so on-prem and air-gapped deployments can have the immutable archive too — not AWS S3 alone.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 201).
+
+### 202. Non-ASCII input handling around a few HMAC-based comparisons needs hardening
+
+A narrow, fail-closed input-handling gap: a handful of comparisons over caller-supplied strings can raise on non-ASCII input instead of cleanly rejecting it, turning what should be an ordinary 401/403/422 into a masked 500 on a few identity/SSO code paths. Every affected path already fails closed — the residual cost is availability and error-message clarity, not an authorization bypass. Being hardened.
 

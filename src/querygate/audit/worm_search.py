@@ -65,16 +65,21 @@ scan there, counted both in `unverified` and in a distinct `chain_breaks`
 field (a stronger signal than an ordinary hash mismatch, since the record
 itself is otherwise self-consistent). Each of those four is a COUNTED
 outcome — the line is reported as `malformed`/`unverified` rather than
-raised. **That is NOT yet a whole-module guarantee, and must not be read as
-one (TODO.md item 194):** three crafted-or-corrupt line shapes still escape
-`search_worm_archive` as unhandled exceptions the route masks as a generic 500 — a
-`hash` containing any non-ASCII character (`hmac.compare_digest` raises
-`TypeError`; reachable by ORDINARY CORRUPTION, since `_get_object_text`
-decodes with `errors="replace"`, so one bad byte becomes U+FFFD), and two
-unbounded recursions on a deeply-nested line (`json.loads`, whose `except`
-clause names only `json.JSONDecodeError`; and `_contains_forbidden_content`,
-which walks `query_shape` with no depth cap). All three predate item 178 and
-are the same defect class it closed for `seq`; none leaks (the masked body is
+raised. **Two of the three shapes TODO.md item 194 filed are now closed; ONE
+remains, so this is still not a whole-module guarantee.** Closed: a `hash`
+containing a non-ASCII character (reachable by ORDINARY CORRUPTION, since
+`_get_object_text` decodes with `errors="replace"`, so one bad byte becomes
+U+FFFD) is now a mismatch rather than a `TypeError`, via
+`audit/ledger.py`'s `digests_equal` at every comparison site in both readers;
+and a deeply-nested line no longer escapes either `json.loads` handler, since
+both the line loop and the seed walk catch `RecursionError` (a `RuntimeError`,
+which `except json.JSONDecodeError` never covered) and count the line
+`malformed`. **Still open — `_contains_forbidden_content` walks `query_shape`
+with no depth cap** (measured 2026-08-23 on CPython 3.11 at the default
+recursion limit: LIST nesting raises around depth ~330, DICT around ~1000, and
+lower inside an async handler; `Policy.max_where_depth` defaults to 5, so
+legitimate content sits far below either). It is the same defect class item
+178 closed for `seq`; it does not leak (the masked body is
 `PUBLIC_INTERNAL_ERROR`) — the cost is availability plus the loss of a whole
 page's already-accumulated genuine records. **Reachable
 by alerting, not just by reading a response (TODO.md item 177):** both counts
@@ -115,9 +120,9 @@ leak" posture for every other forgery class below.
 **Bounds — enforced, not advisory (`WormSearchBounds`).** A request outside
 these is REJECTED (422, `QueryValidationError`) before any S3 call is made;
 a request inside them that still can't finish scanning within one call is
-TRUNCATED with a `next_cursor` — resumable for every bound EXCEPT the day
-listing, see `max_objects_scanned` below (TODO.md item 184) — the same "stop
-and disclose
+TRUNCATED with a `next_cursor` — resumable for every bound, including a day
+listing over `max_objects_scanned` (TODO.md item 184; see that bound below) —
+the same "stop and disclose
 honestly, never silently serve past a bound" posture
 `admin/anomaly.py`'s `max_lines_read`/`max_events_scanned` already
 established for the local reader:
@@ -132,11 +137,16 @@ established for the local reader:
   real cost driver of a scan (each is a network round trip against a segment
   up to `AUDIT_WORM_MAX_BUFFERED_EVENTS` events large). Hit mid-scan, the
   response is truncated with a cursor to resume from exactly where it
-  stopped — never a full-archive linear scan in one request. **Exception
-  (TODO.md item 184): when a single DAY holds more keys than this budget, the
-  day-listing truncation emits a cursor pointing at the START of that same day,
-  so a good-faith pager loops and segments past the budget are unreachable.
-  That is the one bound here whose cursor does not advance.**
+  stopped — never a full-archive linear scan in one request. When a single DAY
+  holds more keys than this budget, the cursor carries an exclusive `after`
+  marker naming the last segment consumed, and every cursor emitted while
+  inside that day carries the marker its own listing was produced with, so a
+  resumed page re-lists the identical window its `key`/`line` offsets refer to
+  and the scan never advances off a day it has not finished (TODO.md item 184).
+  Before that fix the day-listing truncation reset to the START of the same
+  day, so a pager looped and segments past the budget were unreachable; the
+  first follow-up left three of the other exits still advancing to the next
+  day, which lost records while reporting `truncated=False`.
 - `request_timeout_seconds` — wall-clock budget for one request's S3 work,
   checked between object fetches and day-prefix listings, AND periodically
   (every 1,000 lines) inside a single object's own line loop (TODO.md item
@@ -161,8 +171,8 @@ directories get listed; every individual event is still filtered against the
 caller's exact `[start_time, end_time]` by its own `occurred_at`; the
 padding cannot leak an out-of-window event into the result.
 
-**Cursor.** A self-describing resumption token (`day`/`key`/`line` + a
-fingerprint of the request's own filters, base64-encoded, NOT a bearer
+**Cursor.** A self-describing resumption token (`day`/`key`/`line`/`after`
++ a fingerprint of the request's own filters, base64-encoded, NOT a bearer
 capability or a signed/encrypted value — a holder of the search scope can
 already read everything a cursor could ever point at), so replaying a cursor
 against DIFFERENT filters is rejected (422) rather than silently returning a
@@ -328,9 +338,9 @@ _NOTE = (
 class WormSearchBounds(pyd.BaseModel):
     """Server-enforced ceilings a request cannot exceed. A request outside
     these is REJECTED before any S3 call; a request inside them that can't
-    finish in one call is TRUNCATED with a cursor — resumable for every bound
-    except a day listing that exceeds `max_objects_scanned` (TODO.md item
-    184)."""
+    finish in one call is TRUNCATED with a cursor — resumable for every
+    bound, including a day listing that exceeds `max_objects_scanned`
+    (TODO.md item 184)."""
 
     max_window_seconds: float = pyd.Field(gt=0)
     max_objects_scanned: int = pyd.Field(ge=1)
@@ -503,8 +513,22 @@ def _decode_cursor(cursor: str, fingerprint: str) -> _CursorState:
         # Absent on cursors issued before item 184 — those simply resume at the
         # start of their day, exactly as they did when they were issued.
         after_key = payload.get("after")
-        if after_key is not None and not isinstance(after_key, str):
-            raise ValueError("after-key listing marker is not a string")
+        if after_key is not None:
+            # This is the ONLY cursor field that reaches the AWS wire (`key`
+            # is merely compared against a freshly-listed key set), so it is
+            # bounded here rather than trusted. A lone surrogate survives
+            # `json.loads` as a `str` but raises `UnicodeEncodeError` inside
+            # botocore's percent-encoding — which would escape as the masked
+            # 500 that item 194 exists to eliminate, and would let a caller
+            # move the `outcome="error"` counter at will.
+            if not isinstance(after_key, str):
+                raise ValueError("after-key listing marker is not a string")
+            try:
+                encoded = after_key.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ValueError("after-key listing marker is not UTF-8 encodable") from exc
+            if len(encoded) > _MAX_S3_KEY_BYTES:
+                raise ValueError("after-key listing marker exceeds the S3 key length limit")
         return _CursorState(day=day, key=key, line=line, after_key=after_key)
     except QueryValidationError:
         raise
@@ -551,6 +575,11 @@ def _validate_limit(limit: Optional[int], bounds: WormSearchBounds) -> int:
 # security-invariant-reviewer, 2026-08-10/11): bounds `_seed_chain_state_from_
 # predecessor`'s backward walk — see that function's own docstring.
 _SEED_WALK_MAX_STEPS = 1024
+
+# S3's own object-key ceiling. A cursor's `after` marker is only ever a
+# `StartAfter` listing argument, but it is caller-supplied, so it is held to
+# the same ceiling a real key has rather than handed unbounded to botocore.
+_MAX_S3_KEY_BYTES = 1024
 
 
 def _chain_seq(parsed: Any) -> Optional[int]:
@@ -674,8 +703,17 @@ def _seed_chain_state_from_predecessor(
             # a RuntimeError, NOT a JSONDecodeError — on a deeply-nested
             # line. ~1,000 nested arrays is a ~2 KB line, four orders of
             # magnitude under _MAX_OBJECT_BYTES, so the byte bounds are no
-            # defence. Treated as unparseable (fails closed), exactly like
-            # any other malformed seed line.
+            # defence.
+            #
+            # Returns the accept-as-given tuple, NOT the fail-closed one —
+            # identical to the `json.JSONDecodeError` case this joins, and
+            # matching this function's documented three-way contract above:
+            # an unparseable predecessor yields no seed, and the resumed
+            # page's first incoming link goes unchecked. (An earlier version
+            # of this comment claimed "fails closed", which is what the third
+            # slot being `True` would mean. Changing the behaviour would have
+            # to cover the pre-existing JSONDecodeError sibling too and is a
+            # deliberate decision, not a drive-by.)
             return None, None, False
         if verify_envelope_hash(seed_parsed, key=ledger_key) is True:
             # TODO.md item 178: a verified predecessor whose `seq` is
@@ -796,13 +834,40 @@ async def _get_object_text(client, bucket: str, key: str) -> str:
 
 
 def _next_position_cursor(
-    keys: List[str], idx: int, day: date, end_day: date, fingerprint: str
+    keys: List[str],
+    idx: int,
+    day: date,
+    end_day: date,
+    fingerprint: str,
+    *,
+    after_key: Optional[str] = None,
+    listing_truncated: bool = False,
 ) -> Optional[str]:
     """Where the NEXT page should resume once object `keys[idx]` is fully
-    consumed — the next key in this day if any, else the start of the next
-    day if the window still covers it, else None (nothing left)."""
+    consumed — the next key in this day if any, else the REST of this day if
+    its listing was cut short, else the start of the next day if the window
+    still covers it, else None (nothing left).
+
+    `after_key` is the marker that produced `keys`, and is carried on a
+    same-day cursor so the resumed page re-lists the identical window its
+    `key` offset refers to (TODO.md item 184 follow-up). Dropping it made
+    `keys.index(resume_key)` miss whenever the target sorted past
+    `max_objects_scanned` from the day's start, silently re-delivering
+    earlier segments.
+
+    `listing_truncated` is the half the original item-184 fix missed: this
+    function used to advance to the NEXT DAY as soon as `idx` was the last
+    LISTED key, with no idea that more keys existed for this day beyond the
+    object budget. Every such segment became unreachable and — because
+    advancing the day is a normal, non-truncating exit — the final page could
+    report `truncated=False`, asserting it had covered a window it had not.
+    That is a compliance search silently returning an incomplete answer, so
+    an incomplete listing must keep the scan on this day.
+    """
     if idx + 1 < len(keys):
-        return _encode_cursor(day, keys[idx + 1], 0, fingerprint)
+        return _encode_cursor(day, keys[idx + 1], 0, fingerprint, after_key=after_key)
+    if listing_truncated and keys:
+        return _encode_cursor(day, None, 0, fingerprint, after_key=keys[-1])
     next_day = day + timedelta(days=1)
     if next_day <= end_day:
         return _encode_cursor(next_day, None, 0, fingerprint)
@@ -1025,7 +1090,10 @@ async def search_worm_archive(
 
                 if objects_scanned >= bounds.max_objects_scanned or time.monotonic() >= deadline:
                     return _finalize(
-                        truncated=True, next_cursor=_encode_cursor(day, key, 0, fingerprint)
+                        truncated=True,
+                        next_cursor=_encode_cursor(
+                            day, key, 0, fingerprint, after_key=day_after_key
+                        ),
                     )
 
                 # Size-check BEFORE the full body is ever read into memory —
@@ -1040,7 +1108,15 @@ async def search_worm_archive(
                 if size > _MAX_OBJECT_BYTES:
                     return _finalize(
                         truncated=True,
-                        next_cursor=_next_position_cursor(keys, idx, day, end_day, fingerprint),
+                        next_cursor=_next_position_cursor(
+                            keys,
+                            idx,
+                            day,
+                            end_day,
+                            fingerprint,
+                            after_key=day_after_key,
+                            listing_truncated=listing_truncated,
+                        ),
                     )
 
                 text = await _get_object_text(client, bucket, key)
@@ -1220,10 +1296,18 @@ async def search_worm_archive(
                     if len(events) >= limit:
                         resume_at = line_no + 1
                         if resume_at < len(lines):
-                            next_cursor = _encode_cursor(day, key, resume_at, fingerprint)
+                            next_cursor = _encode_cursor(
+                                day, key, resume_at, fingerprint, after_key=day_after_key
+                            )
                         else:
                             next_cursor = _next_position_cursor(
-                                keys, idx, day, end_day, fingerprint
+                                keys,
+                                idx,
+                                day,
+                                end_day,
+                                fingerprint,
+                                after_key=day_after_key,
+                                listing_truncated=listing_truncated,
                             )
                         return _finalize(truncated=next_cursor is not None, next_cursor=next_cursor)
 
@@ -1243,7 +1327,9 @@ async def search_worm_archive(
                     # dropping everything past the cap.
                     return _finalize(
                         truncated=True,
-                        next_cursor=_encode_cursor(day, key, last_line, fingerprint),
+                        next_cursor=_encode_cursor(
+                            day, key, last_line, fingerprint, after_key=day_after_key
+                        ),
                     )
 
             if listing_truncated:
@@ -1341,6 +1427,12 @@ async def build_worm_search_result(
         raise
 
     if not cfg.audit_sink_backend.is_s3_worm_archived():
+        # A `source="disabled"` result is a genuinely SERVED request (200, a
+        # real `WormSearchResult`), so it must land in the outcome space like
+        # any other. Leaving it uncounted made `rejected / (ok+rejected+error)`
+        # read 100% on every deployment with WORM archiving off — which is the
+        # default — breaking the exact ratio alert item 185 exists to enable.
+        AUDIT_WORM_SEARCH_REQUESTS_TOTAL.labels(outcome="disabled").inc()
         return WormSearchResult(
             source="disabled", generated_at=datetime.now(timezone.utc).isoformat()
         )

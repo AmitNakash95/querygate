@@ -991,6 +991,11 @@ class TestSeedChainStateFromPredecessor:
         `search_worm_archive` exactly like the line loop's did."""
         good = _chain_lines([_event("a", minute=0)])[0]
         nested = "[" * 1000 + "]" * 1000
+        # See the line-loop test: a successful parse returns the identical
+        # tuple this asserts, so without pinning the premise this test goes
+        # vacuous the moment the recursion limit changes.
+        with pytest.raises(RecursionError):
+            json.loads(nested)
 
         prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
             [nested, good], 1, ledger_key=None
@@ -1721,10 +1726,24 @@ class TestDayListingTruncationIsResumable:
             seen_cursors.add(result.next_cursor)
             cursor = result.next_cursor
 
-    async def test_a_day_truncated_by_the_object_budget_pages_to_exhaustion(self, s3):
+    @pytest.mark.parametrize("default_limit", [50, 2, 1])
+    async def test_a_day_truncated_by_the_object_budget_pages_to_exhaustion(
+        self, s3, default_limit
+    ):
         """Item 184's first acceptance criterion: 5 single-event segments in
         one day with max_objects_scanned=2, followed to exhaustion, yield all
-        5 events exactly once with no cursor repeating."""
+        5 events exactly once with no cursor repeating.
+
+        Parametrized over `default_limit` because the original fix — and the
+        original version of this test — only ever exercised the ONE exit where
+        the day's key loop runs to completion and falls through to
+        `if listing_truncated:`. At `default_limit=1` the page fills on the
+        last LISTED key instead, taking `_next_position_cursor`, which knew
+        nothing about the truncated listing and advanced to the next day:
+        three of five records were silently unreachable and the final page
+        reported `truncated=False`. All four reviewers found this
+        independently; it reproduced as `['c0','c1']` before the follow-up
+        fix. A single un-parametrized value is why a green suite hid it."""
         for minute in range(5):
             _put_events(
                 s3,
@@ -1732,10 +1751,68 @@ class TestDayListingTruncationIsResumable:
                 [_event(f"c{minute}", minute=minute)],
             )
 
-        connections, _ = await self._drain(bounds_kwargs={"max_objects_scanned": 2})
+        connections, _ = await self._drain(
+            bounds_kwargs={"max_objects_scanned": 2, "default_limit": default_limit}
+        )
 
         assert sorted(connections) == ["c0", "c1", "c2", "c3", "c4"]
-        assert len(connections) == 5, "an event was returned more than once"
+
+    @pytest.mark.parametrize("default_limit", [3, 2])
+    async def test_multi_event_segments_behind_a_truncated_listing_page_exactly_once(
+        self, s3, default_limit
+    ):
+        """The architecture reviewer's Variant B: multi-event segments make a
+        page fill MID-object as well as at an object boundary, so the
+        mid-object line cursor and the page-filled cursor both have to carry
+        the day's `after` marker. Without it a resumed page re-lists the day
+        from its start, `keys.index(resume_key)` misses, no object is
+        consumed, and the scan oscillates between two cursors re-delivering
+        the events between them."""
+        for minute in range(5):
+            _put_events(
+                s3,
+                f"{_PREFIX}2026/03/15/20260315T12000{minute}-000001.jsonl",
+                [_event(f"c{minute}a", minute=minute), _event(f"c{minute}b", minute=minute)],
+            )
+
+        connections, _ = await self._drain(
+            bounds_kwargs={"max_objects_scanned": 2, "default_limit": default_limit}
+        )
+
+        assert sorted(connections) == sorted(
+            [f"c{m}{half}" for m in range(5) for half in ("a", "b")]
+        )
+
+    async def test_an_oversized_object_behind_a_truncated_listing_stays_on_its_day(self, s3):
+        """The oversized-object exit is the third way control leaves a day
+        whose listing was cut short. It must not advance to the next day
+        either — an object over `_MAX_OBJECT_BYTES` is skipped, but the
+        segments the listing never reached are still owed to the caller."""
+        for minute in range(3):
+            _put_events(
+                s3,
+                f"{_PREFIX}2026/03/15/20260315T12000{minute}-000001.jsonl",
+                [_event(f"c{minute}", minute=minute)],
+            )
+        _put_segment(
+            s3,
+            f"{_PREFIX}2026/03/15/20260315T120001-000002.jsonl",
+            ["x" * (worm_search_module._MAX_OBJECT_BYTES + 1)],
+        )
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(max_objects_scanned=2),
+        )
+
+        assert result.truncated is True
+        payload = json.loads(base64.urlsafe_b64decode(result.next_cursor))
+        assert payload["day"] == "2026-03-15", "the scan abandoned a day it had not finished"
 
     async def test_the_chain_break_counter_counts_one_break_once_across_a_cursor_chain(self, s3):
         """Item 184's second acceptance criterion: one broken segment behind a
@@ -1788,6 +1865,117 @@ class TestDayListingTruncationIsResumable:
         payload = json.loads(base64.urlsafe_b64decode(result.next_cursor))
         assert payload["key"] is None
         assert payload["after"] == f"{_PREFIX}2026/03/15/20260315T120001-000001.jsonl"
+
+    async def test_a_resumed_page_keeps_its_marker_when_the_object_budget_stops_it(self, s3):
+        """The mid-day budget exit must carry the day's incoming marker
+        forward. Dropping it silently restarts the day from its beginning on
+        the next lap — duplicate events, and item 177's counters re-counting
+        the day, which is symptom 3 of item 184's own write-up."""
+        for minute in range(5):
+            _put_events(
+                s3,
+                f"{_PREFIX}2026/03/15/20260315T12000{minute}-000001.jsonl",
+                [_event(f"c{minute}", minute=minute)],
+            )
+        first = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(max_objects_scanned=2),
+        )
+        marker = json.loads(base64.urlsafe_b64decode(first.next_cursor))["after"]
+
+        second = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            cursor=first.next_cursor,
+            bounds=_bounds(max_objects_scanned=2),
+        )
+
+        payload = json.loads(base64.urlsafe_b64decode(second.next_cursor))
+        assert payload["after"] is not None
+        assert payload["after"] > marker, "the resumed page went backwards"
+
+    async def test_an_over_long_after_marker_is_rejected_not_handed_to_s3(self, s3):
+        """`after` is the only cursor field that reaches the AWS wire, so it
+        is held to S3's own key ceiling rather than trusted (WS-194-1)."""
+        forged = base64.urlsafe_b64encode(
+            json.dumps(
+                {
+                    "day": "2026-03-15",
+                    "key": None,
+                    "line": 0,
+                    "after": "k" * 2000,
+                    "fp": worm_search_module._filters_fingerprint(
+                        datetime(2026, 3, 15, tzinfo=timezone.utc),
+                        datetime(2026, 3, 16, tzinfo=timezone.utc),
+                        None,
+                        None,
+                        None,
+                    ),
+                }
+            ).encode()
+        ).decode()
+
+        with pytest.raises(QueryValidationError):
+            await search_worm_archive(
+                bucket=_BUCKET,
+                prefix=_PREFIX,
+                region="us-east-1",
+                flush_interval_seconds=60,
+                start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+                end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+                cursor=forged,
+                bounds=_bounds(),
+            )
+
+    async def test_a_surrogate_after_marker_is_a_422_not_a_masked_500(self, s3):
+        """A lone surrogate survives `json.loads` as a `str`, so an
+        `isinstance` check passes it — then botocore's percent-encoding
+        raises `UnicodeEncodeError`, which escapes as the masked 500 item 194
+        exists to eliminate AND lets any caller move the `error` counter."""
+        before_error = _sample("querygate_audit_worm_search_requests_total", {"outcome": "error"})
+        forged = base64.urlsafe_b64encode(
+            json.dumps(
+                {
+                    "day": "2026-03-15",
+                    "key": None,
+                    "line": 0,
+                    "after": "\ud800",
+                    "fp": worm_search_module._filters_fingerprint(
+                        datetime(2026, 3, 15, tzinfo=timezone.utc),
+                        datetime(2026, 3, 16, tzinfo=timezone.utc),
+                        None,
+                        None,
+                        None,
+                    ),
+                }
+            ).encode()
+        ).decode()
+
+        with pytest.raises(QueryValidationError):
+            await search_worm_archive(
+                bucket=_BUCKET,
+                prefix=_PREFIX,
+                region="us-east-1",
+                flush_interval_seconds=60,
+                start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+                end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+                cursor=forged,
+                bounds=_bounds(),
+            )
+
+        assert (
+            _sample("querygate_audit_worm_search_requests_total", {"outcome": "error"})
+            == before_error
+        ), "a forged cursor moved the S3-failure counter"
 
     async def test_a_pre_item_184_cursor_without_an_after_marker_still_decodes(self, s3):
         """Backward compatibility: a cursor issued before item 184 has no
@@ -1901,6 +2089,12 @@ class TestCorruptLinesAreCountedNotRaised:
         1,000 nested arrays is a ~2 KB line — four orders of magnitude under
         _MAX_OBJECT_BYTES, so the byte bounds are no defence at all."""
         nested = "[" * 1000 + "]" * 1000
+        # Pin the premise: if the recursion limit ever rises, `json.loads`
+        # SUCCEEDS, returns a list, and the line is still counted `malformed`
+        # (not envelope-shaped) — so every assertion below would pass while
+        # covering nothing. Fail loudly on a changed premise instead.
+        with pytest.raises(RecursionError):
+            json.loads(nested)
         _put_segment(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", [nested])
 
         result = await search_worm_archive(
@@ -1922,6 +2116,8 @@ class TestCorruptLinesAreCountedNotRaised:
         RecursionError discarded the whole page, so this fails differently
         from the counting test above and is worth its own case."""
         nested = "[" * 1000 + "]" * 1000
+        with pytest.raises(RecursionError):
+            json.loads(nested)
         good = _chain_lines([_event("survivor", minute=0)])
         _put_segment(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", [nested] + good)
 

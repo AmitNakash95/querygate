@@ -492,7 +492,8 @@ class TestS3EndpointOverride:
         assert captured["service"] == "s3"
         assert captured["endpoint_url"] == "https://minio.internal:9000"
 
-    def test_no_endpoint_configured_means_aws_s3_proper(self):
+    @pytest.mark.parametrize("value", ["", None])
+    def test_no_endpoint_configured_means_aws_s3_proper(self, value):
         """An empty override must reach boto3 as None, not as an empty string
         — boto3 treats "" as a real (invalid) endpoint, so a falsy-but-present
         value would break every existing AWS deployment."""
@@ -502,17 +503,29 @@ class TestS3EndpointOverride:
             captured.update(kwargs)
             return object()
 
-        for value in ("", None):
-            captured.clear()
-            monitor = self._monitor(endpoint_url=value)
-            with patch("boto3.client", fake_client):
-                monitor._get_client()
-            assert captured["endpoint_url"] is None, f"for {value!r}"
+        monitor = self._monitor(endpoint_url=value)
+        with patch("boto3.client", fake_client):
+            monitor._get_client()
 
-    async def test_a_flush_actually_writes_through_a_custom_endpoint(self):
-        """End-to-end rather than argument-passing only: moto serves an
-        S3-compatible endpoint, so a segment written through the override is
-        really retrievable from the bucket."""
+        assert captured["endpoint_url"] is None
+
+    def test_the_override_survives_real_botocore_endpoint_resolution(self):
+        """Discriminating where the moto flush test below is not: this goes
+        through botocore's OWN endpoint resolution, so an ignored override
+        resolves to `https://s3.us-east-1.amazonaws.com` and fails. The
+        kwarg-capture tests above prove the argument is passed; this proves
+        the constructed client actually points somewhere else."""
+        monitor = self._monitor(endpoint_url="https://minio.internal:9000")
+
+        assert monitor._get_client().meta.endpoint_url == "https://minio.internal:9000"
+
+    async def test_a_flush_still_writes_a_segment_with_an_override_configured(self):
+        """A smoke test, deliberately NOT an end-to-end proof of the override:
+        `mock_aws` intercepts botocore regardless of the configured endpoint,
+        so it cannot distinguish one store from another. It exists to show the
+        override does not BREAK the flush path;
+        `test_the_override_survives_real_botocore_endpoint_resolution` above is
+        the one that actually pins the override."""
         with mock_aws():
             client = boto3.client("s3", region_name="us-east-1")
             client.create_bucket(Bucket="endpoint-test", ObjectLockEnabledForBucket=True)

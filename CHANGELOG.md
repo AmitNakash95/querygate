@@ -83,6 +83,21 @@ All notable changes to QueryGate are documented here.
 
 ### Added
 
+- **The WORM audit archive tier now runs against any S3-API-compatible object
+  store, not AWS S3 alone** — `AUDIT_WORM_S3_ENDPOINT_URL` (empty by default,
+  meaning AWS S3 resolved by region exactly as before) points both the flush
+  monitor and the managed search at the same endpoint, so a self-hosted or
+  air-gapped deployment can have the immutable archive copy and not only the
+  local hash-chained ledger. The store **must** implement S3 Object Lock:
+  retention is still sent as Object Lock headers, so a store that ignores them
+  would accept the writes and produce ordinary deletable objects — QueryGate
+  logs an `audit.worm.custom_endpoint` warning at startup whenever the override
+  is set with the WORM backend enabled. Google Cloud Storage and Azure Blob are
+  **not** reachable this way; their immutability models are their own APIs
+  rather than S3 Object Lock. QueryGate runs no live test against any
+  third-party store — verify COMPLIANCE-mode retention against yours before
+  relying on the archive. **Upgrade impact:** none. Leaving the variable unset
+  preserves existing AWS behaviour exactly.
 - **A deny-by-default third-party licence gate over every locked Python package**
   (`make license-check`, `scripts/check_licenses.py`), emitting
   `docs/THIRD_PARTY_LICENSES.md` — the standard answer to the "list your third-party
@@ -178,8 +193,8 @@ All notable changes to QueryGate are documented here.
   `admin:audit:worm-search` scope, not implied by general observability
   read access) lets an authorized operator search the archive directly —
   bounded by a mandatory time window (default cap 730 days) and per-request
-  scan limits, with a resumable cursor for a truncated page (except a day
-  listing over the object budget — see TODO item 184). **Upgrade
+  scan limits, with a resumable cursor for a truncated page — including a
+  day listing over the object budget (TODO item 184). **Upgrade
   impact:** none for a deployment that doesn't set
   `AUDIT_SINK_BACKEND=jsonl_chained_s3_worm`; a deployment that does should
   read the fail-open buffering caveat above and monitor
