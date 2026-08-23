@@ -1783,22 +1783,34 @@ class TestDayListingTruncationIsResumable:
             [f"c{m}{half}" for m in range(5) for half in ("a", "b")]
         )
 
-    async def test_an_oversized_object_behind_a_truncated_listing_stays_on_its_day(self, s3):
-        """The oversized-object exit is the third way control leaves a day
-        whose listing was cut short. It must not advance to the next day
-        either — an object over `_MAX_OBJECT_BYTES` is skipped, but the
-        segments the listing never reached are still owed to the caller."""
-        for minute in range(3):
+    async def test_an_oversized_object_behind_a_truncated_listing_stays_on_its_day(
+        self, s3, monkeypatch
+    ):
+        """The oversized-object exit is a third way control leaves a day whose
+        listing was cut short. It must not advance to the next day either — an
+        object over `_MAX_OBJECT_BYTES` is skipped, but the segments the
+        listing never reached are still owed to the caller.
+
+        The oversized object is deliberately the LAST key the truncated
+        listing returns. An earlier version of this test placed it third,
+        where `max_objects_scanned=2` never listed it, so the assertion was
+        satisfied by the ordinary fall-through and the exit was untested."""
+        # Above a one-event chained segment (~700 B) and below the planted body,
+        # so only the intended object trips the cap.
+        monkeypatch.setattr(worm_search_module, "_MAX_OBJECT_BYTES", 4096)
+        _put_events(
+            s3,
+            f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
+            [_event("c0", minute=0)],
+        )
+        oversized_key = f"{_PREFIX}2026/03/15/20260315T120000-000002.jsonl"
+        _put_segment(s3, oversized_key, ["x" * 8192])
+        for minute in (1, 2):
             _put_events(
                 s3,
                 f"{_PREFIX}2026/03/15/20260315T12000{minute}-000001.jsonl",
                 [_event(f"c{minute}", minute=minute)],
             )
-        _put_segment(
-            s3,
-            f"{_PREFIX}2026/03/15/20260315T120001-000002.jsonl",
-            ["x" * (worm_search_module._MAX_OBJECT_BYTES + 1)],
-        )
 
         result = await search_worm_archive(
             bucket=_BUCKET,
@@ -1813,6 +1825,8 @@ class TestDayListingTruncationIsResumable:
         assert result.truncated is True
         payload = json.loads(base64.urlsafe_b64decode(result.next_cursor))
         assert payload["day"] == "2026-03-15", "the scan abandoned a day it had not finished"
+        assert payload["key"] is None
+        assert payload["after"] == oversized_key, "the day resumed before what it already read"
 
     async def test_the_chain_break_counter_counts_one_break_once_across_a_cursor_chain(self, s3):
         """Item 184's second acceptance criterion: one broken segment behind a
@@ -1866,11 +1880,16 @@ class TestDayListingTruncationIsResumable:
         assert payload["key"] is None
         assert payload["after"] == f"{_PREFIX}2026/03/15/20260315T120001-000001.jsonl"
 
-    async def test_a_resumed_page_keeps_its_marker_when_the_object_budget_stops_it(self, s3):
-        """The mid-day budget exit must carry the day's incoming marker
-        forward. Dropping it silently restarts the day from its beginning on
-        the next lap — duplicate events, and item 177's counters re-counting
-        the day, which is symptom 3 of item 184's own write-up."""
+    async def test_a_resumed_day_advances_its_marker_strictly_forward(self, s3):
+        """Consecutive laps over one over-budget day must move the marker
+        strictly forward. Going backwards re-delivers segments and re-counts
+        their integrity findings, which is symptom 3 of item 184's write-up.
+
+        Named for what it covers: the object-budget disjunct at the top of the
+        key loop is NOT reachable within the marker-carrying day, because
+        `_list_day_keys` is capped at `max_objects_scanned`, so the counter can
+        only reach the cap after the last listed key is consumed and the loop
+        has already ended. An earlier version of this test claimed that exit."""
         for minute in range(5):
             _put_events(
                 s3,
@@ -1924,7 +1943,7 @@ class TestDayListingTruncationIsResumable:
             ).encode()
         ).decode()
 
-        with pytest.raises(QueryValidationError):
+        with pytest.raises(QueryValidationError) as excinfo:
             await search_worm_archive(
                 bucket=_BUCKET,
                 prefix=_PREFIX,
@@ -1935,6 +1954,11 @@ class TestDayListingTruncationIsResumable:
                 cursor=forged,
                 bounds=_bounds(),
             )
+
+        # Every decode failure collapses into one generic public message, so
+        # without checking the cause this would also pass if the cursor were
+        # rejected for an unrelated reason (a fingerprint or `day` change).
+        assert "S3 key length" in str(excinfo.value.__cause__)
 
     async def test_a_surrogate_after_marker_is_a_422_not_a_masked_500(self, s3):
         """A lone surrogate survives `json.loads` as a `str`, so an
@@ -1960,7 +1984,7 @@ class TestDayListingTruncationIsResumable:
             ).encode()
         ).decode()
 
-        with pytest.raises(QueryValidationError):
+        with pytest.raises(QueryValidationError) as excinfo:
             await search_worm_archive(
                 bucket=_BUCKET,
                 prefix=_PREFIX,
@@ -1972,10 +1996,86 @@ class TestDayListingTruncationIsResumable:
                 bounds=_bounds(),
             )
 
+        assert "not UTF-8 encodable" in str(excinfo.value.__cause__)
         assert (
             _sample("querygate_audit_worm_search_requests_total", {"outcome": "error"})
             == before_error
         ), "a forged cursor moved the S3-failure counter"
+
+    async def test_an_object_past_the_per_object_line_cap_pages_to_exhaustion(
+        self, s3, monkeypatch
+    ):
+        """WS-134-1. `last_line` used to be `min(len(lines), cap)` — an
+        ABSOLUTE ceiling rather than a per-page budget. A resumed page whose
+        `consume_from` already equalled the cap recomputed the same
+        `last_line`, consumed nothing, and re-emitted a byte-identical cursor
+        forever, making every line past the cap and every later object and day
+        permanently unreachable. Reachable with no forgery by raising
+        AUDIT_WORM_MAX_BUFFERED_EVENTS above the cap, and by anyone holding
+        s3:PutObject with a ~1 MB body of newlines.
+
+        The pre-existing test for this exit asserted only that the FIRST page
+        truncates; it never followed the cursor, which is why a
+        non-advancing cursor sat here undetected."""
+        monkeypatch.setattr(worm_search_module, "_MAX_LINES_PER_OBJECT", 2)
+        _put_events(
+            s3,
+            f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
+            [_event(f"c{i}", minute=i) for i in range(5)],
+        )
+
+        connections, _ = await self._drain(bounds_kwargs={})
+
+        assert sorted(connections) == ["c0", "c1", "c2", "c3", "c4"]
+
+    async def test_a_resumed_page_keeps_its_marker_when_the_deadline_stops_it_mid_object(
+        self, s3, monkeypatch
+    ):
+        """WS-184-2 / TCR-13. The line-loop deadline exit was the one in-day
+        cursor still emitted without the day's `after` marker, so a resumed
+        page re-listed the day from its start, could not find its own key, and
+        walked BACKWARD to the start of the previous window — re-delivering
+        records and, with a consistently exhausted budget, cycling between two
+        cursors forever. Both other reviewers found it independently."""
+        for minute in range(5):
+            _put_events(
+                s3,
+                f"{_PREFIX}2026/03/15/20260315T12000{minute}-000001.jsonl",
+                [_event(f"c{minute}", minute=minute)],
+            )
+        window = dict(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+        )
+        first = await search_worm_archive(**window, bounds=_bounds(max_objects_scanned=2))
+        marker = json.loads(base64.urlsafe_b64decode(first.next_cursor))["after"]
+        assert marker is not None
+
+        # Expire the clock the moment the resumed page opens its first object,
+        # so the deadline fires inside the LINE loop rather than between
+        # objects. Keyed to an application event, not a call count.
+        real_get = worm_search_module._get_object_text
+        clock = {"now": time.monotonic()}
+
+        async def expiring_get(*args, **kwargs):
+            result = await real_get(*args, **kwargs)
+            clock["now"] += 10_000
+            return result
+
+        monkeypatch.setattr(worm_search_module, "_get_object_text", expiring_get)
+        monkeypatch.setattr(worm_search_module.time, "monotonic", lambda: clock["now"])
+
+        second = await search_worm_archive(
+            **window, cursor=first.next_cursor, bounds=_bounds(max_objects_scanned=2)
+        )
+
+        assert second.truncated is True
+        payload = json.loads(base64.urlsafe_b64decode(second.next_cursor))
+        assert payload["after"] == marker, "the resumed page lost its listing window"
 
     async def test_a_pre_item_184_cursor_without_an_after_marker_still_decodes(self, s3):
         """Backward compatibility: a cursor issued before item 184 has no

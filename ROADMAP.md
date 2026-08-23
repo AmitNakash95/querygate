@@ -248,6 +248,10 @@ claim when the work ships or before explicitly handing the item back.
   CLI. **Only phase 4 remains open** in TODO.md: SAML 2.0, decision-gated until
   a design partner mandates it.
 
+- [ ] **203** — decide the seed walk's posture for an unparseable predecessor:
+  fail closed like the blank-run sibling, or record the exemption as an
+  accepted residual. *Added 2026-08-24 by the re-review; pre-existing since
+  item 172.*
 - [ ] **202** — promote `digests_equal` to `core/` and apply it at the six
   `hmac.compare_digest` sites outside the ledger (TOTP code, OIDC state/nonce,
   CSRF token, PKCE challenge) — each turns a clean 401/403/422 into a masked
