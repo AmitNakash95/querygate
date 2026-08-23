@@ -231,6 +231,7 @@ order-of-magnitude, not commitments.
 | 198 | QueryGate Notary — append-only transparency log for the audit ledger's chain head (not-before-customers) | M | — |
 | 199 | ✅ Human SSO: OIDC authorization-code sign-in for the browser surfaces across eleven provider presets, a built-in local identity provider (scrypt + TOTP) for air-gapped and break-glass use, a deny-by-default file-configured claim→scope mapping, CSRF-bound sessions, and an RFC 8628 device grant for CLI callers | L | 10, 90, 95 |
 | 200 | ✅ Per-surface credential-type policy: an allowlist over `Principal.auth_method` for the console / REST / MCP surfaces, whose default closes the admin control plane to static API keys the moment SSO is enabled | S–M | 199 |
+| 201 | ✅ The WORM archive tier is reachable only against AWS S3 (`endpoint_url` is never set), so on-prem/air-gapped deployments cannot have the immutable copy at all | S | 134 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -3726,3 +3727,9 @@ design partner actually mandates SAML, and record that decision first.
 A per-surface allowlist over `Principal.auth_method` (console / REST / MCP) whose default drops static API keys from the admin control plane the moment SSO is enabled.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 200).
+### 201. The WORM archive tier is reachable only against AWS S3, so on-prem and air-gapped deployments cannot have it ✅ DONE
+
+`AUDIT_WORM_S3_ENDPOINT_URL` points both the WORM flush monitor and the managed search at any S3-API-compatible store with Object Lock (MinIO, Ceph RGW), so on-prem and air-gapped deployments can have the immutable archive too — not AWS S3 alone.
+
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 201).
+

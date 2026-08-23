@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+from unittest.mock import patch
+
 import boto3
 import pytest
 from moto import mock_aws
@@ -453,3 +455,79 @@ class TestConfigureAuditSinkRegistry:
             assert isinstance(sink._sinks[1], S3WormAuditSink)
         finally:
             reset_audit_sink()
+
+
+class TestS3EndpointOverride:
+    """TODO.md item 201. The WORM archive tier was reachable only against AWS
+    S3 proper, because both boto3 clients were constructed with no
+    `endpoint_url`. `AUDIT_WORM_S3_ENDPOINT_URL` makes it work against any
+    S3-API-compatible store that implements Object Lock (MinIO, Ceph RGW),
+    which is what puts the tier — and the "even we can't delete it" claim —
+    within reach of on-prem and air-gapped deployments."""
+
+    def _monitor(self, **overrides):
+        kwargs = dict(
+            bucket="b",
+            prefix="p/",
+            region="us-east-1",
+            retention_mode="COMPLIANCE",
+            retention_days=1,
+            interval_seconds=60,
+        )
+        kwargs.update(overrides)
+        return WormFlushMonitor(**kwargs)
+
+    def test_the_flush_monitor_passes_a_configured_endpoint_to_boto3(self):
+        captured = {}
+
+        def fake_client(service, **kwargs):
+            captured["service"] = service
+            captured.update(kwargs)
+            return object()
+
+        monitor = self._monitor(endpoint_url="https://minio.internal:9000")
+        with patch("boto3.client", fake_client):
+            monitor._get_client()
+
+        assert captured["service"] == "s3"
+        assert captured["endpoint_url"] == "https://minio.internal:9000"
+
+    def test_no_endpoint_configured_means_aws_s3_proper(self):
+        """An empty override must reach boto3 as None, not as an empty string
+        — boto3 treats "" as a real (invalid) endpoint, so a falsy-but-present
+        value would break every existing AWS deployment."""
+        captured = {}
+
+        def fake_client(service, **kwargs):
+            captured.update(kwargs)
+            return object()
+
+        for value in ("", None):
+            captured.clear()
+            monitor = self._monitor(endpoint_url=value)
+            with patch("boto3.client", fake_client):
+                monitor._get_client()
+            assert captured["endpoint_url"] is None, f"for {value!r}"
+
+    async def test_a_flush_actually_writes_through_a_custom_endpoint(self):
+        """End-to-end rather than argument-passing only: moto serves an
+        S3-compatible endpoint, so a segment written through the override is
+        really retrievable from the bucket."""
+        with mock_aws():
+            client = boto3.client("s3", region_name="us-east-1")
+            client.create_bucket(Bucket="endpoint-test", ObjectLockEnabledForBucket=True)
+            monitor = self._monitor(bucket="endpoint-test", endpoint_url="https://s3.amazonaws.com")
+            get_worm_buffer().enqueue(
+                AuditEvent(
+                    connection_id="demo",
+                    policy_decision="allowed",
+                    outcome="success",
+                    query_shape={"from": "t"},
+                    duration_ms=1,
+                )
+            )
+            await monitor.flush_once()
+
+            listed = client.list_objects_v2(Bucket="endpoint-test").get("Contents", [])
+
+        assert len(listed) == 1

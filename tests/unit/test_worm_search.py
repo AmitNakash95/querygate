@@ -2556,6 +2556,47 @@ class TestBuildWormSearchResult:
         kwargs.update(overrides)
         return AppConfig(**kwargs)
 
+    async def test_the_configured_s3_endpoint_reaches_the_search_client(self, s3):
+        """TODO.md item 201. The flush monitor and the managed search must
+        read the SAME `audit_worm_s3_endpoint_url`, or an archive would be
+        written to one store and searched at another — silently returning
+        empty results against a perfectly intact archive."""
+        captured = {}
+        real_client = boto3.client
+
+        def spy(service, **kwargs):
+            captured.update(kwargs)
+            return real_client(service, **kwargs)
+
+        cfg = self._config(audit_worm_s3_endpoint_url="https://s3.amazonaws.com")
+        with patch("boto3.client", spy):
+            await build_worm_search_result(
+                cfg,
+                start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+                end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            )
+
+        assert captured["endpoint_url"] == "https://s3.amazonaws.com"
+
+    async def test_no_configured_endpoint_leaves_the_search_client_on_aws(self, s3):
+        """The empty default must reach boto3 as None, not "" — boto3 treats
+        an empty string as a real (invalid) endpoint."""
+        captured = {}
+        real_client = boto3.client
+
+        def spy(service, **kwargs):
+            captured.update(kwargs)
+            return real_client(service, **kwargs)
+
+        with patch("boto3.client", spy):
+            await build_worm_search_result(
+                self._config(),
+                start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+                end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            )
+
+        assert captured["endpoint_url"] is None
+
     async def test_disabled_backend_reports_honestly_without_touching_s3(self):
         cfg = self._config(audit_sink_backend="none")
         result = await build_worm_search_result(

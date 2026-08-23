@@ -14590,3 +14590,45 @@ security check that never fires.*
 not written to the durable audit sink, matching how the existing 401 paths
 behave. If per-surface refusals should be durably auditable, that is a
 deliberate follow-up rather than something this item silently assumed.
+### 201. The WORM archive tier is reachable only against AWS S3, so on-prem and air-gapped deployments cannot have it ✅ DONE
+
+**Filed and shipped 2026-08-23**, following the three WORM defect fixes
+(items 184/194/185) rather than before them: expanding a surface with open
+correctness defects would have forked those defects across every new backend.
+
+`WormFlushMonitor._get_client` and `search_worm_archive` both constructed
+`boto3.client("s3", region_name=...)` with no `endpoint_url`, and no config
+field for one existed anywhere in the repo. So `AUDIT_SINK_BACKEND=
+jsonl_chained_s3_worm` — the tier that carries the "even we can't delete it"
+claim — worked only against AWS S3 proper. A self-hosted or air-gapped
+deployment, which is the **Reach** pillar's own territory ("self-hosted, data
+never leaves"), could have the hash-chained local ledger but not the
+immutable copy.
+
+`AUDIT_WORM_S3_ENDPOINT_URL` (empty by default = AWS S3, resolved by region
+exactly as before) is threaded into **both** clients from the same
+`AppConfig` field, so an archive can never be written to one store and
+searched at another. MinIO and Ceph RGW implement S3 Object Lock in both
+`GOVERNANCE` and `COMPLIANCE` modes, so this is a genuine WORM tier there,
+not a degraded one.
+
+**Deliberately an endpoint override, not an "any object store" adapter.**
+Retention is still sent as `ObjectLockMode`/`ObjectLockRetainUntilDate`, so a
+store without Object Lock would accept the writes and produce ordinary,
+deletable blobs while the deployment believed they were immutable — a silent
+and total failure of the only claim the tier makes. `app.py` therefore logs a
+startup warning whenever the override is set, telling the operator to verify
+COMPLIANCE-mode retention against that store before relying on it. **GCS and
+Azure Blob are NOT reachable this way** and were not attempted: their
+immutability models (Bucket Lock / immutable Blob Storage) are their own
+APIs, not S3 Object Lock, so each needs a real second backend — write path
+*and* search path — which is its own item if a design partner ever needs it.
+
+**Mutation-verified** against four mutations: the flush monitor ignoring the
+endpoint, an empty override reaching boto3 as `""` rather than `None` (which
+would break every existing AWS deployment, since boto3 treats `""` as a real
+endpoint), the search client ignoring it, and `build_worm_search_result`
+ceasing to thread the config value through.
+
+**Effort:** S. **Depends on:** 134 (shipped), 184/194/185 (shipped first).
+
