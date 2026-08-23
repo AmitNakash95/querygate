@@ -20,7 +20,7 @@ from querygate.audit.events import AuditEvent
 from querygate.audit.ledger import GENESIS_PREV_HASH, make_record, verify_envelope_hash
 from querygate.audit.worm_search import _encode_cursor, _filters_fingerprint
 from querygate.core.config import AppConfig
-from querygate.metrics import AUDIT_WORM_SEARCH_REQUESTS_TOTAL, REGISTRY
+from querygate.metrics import REGISTRY
 
 pytestmark = pytest.mark.integration
 
@@ -453,3 +453,59 @@ async def test_an_out_of_range_limit_increments_the_rejected_counter():
 
     assert resp.status_code == 422
     assert _rejected_total() == before + 1
+
+
+def _outcome_total(outcome: str) -> float:
+    return (
+        REGISTRY.get_sample_value(
+            "querygate_audit_worm_search_requests_total", {"outcome": outcome}
+        )
+        or 0.0
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_disabled_backend_counts_the_request_it_served():
+    """A `source="disabled"` result is a genuinely SERVED request — 200, a
+    real WormSearchResult — so it has to land in the outcome space like any
+    other. Counting it nowhere made `rejected / (ok+rejected+error+disabled)`
+    read 100% on every deployment with WORM archiving off, which is the
+    DEFAULT, breaking the exact ratio alert item 185 exists to enable."""
+    before = _outcome_total("disabled")
+    app = create_app(_settings((_WORM_SEARCH_SCOPE,), backend="jsonl_chained"))
+
+    resp = await _get(
+        app,
+        {
+            "start_time": "2026-03-15T00:00:00+00:00",
+            "end_time": "2026-03-16T00:00:00+00:00",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["source"] == "disabled"
+    assert _outcome_total("disabled") == before + 1
+
+
+@pytest.mark.asyncio
+async def test_every_served_or_rejected_request_lands_under_exactly_one_outcome():
+    """The property the four labels exist to provide, asserted directly: the
+    outcome space must be exhaustive. Any future early return that forgets to
+    count is a silent hole in every ratio an operator builds on this metric."""
+    app_off = create_app(_settings((_WORM_SEARCH_SCOPE,), backend="jsonl_chained"))
+    app_on = create_app(_settings((_WORM_SEARCH_SCOPE,), backend="jsonl_chained_s3_worm"))
+    before = {o: _outcome_total(o) for o in ("ok", "rejected", "error", "disabled")}
+
+    window = {
+        "start_time": "2026-03-15T00:00:00+00:00",
+        "end_time": "2026-03-16T00:00:00+00:00",
+    }
+    await _get(app_off, window)  # disabled
+    await _get(app_off, {})  # rejected
+    with mock_aws():
+        client = boto3.client("s3", region_name="us-east-1")
+        client.create_bucket(Bucket=_BUCKET, ObjectLockEnabledForBucket=True)
+        await _get(app_on, window)  # ok
+
+    after = {o: _outcome_total(o) for o in before}
+    assert sum(after[o] - before[o] for o in before) == 3

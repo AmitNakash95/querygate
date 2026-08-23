@@ -10,9 +10,11 @@ envelope adds only a sequence number and hashes, never any new event data.
 from __future__ import annotations
 
 import json
+import pathlib
 
 import pytest
 
+from querygate.audit import ledger as ledger_module
 from querygate.audit.events import AuditEvent
 from querygate.audit.ledger import (
     ALGO_HMAC_SHA256,
@@ -461,6 +463,47 @@ class TestNonAsciiDigestsAreMismatchesNotCrashes:
         result = verify_chain(str(path))
 
         assert result.ok is False
+
+    def test_hmac_compare_digest_is_called_in_exactly_one_place(self):
+        """The docstring claims the hazard "cannot be reintroduced at one site
+        while the others are fixed". Behavioural tests reach two of the five
+        sites, so a single-site revert (linkage, head-anchor, or receipt) stays
+        green — and `verify_receipt` is what an external party calls to check a
+        receipt, where a `TypeError` is a 500. This is the source-level guard
+        the claim actually needs, in the style of item 192's hash-slot test."""
+        source = pathlib.Path(ledger_module.__file__).read_text()
+        calls = [ln.strip() for ln in source.splitlines() if "hmac.compare_digest(" in ln]
+
+        assert len(calls) == 1, f"expected one call inside digests_equal, found: {calls}"
+        assert calls[0] == "return hmac.compare_digest(expected, actual)"
+
+    def test_a_non_ascii_prev_hash_breaks_the_chain_instead_of_raising(self, tmp_path):
+        """The linkage comparison site, which no behavioural test reached."""
+        first = make_record(0, GENESIS_PREV_HASH, {"a": 1})
+        second = make_record(1, first.hash, {"b": 2})
+        raw = json.loads(second.model_dump_json())
+        raw["prev_hash"] = raw["prev_hash"][:-1] + "\ufffd"
+        path = tmp_path / "ledger.jsonl"
+        path.write_text(first.model_dump_json() + "\n" + json.dumps(raw) + "\n")
+
+        assert verify_chain(str(path)).ok is False
+
+    def test_a_non_ascii_expected_head_is_reported_not_raised(self, tmp_path):
+        """The head-anchor comparison site."""
+        record = make_record(0, GENESIS_PREV_HASH, {"a": 1})
+        path = tmp_path / "ledger.jsonl"
+        path.write_text(record.model_dump_json() + "\n")
+
+        assert verify_chain(str(path), expected_head="ab\ufffd").ok is False
+
+    def test_a_non_ascii_receipt_hash_is_invalid_not_an_error(self):
+        """The receipt site — reachable by an external party verifying a
+        receipt, where raising is a 500 rather than "this receipt is bad"."""
+        record = make_record(0, GENESIS_PREV_HASH, {"event_id": "e1"})
+        receipt = build_receipt(record, keyed=False)
+        forged = receipt.model_copy(update={"hash": receipt.hash[:-1] + "\ufffd"})
+
+        assert verify_receipt(forged) is False
 
     def test_digests_equal_is_false_when_either_side_is_non_ascii(self):
         assert digests_equal("abc", "abc") is True

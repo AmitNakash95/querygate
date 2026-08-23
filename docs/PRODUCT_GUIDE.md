@@ -1311,10 +1311,14 @@ good-faith pager, and re-counted that day's integrity findings on every lap.
 
 The archive tier is not AWS-only. `AUDIT_WORM_S3_ENDPOINT_URL` (empty by
 default, meaning AWS S3 proper) points both the flush monitor and the managed
-search at any S3-API-compatible store that implements Object Lock — MinIO and
-Ceph RGW both do, in `GOVERNANCE` and `COMPLIANCE` modes — so an on-prem or
-air-gapped deployment can have the immutable copy too, not just the local
-hash-chained ledger (item 201). Both clients read the same config field, so an
+search at any S3-API-compatible store that implements Object Lock, so an
+on-prem or air-gapped deployment can have the immutable copy too, not just the
+local hash-chained ledger (item 201). **QueryGate has verified no specific
+third-party store.** MinIO and Ceph RGW both document S3 Object Lock support,
+but unlike the Postgres/MSSQL/MySQL dialect claims — each backed by a live CI
+job against a real engine — there is no `minio-live` equivalent here, so that
+is a vendor claim rather than a tested one. Verify COMPLIANCE-mode retention
+against your own store before relying on the archive. Both clients read the same config field, so an
 archive is never written to one store and searched at another. It is an
 endpoint override, **not** an "any object store" adapter: retention is still
 sent as S3 Object Lock headers, so a store without Object Lock would produce
@@ -4361,10 +4365,17 @@ reasoning behind them, newest first. Added to incrementally as work happens
   defects shipped together because they share one failure mode: a bound that
   reads as enforced while silently doing nothing. (1) Item 184 — the cursor
   gained an `after` field, an exclusive `StartAfter` listing marker. The
-  alternative considered was re-listing the day and skipping by index, which
-  keeps the cursor format stable; it was rejected because the skip target may
-  itself sit past `max_objects_scanned`, so the bug would survive at a deeper
-  budget. `after` is only ever handed to `list_objects_v2` as `StartAfter`,
+  alternative considered was re-listing the day and skipping by index alone,
+  which keeps the cursor format stable; it was rejected because the skip target
+  may itself sit past `max_objects_scanned`, so the bug would survive at a
+  deeper budget. **The first attempt applied that reasoning to only one of the
+  day's exits and shipped a partial fix** — four reviewers caught it
+  independently, with a reproduction showing three of five records unreachable
+  and the final page still reporting `truncated=False`. Every cursor emitted
+  inside a day now carries the marker its own listing was produced with, and
+  the scan refuses to advance off a day whose listing is incomplete; the
+  index-skip path survives only as the resolution step within a re-listed
+  window, which is now always the same window the cursor was issued against. `after` is only ever handed to `list_objects_v2` as `StartAfter`,
   never dereferenced as a raw `GetObject` key, which preserves the module's
   "a cursor key is never used as a raw key path" property; it is rejected as
   an invalid cursor if it is not a string, since it is attacker-reachable in
@@ -4380,8 +4391,10 @@ reasoning behind them, newest first. Added to incrementally as work happens
   computed, so `False` is the answer `compare_digest` would give if it could.
   Both `json.loads` handlers also widened to `RecursionError`, which is a
   `RuntimeError` and so was never covered by `except json.JSONDecodeError`.
-  (3) Item 185 — the `outcome="rejected"` counter moved up into
-  `build_worm_search_result`, where window/limit rejections actually happen,
+  (3) Item 185 — an `outcome="rejected"` increment was ADDED to
+  `build_worm_search_result`, where window/limit rejections actually happen
+  (the one inside `search_worm_archive` correctly remains, for cursor
+  rejections),
   rather than narrowing `metrics.py`'s comment to match the broken behaviour;
   the metric is more useful where the rejections are. Item 194's third defect
   (`_contains_forbidden_content`'s uncapped walk) is deliberately still open:
