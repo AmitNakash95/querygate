@@ -36,6 +36,12 @@ ROOT = Path(__file__).resolve().parents[2]
 # count and is not listed here is not covered — that is a known bound of this
 # guard, not an oversight; add it here when you add the claim.
 CLAIM_FILES = (
+    # Added 2026-08-23: the README quoted "a 550-test adversarial security
+    # suite" from outside this list and went stale unnoticed for several
+    # changes — the exact failure the docstring above calls a known bound.
+    # It is the single most-read surface in the repo, so it is the last place
+    # a wrong number should be able to survive.
+    "README.md",
     "docs/PRODUCT_GUIDE.md",
     "docs/SECURITY_POSTURE.md",
     "docs/TRUST_EVIDENCE.md",

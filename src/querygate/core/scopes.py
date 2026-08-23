@@ -114,6 +114,19 @@ QUERY_APPROVE_SCOPE = "query:approve"
 # someone else's stuck query.
 QUERY_CANCEL_SCOPE = "query:cancel"
 
+# Human identity administration (TODO.md item 199, querygate/identity/). Its OWN
+# pair of scopes rather than reuse of admin:config:*: identity.yaml decides who
+# can sign in and what their groups earn them, and users.yaml holds password
+# verifiers — an operator trusted to stage a connection change is not
+# automatically trusted to mint an account that can approve one. The read scope
+# never exposes a verifier, a TOTP secret, or a client secret (those fields do
+# not exist on the public models at all); it lists accounts, providers, active
+# sessions, and issued tokens.
+ADMIN_IDENTITY_READ_SCOPE = "admin:identity:read"
+# Create/disable/delete a local account, rotate a password or second factor,
+# revoke a person's sessions and issued device tokens.
+ADMIN_IDENTITY_WRITE_SCOPE = "admin:identity:write"
+
 
 class ScopeInfo(NamedTuple):
     """One authorization scope: the wire string, the action it gates, and the
@@ -224,6 +237,16 @@ SCOPE_CATALOG: Tuple[ScopeInfo, ...] = (
         "Query cancellation",
         "Cancel another principal's in-flight async query (self-cancellation needs no scope)",
     ),
+    ScopeInfo(
+        ADMIN_IDENTITY_READ_SCOPE,
+        "Admin · Identity",
+        "List sign-in providers, local accounts, active sessions, and issued device tokens",
+    ),
+    ScopeInfo(
+        ADMIN_IDENTITY_WRITE_SCOPE,
+        "Admin · Identity",
+        "Manage local accounts and revoke a person's sessions and device tokens",
+    ),
 )
 
 # Every scope string this resource understands, derived from SCOPE_CATALOG so it
@@ -287,6 +310,13 @@ ROLE_BUNDLES: Tuple[RoleBundle, ...] = (
         "Catalog Data Steward",
         "Backup/restore and retention of catalog content.",
         (CATALOG_EXPORT_SCOPE, CATALOG_DELETE_SCOPE),
+    ),
+    RoleBundle(
+        "Identity Administrator",
+        "Manages who can sign in: local accounts, active sessions, and issued "
+        "device tokens. Deliberately separate from the config roles — minting an "
+        "account is a different privilege from changing what a connection exposes.",
+        (ADMIN_IDENTITY_READ_SCOPE, ADMIN_IDENTITY_WRITE_SCOPE),
     ),
     RoleBundle(
         "Query Approver",

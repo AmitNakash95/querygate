@@ -50,6 +50,7 @@ class JwtAuthenticator:
         scopes_claim: str = "scope",
         act_claim: str = "act",
         leeway_seconds: float = 0,
+        mapping_provider_id: str = "",
     ) -> None:
         self._jwk_client = jwt.PyJWKClient(jwks_url, cache_keys=True)
         self._issuer = issuer
@@ -59,6 +60,9 @@ class JwtAuthenticator:
         self._scopes_claim = scopes_claim
         self._act_claim = act_claim
         self._leeway_seconds = leeway_seconds
+        # Which identity.yaml provider's mapping rules apply to tokens verified
+        # here. Empty (the default) means the mapping is not consulted at all.
+        self._mapping_provider_id = mapping_provider_id
 
     def authenticate(self, bearer_token: Optional[str]) -> Optional[Principal]:
         if not bearer_token:
@@ -82,6 +86,17 @@ class JwtAuthenticator:
         subject = claims.get(self._subject_claim)
         if not subject:
             return None
+        # An IdP-issued token and a browser SSO session for the same human must
+        # confer the same authority, or a person's rights would depend on which
+        # door they came through. So the identity mapping (identity/mapping.py)
+        # is applied here too, unioned with whatever the `scope` claim already
+        # carried. It is a pure addition: a deployment with no mapping file
+        # configured resolves an empty set and this behaves exactly as before.
+        scopes = set(_extract_scopes(claims, self._scopes_claim))
+        if self._mapping_provider_id:
+            from querygate.identity.config_store import get_identity_store
+
+            scopes |= get_identity_store().mapping.scopes_for(self._mapping_provider_id, claims)
         # An RFC 8693 token-exchange access token carries the ultimate subject
         # (the human) in `sub` and the delegated actor (the agent) in `act`. We
         # map `sub` -> Principal.subject so *the human's* policy applies, and
@@ -89,7 +104,7 @@ class JwtAuthenticator:
         # the caller is non-delegated and behaves exactly as before.
         return Principal(
             subject=str(subject),
-            scopes=frozenset(_extract_scopes(claims, self._scopes_claim)),
+            scopes=frozenset(scopes),
             claims=claims,
             auth_method="jwt",
             actor=_extract_actor(claims.get(self._act_claim)),
@@ -112,6 +127,7 @@ def build_jwt_authenticator(cfg: "AppConfig") -> Optional[JwtAuthenticator]:
         scopes_claim=cfg.jwt_scopes_claim,
         act_claim=cfg.jwt_act_claim,
         leeway_seconds=cfg.jwt_leeway_seconds,
+        mapping_provider_id=cfg.jwt_mapping_provider_id if cfg.sso_enabled else "",
     )
 
 
