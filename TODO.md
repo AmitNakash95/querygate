@@ -241,6 +241,7 @@ order-of-magnitude, not commitments.
 | 217 | Reversed with the Apache-2.0 decision (see item 210); never built | — | 212 |
 | 218 | Superseded by the Apache-2.0 open-core decision (see item 210) | — | 215 |
 | 219 | Pre-launch codebase cleanup pass — `repo-audit`, `dep-audit`, `test-gap`, `claim-verify`, `security-invariant-check`; delete BSL dead code; close open defects 192 and 194; full CI matrix green | L | 210 |
+| 220 | Deny-by-default at table and column granularity: a `Policy` allow-list with no allow-all fallback, so an empty `allowed_tables` denies instead of allowing. Opt-in (default off) so no existing deployment changes behaviour; the starter policy turns it on | M | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -4004,17 +4005,14 @@ env configuration before it does anything.
   `require_config_approvals=0`. **Do not add a second connections writer**, and
   never route catalog content through `ConfigVersionStore`; catalog mutations go
   through `CatalogFileRepository`'s lock.
-- **⚠️ "Safe-by-default starter policy" is not expressible at table granularity
-  and the item must not pretend otherwise.** `Policy.table_allowed` returns
-  `True` when `allowed_tables` is empty — **an empty allow-list means allow-all**
-  — and `denied_tables` has no wildcard. The only real deny-all lever is
-  `default: {enabled: false}`, which is all-or-nothing: the operator flips one
-  connection on and gets its entire schema. Choose and record one: (a) ship
-  `enabled: false` plus a documented per-connection enable step, accepting that
-  table/column narrowing cannot be pre-seeded before a schema is known; or (b)
-  add a `Policy` field with no allow-all fallback (e.g.
-  `require_explicit_table_allowlist`) as a scoped sub-task so "enabled, zero
-  tables" becomes expressible.
+- **Safe-by-default starter policy — decided 2026-08-23: build the real
+  guarantee (item 220).** `Policy.table_allowed` returns `True` when
+  `allowed_tables` is empty — **an empty allow-list means allow-all** — and
+  `denied_tables` has no wildcard, so today the only deny-all lever is
+  `default: {enabled: false}`, which is all-or-nothing. Item 220 adds the
+  no-allow-all-fallback `Policy` field so "enabled, zero tables" becomes
+  expressible; **215 depends on it** and ships the starter policy on top of it.
+  Do not ship the `enabled: false` stopgap as the final answer.
 - **⚠️ "The credential goes straight to the configured secret backend" has no
   implementation today** and must not be written as if it does. On a fresh
   install the only registered backend is `env:` (Vault is off by default), which
@@ -4102,3 +4100,43 @@ than improvising a definition of clean —
 **Definition of done:** all five skills report clean or with every finding
 triaged to a decision; `make release-check` and `make release-smoke` green; no
 `✅ DONE` item left unarchived.
+
+### 220. Deny-by-default at table and column granularity: a `Policy` allow-list with no allow-all fallback
+
+**Effort: M. Blocks item 215.** Owner decision, 2026-08-23.
+
+**Why it matters:** `Policy.table_allowed` returns `True` when `allowed_tables`
+is empty, and `column_allowed` follows the same convention — **an empty
+allow-list means allow-everything**. `denied_tables` has no wildcard. So the
+only deny-all lever in the model today is `Policy.enabled = False`, which is
+all-or-nothing: the moment an operator enables a connection to run their first
+query, every table and column on it is readable up to the numeric caps. That is
+the opposite of what a new install should do, and it makes the "safe-by-default
+starter policy" item 215 promises literally inexpressible. It is also a poor
+default for a product whose entire pitch is that it governs *what a query is
+allowed to be*.
+
+**What it is:**
+- A `Policy` field with **no allow-all fallback** — working name
+  `require_explicit_table_allowlist: bool = False` — under which an empty
+  `allowed_tables` means *deny every table* rather than *allow every table*. The
+  same treatment for `allowed_columns`.
+- **Default `False`, so no existing deployment changes behaviour.** This is a
+  new opt-in guarantee, not a silent tightening of everyone's policy — a
+  behaviour flip on an existing security control is exactly the change that
+  breaks a customer at 3am.
+- The shipped starter policy (item 215) sets it `True`, so a fresh install
+  denies until the operator names tables deliberately.
+- **Both branches mutation-verified.** Per CLAUDE.md's working agreement:
+  break the empty-allow-list branch in each direction and confirm a test fails
+  *for that reason*. A swapped boolean here silently opens every table on every
+  connection that opted in, with a green suite — the same class as items 101 and
+  114.
+- Documented in `examples/policy.example.yaml` (whose comments currently
+  concede the shipped default is permissive) and in the policy section of
+  `docs/PRODUCT_GUIDE.md`.
+
+**Definition of done:** `security-invariant-check` clean; a test that an
+existing policy with an empty allow-list and the flag unset still allows (no
+behaviour change), and one that the same policy with the flag set denies; both
+mutation-verified; `examples/policy.example.yaml` and the product guide updated.
