@@ -427,6 +427,23 @@ class AppConfig(BaseSettings):
     audit_worm_s3_bucket: str = pyd.Field(default="")
     audit_worm_s3_prefix: str = pyd.Field(default="querygate-audit/")
     audit_worm_s3_region: str = pyd.Field(default="")
+    # Optional S3-API endpoint override (TODO.md item 201). Empty (the
+    # default) means AWS S3 proper, resolved by region as before. Set it to a
+    # MinIO / Ceph RGW endpoint to keep the WORM tier — and therefore the
+    # "even we can't delete it" claim — available on-prem and in air-gapped
+    # deployments, which is the Reach pillar, not cloud breadth. Both the
+    # flush monitor and the managed search read this same value, so an
+    # archive is never written to one store and searched in another.
+    #
+    # The store must implement S3 Object Lock: this is an endpoint override,
+    # NOT an "any object store" adapter. Retention is still sent as
+    # `ObjectLockMode`/`ObjectLockRetainUntilDate`, so pointing this at a
+    # store without Object Lock would archive objects that are ordinary,
+    # deletable blobs while the deployment still believed they were WORM —
+    # `app.py` warns at startup for exactly that reason. Google Cloud Storage
+    # and Azure Blob are NOT reachable this way: their immutability models
+    # are their own APIs, not S3 Object Lock (see PRODUCT_GUIDE).
+    audit_worm_s3_endpoint_url: str = pyd.Field(default="")
     # S3 Object Lock retention mode. COMPLIANCE cannot be shortened or
     # removed by anyone, including the AWS account root — the stronger
     # guarantee a regulated buyer's "prove nobody could have deleted this"
