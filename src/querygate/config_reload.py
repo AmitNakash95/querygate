@@ -24,6 +24,9 @@ from querygate.connections.registry import ConnectionRegistry, get_registry, set
 from querygate.core.config import AppConfig
 from querygate.core.logging import get_logger
 from querygate.execution.concurrency import in_process_limiter
+from querygate.identity.config_store import IdentityConfigStore, set_identity_store
+from querygate.identity.discovery import clear_discovery_cache
+from querygate.identity.local_store import LocalUserStore, set_local_user_store
 from querygate.policy.loader import PolicyStore, set_policy_store
 from querygate.secrets.resolvers import SecretResolverRegistry, build_secret_resolver_registry
 from querygate.templates.loader import TemplateStore, set_template_store
@@ -43,6 +46,8 @@ async def reload_config(
     policy_file: str,
     catalog_file: Optional[str] = None,
     template_file: Optional[str] = None,
+    identity_file: Optional[str] = None,
+    local_users_file: Optional[str] = None,
     resolver_registry: Optional[SecretResolverRegistry] = None,
 ) -> ReloadResult:
     """Serialize a full config swap against in-process catalog refresh."""
@@ -53,6 +58,8 @@ async def reload_config(
             policy_file=policy_file,
             catalog_file=catalog_file,
             template_file=template_file,
+            identity_file=identity_file,
+            local_users_file=local_users_file,
             resolver_registry=resolver_registry,
         )
 
@@ -63,6 +70,8 @@ async def _reload_config_unlocked(
     policy_file: str,
     catalog_file: Optional[str] = None,
     template_file: Optional[str] = None,
+    identity_file: Optional[str] = None,
+    local_users_file: Optional[str] = None,
     resolver_registry: Optional[SecretResolverRegistry] = None,
 ) -> ReloadResult:
     """Atomically swap in a freshly loaded registry + policy store.
@@ -104,11 +113,43 @@ async def _reload_config_unlocked(
     new_template_store = (
         TemplateStore.from_file(template_file) if template_file else TemplateStore.empty()
     )
+    # Identity (item 199) reloads with everything else, which is the point:
+    # tightening a claim→scope rule is an incident response, and it must not
+    # need a restart. It takes effect on the *next request* even for callers
+    # already signed in, because `identity/authenticators.py` re-derives scopes
+    # from this store per request rather than freezing them at login.
+    #
+    # `identity_file=None` means **leave identity alone**, deliberately unlike
+    # `catalog_file`/`template_file` (where None means "empty"). Identity is not
+    # a governed, version-snapshotted document, so every caller that reloads for
+    # some other reason — a config-governance apply, a leased-credential refresh
+    # — would otherwise silently wipe every provider and mapping rule out of the
+    # running process, locking every signed-in human out. Not-passed must mean
+    # not-touched.
+    new_identity_store = (
+        IdentityConfigStore.from_file(identity_file, resolver_registry=resolver_registry)
+        if identity_file
+        else None
+    )
+    new_local_user_store = (
+        LocalUserStore.from_file(local_users_file)
+        if local_users_file and Path(local_users_file).exists()
+        else None
+    )
 
     set_registry(new_registry)
     set_policy_store(new_policy_store)
     set_catalog_store(new_catalog_store)
     set_template_store(new_template_store)
+    if new_identity_store is not None:
+        set_identity_store(new_identity_store)
+        # An IdP can rotate an endpoint or a signing key at any time; reloading
+        # identity is the operator's explicit "pick up the new configuration"
+        # signal, so the cached discovery documents go with it rather than
+        # lingering for their TTL.
+        clear_discovery_cache()
+    if new_local_user_store is not None:
+        set_local_user_store(new_local_user_store)
 
     disposed = await _dispose_stale_engines(old_registry, new_registry)
     for connection_id in new_registry.all_ids():

@@ -175,6 +175,33 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
             # replicas is INCOMPLETE, and narrowing a connection from an
             # incomplete list breaks the shapes the other replicas saw. Shared
             # and durable, so the window also survives a rolling deploy.
+            # ...and item 199's SSO state. Different failure mode again: a
+            # per-replica session store does not multiply a budget or split a
+            # window, it signs people OUT at random, because the replica that
+            # answers their next request never saw them log in. Sessions, in-
+            # flight logins, device grants and issued tokens all move together —
+            # a device token that only works on one replica is the same defect.
+            if conf.sso_enabled:
+                from querygate.identity.device import (
+                    set_device_grant_store,
+                    set_issued_token_store,
+                )
+                from querygate.identity.redis_sessions import (
+                    RedisDeviceGrantStore,
+                    RedisIssuedTokenStore,
+                    RedisLoginFlowStore,
+                    RedisSessionStore,
+                )
+                from querygate.identity.sessions import (
+                    set_login_flow_store,
+                    set_session_store,
+                )
+
+                set_session_store(RedisSessionStore(redis_client))
+                set_login_flow_store(RedisLoginFlowStore(redis_client))
+                set_device_grant_store(RedisDeviceGrantStore(redis_client))
+                set_issued_token_store(RedisIssuedTokenStore(redis_client))
+
             if conf.observed_shapes_enabled:
                 from querygate.admin.observed_shapes import (
                     init_redis_observed_shape_store,
@@ -240,6 +267,24 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
                 # reading from the previous deployment's Redis keys while
                 # reporting a `shared-durable` scope it never configured.
                 clear_redis_observed_shape_store()
+                if conf.sso_enabled:
+                    # Drop back to the in-process stores before the client
+                    # closes, so nothing can reach a dead connection during
+                    # shutdown and report "not signed in" as though the session
+                    # had expired.
+                    from querygate.identity.device import (
+                        set_device_grant_store,
+                        set_issued_token_store,
+                    )
+                    from querygate.identity.sessions import (
+                        set_login_flow_store,
+                        set_session_store,
+                    )
+
+                    set_session_store(None)
+                    set_login_flow_store(None)
+                    set_device_grant_store(None)
+                    set_issued_token_store(None)
                 await redis_client.aclose()
 
     application = FastAPI(
@@ -288,6 +333,62 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
     application.include_router(
         build_admin_ui_router(principal_dependency, conf, prefix=conf.api_v1_prefix)
     )
+    if conf.sso_enabled:
+        # Human sign-in (TODO.md item 199). Mounted only when SSO is enabled, so
+        # a deployment that has not turned it on exposes no login surface at all
+        # — not even an endpoint that 404s with a distinguishable body.
+        from querygate.api.admin_identity_routes import build_admin_identity_router
+        from querygate.api.sso_routes import build_sso_router
+        from querygate.identity.config_store import ensure_identity_store
+
+        # Load identity.yaml here, at construction, so a missing or malformed
+        # file (a bad scope name in a mapping rule, an issuer that isn't https,
+        # two OIDC providers sharing a subject namespace) refuses to start
+        # instead of starting cleanly and 500-ing on the first person who tries
+        # to sign in. Same posture as the connections/policy stores, whose
+        # validation an operator likewise wants at boot.
+        ensure_identity_store(conf)
+
+        application.include_router(
+            build_sso_router(principal_dependency, conf, prefix=conf.api_v1_prefix)
+        )
+        application.include_router(
+            build_admin_identity_router(principal_dependency, conf, prefix=conf.api_v1_prefix)
+        )
+
+        if conf.dev_idp_enabled:
+            # QueryGate's own throwaway OpenID Connect provider, so the real
+            # redirect flow runs offline (TODO.md item 199 phase 1b). Mounted
+            # only when explicitly enabled AND the environment is local; the
+            # router builder refuses on its own if either is untrue, and the
+            # config validator refuses to start at all.
+            from querygate.identity.config_store import get_identity_store
+            from querygate.identity.dev_idp import (
+                DevIdentityProvider,
+                DevPersona,
+                build_dev_idp_router,
+                derive_personas,
+            )
+
+            identity_store = get_identity_store()
+            dev_profile = identity_store.dev_provider()
+            if dev_profile is not None:
+                personas = [
+                    DevPersona(
+                        sub=user.sub,
+                        name=user.name or user.sub,
+                        email=user.email or f"{user.sub}@localhost",
+                        claims={**({"groups": user.groups} if user.groups else {}), **user.claims},
+                        describes=user.describes,
+                    )
+                    for user in dev_profile.users
+                ] or derive_personas(identity_store, dev_profile.id)
+                application.state.dev_idp = DevIdentityProvider(
+                    issuer=dev_profile.issuer, personas=personas
+                )
+                application.include_router(
+                    build_dev_idp_router(conf, dev_profile.id, dev_profile.issuer)
+                )
 
     admin_ui_dir = Path(__file__).resolve().parent.parent / "admin_ui"
     application.mount("/admin", StaticFiles(directory=admin_ui_dir, html=True), name="admin-ui")

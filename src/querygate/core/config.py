@@ -17,6 +17,7 @@ from pydantic_settings import BaseSettings
 
 from querygate import __version__
 from querygate.catalog.providers import SemanticMemoryProviderMode
+from querygate.core.auth_policy import validate_methods
 
 
 class ConcurrencyBackend(str, Enum):
@@ -304,6 +305,74 @@ class AppConfig(BaseSettings):
     # audited. Standard name is `act`; configurable for non-standard IdPs.
     jwt_act_claim: str = pyd.Field(default="act")
     jwt_leeway_seconds: float = pyd.Field(default=0)
+    # Which identity.yaml provider's claim→scope rules apply to bearer JWTs, so
+    # one human gets the same authority whether they sign in through the browser
+    # or their agent presents an IdP token. Empty (the default) leaves JWT scope
+    # resolution exactly as it was: the `scope` claim and nothing else.
+    jwt_mapping_provider_id: str = pyd.Field(default="")
+
+    # --- Human SSO (TODO.md item 199) ---------------------------------------
+    # The `jwt_*` block above authenticates a bearer token an agent or service
+    # already holds. This block is about a *person* signing in: the OIDC
+    # authorization-code flow behind the admin/access UIs, QueryGate's built-in
+    # local identity provider, and the device grant that hands an SSO identity
+    # to a CLI. All of it is off by default; enabling it changes no existing
+    # credential path, and `identity/mapping.py` is deny-by-default, so turning
+    # SSO on grants nobody anything until an operator writes a mapping rule.
+    sso_enabled: bool = pyd.Field(default=False)
+    # Providers, SSO settings, and the claim→scope mapping (identity/config_store.py).
+    identity_file: str = pyd.Field(default="identity.yaml")
+    # QueryGate's own username/password (+ optional TOTP) identity provider, for
+    # deployments with no external IdP and for break-glass access when the IdP
+    # is unreachable. Requires SSO_ENABLED — it is served through the same
+    # session surface, not as a second auth path.
+    local_idp_enabled: bool = pyd.Field(default=False)
+    local_users_file: str = pyd.Field(default="users.yaml")
+    # Consecutive failures before an account stops answering, and for how long.
+    # This — not the KDF — is what bounds online password guessing.
+    local_login_lockout_threshold: int = pyd.Field(default=5, ge=0, le=1000)
+    local_login_lockout_seconds: float = pyd.Field(default=900, ge=0, le=86400)
+    # Refuse a local sign-in from an account that has not enrolled a TOTP factor.
+    local_require_mfa: bool = pyd.Field(default=False)
+    sso_session_cookie_name: str = pyd.Field(default="qg_session")
+    # Secure-only cookie. Refused in production if turned off (see the validator):
+    # a session cookie sent over cleartext is a session handed to the network.
+    # Secure-only by default, but see `_relax_local_cookie` below: a local
+    # deployment served over plain http gets `false` unless it says otherwise,
+    # because a Secure cookie is silently DROPPED by the browser there — the
+    # login redirects successfully and the person is anonymous on the next
+    # request, which looks like a QueryGate bug rather than a cookie policy.
+    sso_session_cookie_secure: bool = pyd.Field(default=True)
+    sso_session_cookie_samesite: str = pyd.Field(default="lax")
+    # Header the UI echoes the session's CSRF token in. Required on EVERY
+    # cookie-authenticated request (identity/authenticators.py), not just
+    # unsafe methods.
+    sso_csrf_header: str = pyd.Field(default="X-QueryGate-CSRF")
+    # RFC 8628 device grant: let a CLI obtain a short-lived token carrying the
+    # approving human's identity. Off by default; requires SSO_ENABLED.
+    sso_device_grant_enabled: bool = pyd.Field(default=False)
+    sso_device_code_ttl_seconds: float = pyd.Field(default=600, ge=60, le=1800)
+    sso_device_token_ttl_seconds: float = pyd.Field(default=3600, ge=60, le=86400)
+    # Serve QueryGate's OWN OpenID Connect provider at <base_url>/dev-idp, so the
+    # real sign-in flow runs with no external IdP to register (identity/dev_idp.py).
+    # This is an authentication bypass by design: it vouches for anyone who clicks.
+    # It is refused outside a local environment, both here and in the router
+    # builder, so it cannot be shipped by accident.
+    dev_idp_enabled: bool = pyd.Field(default=False)
+
+    # --- Which credential types each surface accepts (item 200) -------------
+    # Authentication says who a caller is; this says whether that *kind* of
+    # proof is acceptable here. Valid entries: api_key, jwt, sso_session,
+    # sso_device_token, anonymous. An unknown name is refused at load.
+    #
+    # Empty means "use the default for that surface" — and the console's
+    # default is not permissive: with SSO_ENABLED=true it drops `api_key` and
+    # `anonymous`, so integrating an identity provider actually closes the
+    # shared-secret door to the control plane instead of adding a second one
+    # beside it. Set this explicitly to keep a static key working there.
+    console_auth_methods: list[str] = pyd.Field(default_factory=list)
+    rest_auth_methods: list[str] = pyd.Field(default_factory=list)
+    mcp_auth_methods: list[str] = pyd.Field(default_factory=list)
 
     # How often each enabled connection is pinged in the background for
     # GET /health's readiness signal (see querygate/health.py).
@@ -588,6 +657,9 @@ class AppConfig(BaseSettings):
         "mcp_authorization_servers",
         "mcp_required_scopes",
         "jwt_algorithms",
+        "console_auth_methods",
+        "rest_auth_methods",
+        "mcp_auth_methods",
         mode="before",
     )
     @classmethod
@@ -626,6 +698,57 @@ class AppConfig(BaseSettings):
                     "MCP_AUTHORIZATION_SERVERS must list at least one issuer when "
                     "MCP_OAUTH_RESOURCE_SERVER_ENABLED=true"
                 )
+        if (
+            self.is_local
+            and self.sso_enabled
+            and "sso_session_cookie_secure" not in self.model_fields_set
+        ):
+            # Only when the operator did not state a preference: an explicit
+            # `SSO_SESSION_COOKIE_SECURE=true` on localhost is honoured (someone
+            # testing behind a TLS proxy), and production still refuses `false`
+            # outright in the check further down. This default flips for
+            # localhost/development only.
+            object.__setattr__(self, "sso_session_cookie_secure", False)
+        for field_name in ("console_auth_methods", "rest_auth_methods", "mcp_auth_methods"):
+            # Validates the names only. A resolved allowlist can never be empty
+            # — an empty configured list falls back to that surface's default,
+            # and a non-empty one is non-empty by construction — so there is no
+            # lock-everyone-out case to guard here, and inventing one would be
+            # a security check that never fires.
+            validate_methods(getattr(self, field_name), field=field_name.upper())
+        if self.local_idp_enabled and not self.sso_enabled:
+            raise ValueError(
+                "SSO_ENABLED must be true when LOCAL_IDP_ENABLED=true — the local identity "
+                "provider is served through the SSO session surface, not as a separate path"
+            )
+        if self.sso_device_grant_enabled and not self.sso_enabled:
+            raise ValueError("SSO_ENABLED must be true when SSO_DEVICE_GRANT_ENABLED=true")
+        if self.dev_idp_enabled:
+            if not self.sso_enabled:
+                raise ValueError("SSO_ENABLED must be true when DEV_IDP_ENABLED=true")
+            if not self.is_local:
+                # The whole point of this provider is that it authenticates
+                # anybody. Refusing to start is the only safe response to finding
+                # it enabled anywhere a real person could reach it.
+                raise ValueError(
+                    "DEV_IDP_ENABLED=true is only permitted when ENVIRONMENT is local — "
+                    "it serves an identity provider that vouches for any caller"
+                )
+        if self.sso_enabled and self.sso_session_cookie_samesite.lower() not in (
+            "lax",
+            "strict",
+        ):
+            # `none` would make the session cookie usable cross-site, which is
+            # precisely what SameSite is here to prevent; it is not offered.
+            raise ValueError("SSO_SESSION_COOKIE_SAMESITE must be 'lax' or 'strict'")
+        if (
+            self.environment == "production"
+            and self.sso_enabled
+            and not self.sso_session_cookie_secure
+        ):
+            raise ValueError(
+                "SSO_SESSION_COOKIE_SECURE must not be disabled when ENVIRONMENT=production"
+            )
         if self.concurrency_backend == ConcurrencyBackend.REDIS and not self.concurrency_redis_url:
             raise ValueError("CONCURRENCY_REDIS_URL must be set when CONCURRENCY_BACKEND=redis")
         if self.vault_enabled and not self.vault_addr:

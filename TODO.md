@@ -229,6 +229,8 @@ order-of-magnitude, not commitments.
 | 196 | ✅ The container image's non-Python layers have never been licence-assessed: `docs/THIRD_PARTY_LICENSES.md` covers `poetry.lock` only, while the shipped image also carries a Debian `bookworm` userland and Microsoft's `msodbcsql18` under `ACCEPT_EULA=Y` | M | — |
 | 197 | Offline entitlement token for the paid tier (not-before-customers) | S | — |
 | 198 | QueryGate Notary — append-only transparency log for the audit ledger's chain head (not-before-customers) | M | — |
+| 199 | ✅ Human SSO: OIDC authorization-code sign-in for the browser surfaces across eleven provider presets, a built-in local identity provider (scrypt + TOTP) for air-gapped and break-glass use, a deny-by-default file-configured claim→scope mapping, CSRF-bound sessions, and an RFC 8628 device grant for CLI callers | L | 10, 90, 95 |
+| 200 | ✅ Per-surface credential-type policy: an allowlist over `Principal.auth_method` for the console / REST / MCP surfaces, whose default closes the admin control plane to static API keys the moment SSO is enabled | S–M | 199 |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -3670,3 +3672,167 @@ service itself (receipt issuance, key publication, the transparency log) is
 out of `src/querygate/`'s request-serving surface and scoped as its own
 component; `security-invariant-check` confirms no query/row/schema/credential
 data is ever included in an anchored payload.
+
+### 199. Human SSO: OIDC sign-in for the browser surfaces, a built-in local identity provider, and a file-configured claim→scope mapping ✅ DONE (phase 1)
+
+**Effort: L.** Requested by the maintainer 2026-08-23.
+
+**Why it mattered:** items 10 and 90 already let QueryGate *verify* an IdP's
+JWT, and item 95 published the scope vocabulary to register in that IdP — so an
+agent or a service could authenticate as a human. A **human** could not. Both
+browser surfaces made a person paste a bearer token
+(`admin_ui/app.js`'s `connect()`, `access_ui/app.js`'s), which is a credential
+handling practice no enterprise security review passes: it trains operators to
+copy long-lived tokens between windows, it cannot express "this person is in
+the platform-oncall group", and it leaves no way to end someone's access
+without rotating a key somebody else also holds. The Proof pillar claims
+per-human attribution; before this, the *humans* had no first-class way in.
+
+Three gaps, all closed in phase 1:
+
+1. **No interactive sign-in.** No authorization-code flow, no session, no
+   logout.
+2. **No discovery or provider presets.** An operator hand-wrote
+   `JWT_JWKS_URL`/`JWT_ISSUER`/`JWT_AUDIENCE` per IdP.
+3. **No group→authority mapping.** `jwt_scopes_claim` read one claim as a
+   space-delimited scope string. Entra ID emits app roles in `roles` and groups
+   as opaque GUIDs in `groups`; Keycloak nests realm roles at
+   `realm_access.roles`. None of those are QueryGate scopes, so "sign in with
+   Entra" would have meant "sign in with no authority at all".
+
+**Phase 1 — shipped 2026-08-23.** New `src/querygate/identity/` package:
+
+- **One OIDC implementation, nineteen named providers plus every other one.** `identity/oidc.py` runs
+  authorization-code + PKCE (S256 always — an IdP that cannot do S256 is
+  *refused*, never downgraded to `plain`); `identity/presets.py` holds a
+  behaviour-free `ProviderPreset` per IdP (Entra ID, Okta, Auth0, Google
+  Workspace, Keycloak, authentik, PingOne, PingFederate, OneLogin, JumpCloud,
+  GitLab, AD FS, Amazon Cognito, Cloudflare Access, ZITADEL, Authelia, WorkOS,
+  FusionAuth, Salesforce, plus `generic`) carrying only the issuer template,
+  default scopes, and claim names. Issuer templates interpolate exactly three
+  values — `{tenant}`, `{domain}`, `{region}` — a deliberate ceiling: an IdP
+  needing a fourth uses `generic` with an explicit issuer rather than growing
+  the model a bespoke field per vendor. `identity/discovery.py` reads `.well-known/openid-configuration`,
+  enforcing RFC 8414 §3.3 exact issuer equality and https-only endpoints, TTL
+  cached with one outbound fetch per issuer under contention.
+- **A built-in local identity provider** (`identity/local_store.py`,
+  `local_auth.py`, `passwords.py`, `totp.py`) for deployments with no external
+  IdP and for break-glass access when the IdP is down. `hashlib.scrypt`
+  (N=2^16) rather than a new argon2 dependency; RFC 6238 TOTP against the
+  stdlib; per-account lockout; a fixed dummy verifier so an unknown username
+  costs the same as a real one; a bounded semaphore so parallel logins cannot
+  turn a memory-hard KDF into self-inflicted exhaustion. One locked writer for
+  `users.yaml` (`LocalUserFileRepository`, mirroring `CatalogFileRepository`).
+- **File-configured claim→scope mapping** (`identity/mapping.py`,
+  `examples/identity.example.yaml`). Deny-by-default, grant-only, order-
+  independent; validated against `core/scopes.ALL_SCOPES` and `ROLE_BUNDLES` at
+  load so a typo fails the reload instead of silently granting nothing. Applied
+  to browser sessions **and** — via `JWT_MAPPING_PROVIDER_ID` — to bearer JWTs,
+  so one human holds the same authority through either door.
+- **Sessions that re-derive authority per request.** A session stores the IdP's
+  *claims*, never resolved scopes, and `identity/authenticators.py` maps them
+  fresh on every request — so tightening `identity.yaml` and reloading takes
+  effect on the next request rather than at the next logout. The browser holds
+  an opaque token; the store holds its SHA-256. Every cookie-authenticated
+  request must also carry the CSRF token (`X-QueryGate-CSRF`) — on *every*
+  method, not only unsafe ones, so a new read endpoint cannot become
+  cross-site-reachable by someone judging it "safe".
+- **RFC 8628 device grant** (`identity/device.py`) so a browserless tool gets a
+  short-lived token carrying the approving human's identity, narrowed to the
+  intersection of what it asked for and what the approver holds — and narrowed
+  *again* against the live mapping on each request, so revoking a group
+  deactivates an already-issued token without waiting for expiry.
+- **Admin surface** (`api/admin_identity_routes.py`) under two new scopes,
+  `admin:identity:read`/`admin:identity:write` (deliberately not folded into
+  `admin:config:*`: minting an account is a different privilege from changing
+  what a connection exposes) — local-account CRUD, TOTP enrolment shown exactly
+  once, provider inspection with no `client_secret` field on the model at all,
+  a mapping simulator, and break-glass revocation of a person's sessions and
+  tokens.
+- **Audit.** New `AuthenticationEvent` (`identity.authentication`) joins the
+  `PersistableEvent` union; it has no field capable of holding a password,
+  code, token, or claim set. Adding it also removed a real drift hazard:
+  `api/admin_ui_routes.py` kept its own hand-written frozenset of event types,
+  now derived from the union by `audit.events.persistable_event_types()`.
+- **Both UIs** offer "Continue with <provider>" and a local sign-in form,
+  resume an existing session on load, and sign out server-side. The
+  paste-a-token path still works unchanged.
+
+*Mutation-verified before landing (CLAUDE.md's rule), which paid for itself:
+three enforcement points passed a green 3,289-test suite with no test actually
+pinning them — single-use login flows, login-flow expiry, and store-level
+session expiry. Tests added. It also showed `is_safe_relative_path`'s two
+open-redirect layers are mutually redundant; kept deliberately and documented,
+rather than "simplified" down to one parser's edge cases.*
+
+**Phase 1b — a local development identity provider ✅ DONE 2026-08-23.**
+Requested by the maintainer: *"add local bypass so it works full flow but
+actually its local so i dont need actual SSO set up for it to work."*
+`identity/dev_idp.py` serves QueryGate's own OIDC provider at
+`<sso.base_url>/dev-idp` — real discovery document, real JWKS, real RS256 ID
+tokens signed with a per-process key, and **real PKCE verification** on
+exchange. Nothing in `identity/oidc.py` is bypassed or stubbed: the browser
+takes the same redirect and the callback runs the same state/nonce/signature/
+audience checks. Only *who vouches for the human* is make-believe.
+
+Zero configuration: with no `users:` block the personas are **derived from the
+mapping rules** — one per rule, named by its description, plus one matching
+nothing so deny-by-default is a click away rather than something to construct.
+
+Fenced three independent ways, because it is an authentication bypass by
+definition: the config validator refuses `DEV_IDP_ENABLED=true` outside a local
+`ENVIRONMENT`; `build_dev_idp_router` re-checks rather than trusting it was
+reached legitimately; and the signing key is generated per process and never
+written anywhere, so a leaked dev token dies at the next restart. Each fence has
+its own test in `tests/security/test_sso_boundary.py`.
+
+This also closed the honest gap phase 1 shipped with — the redirect path could
+only be verified in pieces, because verifying it whole meant registering an
+application with a real IdP. `tests/integration/test_dev_idp_full_flow.py` now
+drives login → authorize → callback → session → scope-gated call against a real
+uvicorn server, and it immediately found a real defect: `derive_personas` was
+emitting a dotted claim path (`realm_access.roles`) as a **flat key**, so the
+rule that inspired a persona would not fire on it. Fixed with `nest_claim`.
+
+**Phase 2 — Redis-backed SSO state ✅ DONE 2026-08-23.**
+`identity/redis_sessions.py` adds `RedisSessionStore`, `RedisLoginFlowStore`,
+`RedisDeviceGrantStore`, and `RedisIssuedTokenStore`, wired in the same lifespan
+block as the concurrency/quota/disclosure/observed-shape stores. The failure
+mode this removes is different from theirs: a per-replica session store does not
+multiply a budget, it signs people *out* at random.
+
+**Deliberately Lua-free**, and the reason is the point: a session record is a
+JSON document full of arrays (`groups`, `scopes`, whatever the IdP nested in
+`claims`), which is exactly what item 195 phase 2's `cjson` round-trip trap
+destroys — on real Redis, invisibly under fakeredis. So it takes CLAUDE.md's
+own structural way out: the document is written once and never decoded
+server-side, and `last_seen_at` — the only mutable field — lives in its own key
+a plain `SET` updates. Single-use comes from `GETDEL`, every command touches
+exactly one key (no `CROSSSLOT` possible), and reads **fail closed**: an
+unreachable store means nobody is signed in. Guarded by AST-level assertions
+that no Lua is executed and no multi-key command is issued, since no behavioural
+test can catch either class.
+
+**Phase 3 — `querygate login` CLI ✅ DONE 2026-08-23.**
+`login_cli.py` (`querygate-login`). Prints the user code, opens the
+verification URI, polls honouring `interval` and backing off on `slow_down`,
+and distinguishes denied / expired / timed-out from "the gateway is down".
+Refuses to send a credential over plain http to a non-loopback host. Writes
+nothing to disk by default — it prints an `export` line; `--save` writes
+`~/.querygate/token` created 0600 (via `os.open` with the mode, not a
+write-then-chmod, which would leave a world-readable window). `--quiet` emits
+only the token so `$(querygate-login --quiet)` works.
+`tests/integration/test_login_cli.py` drives it against a real server with a
+timer thread playing the human who approves.
+
+**Phase 4 — SAML 2.0 (DECISION-GATED, do not start).** Deliberately not built:
+every mainstream IdP speaks OIDC, and SAML costs an `xmlsec`/`python3-saml`
+native dependency in the container image plus the XML signature-wrapping attack
+surface — a poor trade against one well-tested code path. Build it only when a
+design partner actually mandates SAML, and record that decision first.
+
+### 200. Per-surface credential-type policy: enabling SSO must actually close the console to shared secrets ✅ DONE
+
+A per-surface allowlist over `Principal.auth_method` (console / REST / MCP) whose default drops static API keys from the admin control plane the moment SSO is enabled.
+
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 200).

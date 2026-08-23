@@ -50,14 +50,15 @@ below is verifiable from this repository; none of it is buried further down.
   compiler/rendering-level only — QueryGate deliberately **refuses to open a
   connection** to either rather than pretending to support them.
 
-What *is* real: the structural guarantee below; 3,150 unit tests, 399
-integration tests and a 550-test adversarial security suite, plus live
-Postgres/MSSQL/MySQL tiers in CI; a maintained threat model; and a
-reconciliation between what the docs claim and what the code does that is itself
-gated in CI. Every number there is reproducible — `poetry run pytest -m unit -q`,
-`-m "integration and not real_db"`, `make test-security`. The full, unabridged
-list of what is missing or partial is
-[`docs/LIMITATIONS.md`](docs/LIMITATIONS.md).
+What *is* real: the structural guarantee below; live Postgres/MSSQL/MySQL tiers
+in CI; a maintained threat model; and a reconciliation between what the docs
+claim and what the code does that is itself gated in CI. The adversarial
+security suite is 651 tests (`make test-security`); the unit and integration
+suites are 3,326 and 428. Every number there is reproducible — `poetry run
+pytest -m unit -q`, `-m "integration and not real_db"`, `make test-security` —
+and the adversarial count is itself CI-gated against the documents that quote
+it, this file included. The full, unabridged list of what is missing or partial
+is [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md).
 
 ## Why raw SQL for agents is dangerous
 
@@ -124,11 +125,12 @@ anything else, and it leaves you with no token to give the quickstart command
 below.
 
 That anonymous path is gated, not accidental: it is only reachable when the
-environment is local *and* no API key *and* no JWT issuer is configured
-(`core/auth.py`'s `build_authenticator`), and `ENVIRONMENT=production` **refuses
-to start** without `API_KEYS` or `JWT_ENABLED`
-(`core/config.py::_validate_production_auth`). You cannot ship this state by
-accident — but you should not browse in it either. Edit `.env`:
+environment is local *and* no API key *and* no JWT issuer *and* no SSO is
+configured (`api/auth.py`'s `build_authenticator`, and its sibling in
+`mcp/auth.py`), and `ENVIRONMENT=production` **refuses to start** without
+`API_KEYS` or `JWT_ENABLED` (`core/config.py::_validate_production_auth`). You
+cannot ship this state by accident — but you should not browse in it either.
+Edit `.env`:
 
 ```bash
 API_KEYS='["local-dev-key"]'   # any string; this is a local demo credential
@@ -224,6 +226,20 @@ there is no second path to a database. The package-by-package map is
   returned from REST/MCP; `tests/unit/test_credential_redaction.py` asserts
   that against the live OpenAPI and MCP schemas, not by convention.
 - **Policy is enforced before compilation**, not as a post-hoc filter.
+- **Bring your own identity, for people as well as agents.** Humans sign in
+  through your IdP — nineteen named presets (Entra ID, Okta, Auth0, Google Workspace,
+  Keycloak, AD FS, Cognito, Cloudflare Access, Ping, OneLogin, JumpCloud,
+  authentik, ZITADEL, Authelia, WorkOS, FusionAuth, Salesforce, GitLab, …) plus
+  any OIDC issuer by name — or through a built-in local provider when there is
+  no IdP to reach. Group membership maps to QueryGate scopes through a
+  reviewable file that is **deny-by-default** and re-evaluated on every request,
+  so tightening it takes effect immediately rather than at the next logout. A
+  terminal gets the same identity with `querygate-login` (RFC 8628), never a
+  shared key. See [`docs/SCOPE_CATALOG.md`](docs/SCOPE_CATALOG.md) and
+  `examples/identity.example.yaml`.
+  *Evaluating? `DEV_IDP_ENABLED=true` makes QueryGate serve its own OIDC
+  provider so the whole sign-in flow runs with nothing to register — refused
+  outside a local environment.*
 - **Every identifier is schema-checked** against the live reflected schema,
   never agent-asserted.
 - **Bounded execution** — per-connection concurrency semaphore, policy
