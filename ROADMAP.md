@@ -127,8 +127,14 @@ human-SSO/identity stream; these start at 210.
   *Reuses 199's mechanism, not its store: `identity/` is deployment-side and
   governs who may use the gateway; activation is vendor-side and governs whether
   it may run at all.*
+- [ ] **220** — Deny-by-default at table/column granularity (a `Policy`
+  allow-list with no allow-all fallback). **Blocks 215.** *Today an empty
+  `allowed_tables` means allow-**everything**, so the "safe-by-default starter
+  policy" 215 promises is inexpressible. Opt-in, default off, so no existing
+  deployment shifts behaviour.*
 - [ ] **215** — One-command install and first-boot self-configuration.
-  *"Single command and it's set up" is the promise; today it needs four files.*
+  *"Single command and it's set up" is the promise; today it needs two YAML
+  files plus env configuration.*
 - [ ] **216** — Renewal countdown and lapse UX. *Depends on 211.*
 - [ ] **217** — Customer portal: signup, checkout, downloads, docs.
   **Blocked on the legal entity.**
