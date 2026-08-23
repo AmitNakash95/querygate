@@ -442,6 +442,13 @@ class _CursorState:
     day: date
     key: Optional[str]
     line: int
+    # TODO.md item 184: an exclusive `StartAfter` listing marker for the day,
+    # set when a day's LISTING (not its key loop) was cut short by
+    # `max_objects_scanned`. Distinct from `key`, which names the exact object
+    # to resume INSIDE. Only ever handed to `list_objects_v2` as `StartAfter`,
+    # never dereferenced as a raw `GetObject` key, so the module's "a cursor
+    # key is never used as a raw key path" property still holds.
+    after_key: Optional[str] = None
 
 
 def _filters_fingerprint(
@@ -463,8 +470,21 @@ def _filters_fingerprint(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
-def _encode_cursor(day: date, key: Optional[str], line: int, fingerprint: str) -> str:
-    payload = {"day": day.isoformat(), "key": key, "line": line, "fp": fingerprint}
+def _encode_cursor(
+    day: date,
+    key: Optional[str],
+    line: int,
+    fingerprint: str,
+    *,
+    after_key: Optional[str] = None,
+) -> str:
+    payload = {
+        "day": day.isoformat(),
+        "key": key,
+        "line": line,
+        "fp": fingerprint,
+        "after": after_key,
+    }
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii")
 
@@ -480,7 +500,12 @@ def _decode_cursor(cursor: str, fingerprint: str) -> _CursorState:
         line = int(payload.get("line", 0))
         if line < 0:
             raise ValueError("negative line offset")
-        return _CursorState(day=day, key=key, line=line)
+        # Absent on cursors issued before item 184 — those simply resume at the
+        # start of their day, exactly as they did when they were issued.
+        after_key = payload.get("after")
+        if after_key is not None and not isinstance(after_key, str):
+            raise ValueError("after-key listing marker is not a string")
+        return _CursorState(day=day, key=key, line=line, after_key=after_key)
     except QueryValidationError:
         raise
     except Exception as exc:
@@ -644,7 +669,13 @@ def _seed_chain_state_from_predecessor(
             continue
         try:
             seed_parsed = json.loads(seed_raw)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
+            # TODO.md item 194 defect 2: `json.loads` raises RecursionError —
+            # a RuntimeError, NOT a JSONDecodeError — on a deeply-nested
+            # line. ~1,000 nested arrays is a ~2 KB line, four orders of
+            # magnitude under _MAX_OBJECT_BYTES, so the byte bounds are no
+            # defence. Treated as unparseable (fails closed), exactly like
+            # any other malformed seed line.
             return None, None, False
         if verify_envelope_hash(seed_parsed, key=ledger_key) is True:
             # TODO.md item 178: a verified predecessor whose `seq` is
@@ -697,7 +728,13 @@ def _matches(
 
 
 async def _list_day_keys(
-    client, bucket: str, day_prefix: str, *, deadline: float, max_keys: int
+    client,
+    bucket: str,
+    day_prefix: str,
+    *,
+    deadline: float,
+    max_keys: int,
+    start_after: Optional[str] = None,
 ) -> Tuple[List[str], bool]:
     """Every key under one calendar day's prefix, in S3's own lexicographic
     (here: chronological, since segment keys are timestamp-first) order.
@@ -711,6 +748,14 @@ async def _list_day_keys(
     ever fetch is pointless work). Returns `(keys, stopped_early)`; the
     caller must treat `stopped_early=True` as a truncation, since more keys
     for this exact day may still exist beyond what was listed.
+
+    `start_after` (TODO.md item 184) resumes an earlier truncated listing of
+    this same day EXCLUSIVELY — S3 returns only keys sorting strictly after
+    it. Without it, a day holding more than `max_keys` segments re-lists its
+    first `max_keys` keys on every page and everything past them is
+    unreachable. It is applied to the first `ListObjectsV2` call only:
+    `ContinuationToken` already encodes the position on subsequent pages,
+    and S3 ignores `StartAfter` when a continuation token is present.
     """
     keys: List[str] = []
     token: Optional[str] = None
@@ -728,6 +773,8 @@ async def _list_day_keys(
         }
         if token:
             kwargs["ContinuationToken"] = token
+        elif start_after:
+            kwargs["StartAfter"] = start_after
         resp = await asyncio.to_thread(client.list_objects_v2, **kwargs)
         keys.extend(obj["Key"] for obj in resp.get("Contents", []))
         if resp.get("IsTruncated"):
@@ -822,10 +869,12 @@ async def search_worm_archive(
             current_day = resume.day
             resume_key = resume.key
             resume_line = resume.line
+            resume_after_key = resume.after_key
         else:
             current_day = start_day
             resume_key = None
             resume_line = 0
+            resume_after_key = None
     except QueryValidationError:
         AUDIT_WORM_SEARCH_REQUESTS_TOTAL.labels(outcome="rejected").inc()
         raise
@@ -930,15 +979,25 @@ async def search_worm_archive(
         client = boto3.client("s3", region_name=region or None)
 
         day = current_day
+        # TODO.md item 184: the exclusive listing marker that applies to the
+        # day about to be processed. Only ever non-None for the FIRST day of a
+        # resumed scan — a later day is always listed from its own start.
+        day_after_key = resume_after_key
         while day <= end_day:
             if time.monotonic() >= deadline:
                 return _finalize(
-                    truncated=True, next_cursor=_encode_cursor(day, None, 0, fingerprint)
+                    truncated=True,
+                    next_cursor=_encode_cursor(day, None, 0, fingerprint, after_key=day_after_key),
                 )
 
             day_prefix = f"{prefix.rstrip('/')}/{day.strftime('%Y/%m/%d')}/"
             keys, listing_truncated = await _list_day_keys(
-                client, bucket, day_prefix, deadline=deadline, max_keys=bounds.max_objects_scanned
+                client,
+                bucket,
+                day_prefix,
+                deadline=deadline,
+                max_keys=bounds.max_objects_scanned,
+                start_after=day_after_key,
             )
             # `listing_truncated` does NOT short-circuit here: the keys
             # already listed are still valid and must still be processed
@@ -1038,7 +1097,12 @@ async def search_worm_archive(
                     events_scanned += 1
                     try:
                         parsed = json.loads(raw_line)
-                    except json.JSONDecodeError:
+                    except (json.JSONDecodeError, RecursionError):
+                        # TODO.md item 194 defect 2 — see the seed walk's own
+                        # handler. Counted `malformed` (the class for "not
+                        # parseable at all"), never surfaced as a 500 that
+                        # would also discard every genuine record this page
+                        # had already accumulated.
                         malformed += 1
                         continue
                     # TODO.md item 154: every segment is enveloped and
@@ -1185,13 +1249,28 @@ async def search_worm_archive(
                 # Every key THIS call listed for the day was processed
                 # without hitting another bound, but the listing itself was
                 # cut short (WS-6) — more keys may exist for this exact day
-                # beyond what was seen. Resume at the start of this day
-                # rather than claiming it was fully enumerated.
+                # beyond what was seen. Resume EXCLUSIVELY after the last key
+                # actually consumed (TODO.md item 184). Resuming at the start
+                # of the day instead re-listed the same first `max_keys` keys
+                # forever: every segment past them was unreachable, a
+                # good-faith pager looped, and item 177's integrity counters
+                # re-counted the same day on every lap. `keys` is empty only
+                # when the deadline fired before a single key was listed, in
+                # which case the marker this day came in with is still the
+                # correct place to resume.
                 return _finalize(
-                    truncated=True, next_cursor=_encode_cursor(day, None, 0, fingerprint)
+                    truncated=True,
+                    next_cursor=_encode_cursor(
+                        day,
+                        None,
+                        0,
+                        fingerprint,
+                        after_key=keys[-1] if keys else day_after_key,
+                    ),
                 )
 
             day = day + timedelta(days=1)
+            day_after_key = None
     except Exception:
         AUDIT_WORM_SEARCH_REQUESTS_TOTAL.labels(outcome="error").inc()
         # TODO.md item 177: whatever integrity signals this scan managed to
@@ -1245,8 +1324,20 @@ async def build_worm_search_result(
     # bounds when the backend IS enabled below, which is redundant but
     # harmless — validation is a pure function of its inputs.
     bounds = _bounds_from_config(cfg)
-    _validate_window(start_time, end_time, bounds)
-    _validate_limit(limit, bounds)
+    try:
+        _validate_window(start_time, end_time, bounds)
+        _validate_limit(limit, bounds)
+    except QueryValidationError:
+        # TODO.md item 185: count the rejection HERE, where it actually
+        # happens. These two calls run before the backend-enabled check and
+        # before `search_worm_archive`, so a missing/over-wide window or an
+        # out-of-range limit never reached that function's own
+        # `outcome="rejected"` increment — in production the label only ever
+        # counted cursor rejections, while `metrics.py` documented it as
+        # covering bound violations too. An operator alerting on a spike of
+        # bound-violating callers saw nothing.
+        AUDIT_WORM_SEARCH_REQUESTS_TOTAL.labels(outcome="rejected").inc()
+        raise
 
     if not cfg.audit_sink_backend.is_s3_worm_archived():
         return WormSearchResult(

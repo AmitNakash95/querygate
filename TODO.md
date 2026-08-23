@@ -214,8 +214,8 @@ order-of-magnitude, not commitments.
 | 181 | `redis_quota.py`'s `Retry-After` is always the full window — the Lua indexes a nested `WITHSCORES` reply | S | 50 |
 | 182 | Observe mode for the disclosure budget — measure before you enforce | S–M | 179, 26 |
 | 183 | Suggest a disclosure-budget threshold from observed behavior, for human approval | M | 182 |
-| 184 | A day holding more segments than `max_objects_scanned` returns a cursor that never advances, so part of the WORM archive is unreachable, a good-faith pager loops forever, and item 177's integrity counters inflate without bound | M | 134 |
-| 185 | `AUDIT_WORM_SEARCH_REQUESTS_TOTAL{outcome="rejected"}` is unreachable for the bound rejections its own comment claims to count, because `build_worm_search_result` validates before calling `search_worm_archive` | S | 134 |
+| 184 | ✅ A day holding more segments than `max_objects_scanned` returns a cursor that never advances, so part of the WORM archive is unreachable, a good-faith pager loops forever, and item 177's integrity counters inflate without bound | M | 134 |
+| 185 | ✅ `AUDIT_WORM_SEARCH_REQUESTS_TOTAL{outcome="rejected"}` is unreachable for the bound rejections its own comment claims to count, because `build_worm_search_result` validates before calling `search_worm_archive` | S | 134 |
 | 186 | The disclosure budget's per-shape cap is evadable — a select-alias *reference* mints a fresh shape bucket per probe (measured: 20 probes, 20 fingerprints), so `max_shape_repeats_per_window` never trips; CTE-rename, nested-alias and list-order vectors share the root cause | M | 179 |
 | 187 | A disclosure-budget refusal tells the caller which cap tripped, its configured value and the window length, contradicting the exception's own stated contract and handing over item 186's evasion strategy | S | 179 |
 | 188 | A principal policy override can fail `Policy` validation at request time and 500 every query for that principal, after `validate-config` accepted it | S | 179 |
@@ -224,7 +224,7 @@ order-of-magnitude, not commitments.
 | 191 | `write_preview` is an unfloored, unbudgeted exact-count oracle, so a write-scoped caller can difference around items 88 and 179 | S–M | 93, 179 |
 | 192 | The disclosure budget's Redis script passes multiple KEYS, which fails CROSSSLOT on Redis Cluster — turning a fail-closed control into an outage on the queries it protects | S | 179 |
 | 193 | ✅ `docs/product-guide.html` has no freshness gate against `docs/PRODUCT_GUIDE.md`, so the generated copy most likely to be shared goes stale silently | S | — |
-| 194 | Three crafted-or-corrupt WORM lines still escape `search_worm_archive` as a masked 500: a non-ASCII `hash` (reachable by ordinary corruption) and two unbounded recursions | S–M | 134 |
+| 194 | ✅ Three crafted-or-corrupt WORM lines still escape `search_worm_archive` as a masked 500: a non-ASCII `hash` (reachable by ordinary corruption) and two unbounded recursions | S–M | 134 |
 | 195 | ✅ Narrow a principal from the general query surface to reviewed templates: `Policy.templates_only` enforcement plus an opt-in, redaction-safe observed-shape recorder (in-process + Redis-backed) that drafts a template from real traffic, with an admin-UI promotion panel | M–L | 48 |
 | 196 | ✅ The container image's non-Python layers have never been licence-assessed: `docs/THIRD_PARTY_LICENSES.md` covers `poetry.lock` only, while the shipped image also carries a Debian `bookworm` userland and Microsoft's `msodbcsql18` under `ACCEPT_EULA=Y` | M | — |
 | 197 | Offline entitlement token for the paid tier (not-before-customers) | S | — |
@@ -2918,132 +2918,17 @@ threshold an operator has already set by hand without saying so explicitly.
 
 **Effort:** M. **Depends on:** 182, 179 (shipped), 32B/32C (shipped).
 
-### 184. A day holding more segments than `max_objects_scanned` returns a cursor that never advances, so part of the WORM archive is unreachable and both integrity counters inflate without bound
+### 184. A day holding more segments than `max_objects_scanned` returns a cursor that never advances, so part of the WORM archive is unreachable and both integrity counters inflate without bound ✅ DONE
 
-**Renumbered from 179 to 184 on 2026-08-12** when the item-177 branch and the
-disclosure-budget branch were merged into `main`. Both had been cut from the
-same base and each allocated 179 and 180 independently, so the two numbers
-genuinely collided. The disclosure budget kept 179/180 because it is shipped
-code referenced from ~30 files; these two were filed-only, so renumbering them
-was the cheaper and safer side. This is the sole deviation from CLAUDE.md's
-"item numbers are permanent" rule and is recorded in the PRODUCT_GUIDE
-Decision Log. Nothing outside TODO.md/ROADMAP.md/`docs/TODO_ARCHIVE.md`
-referenced the old numbers except two `metrics.py` comments, updated in the
-same merge.
+The day-truncation cursor is now exclusive: it carries an `after` listing marker naming the last key consumed, so a day holding more segments than `max_objects_scanned` pages to exhaustion instead of re-listing its first N keys forever.
 
-**Surfaced 2026-08-11 by three of the four `auditors` reviewers
-(`security-invariant-reviewer`, `architecture-boundary-reviewer`,
-`test-contract-reviewer`, independently) auditing item 177's own commit.**
-Pre-existing since item 134 phase 2 — item 177 neither caused it nor touched
-the code path; it is filed separately because the fix is a **cursor format
-change**, which deserves its own scoping and tests rather than riding in on a
-metrics commit.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 184).
 
-`_list_day_keys` is called with `max_keys=bounds.max_objects_scanned` and no
-`StartAfter`. When one day directory holds strictly more keys than that
-budget it returns the first N with `stopped_early=True`. The key loop then
-consumes exactly those N objects without re-tripping the
-`objects_scanned >= max` guard (checked at the top of each iteration, so it
-fires only at `idx == N`, which is out of range), falls through to
-`if listing_truncated:` and returns
-`next_cursor = _encode_cursor(day, None, 0, fingerprint)` — **the start of the
-same day**, discarding the within-day position. Replaying that cursor sets
-`resume_key = None`, so `start_index` stays 0, the same N keys are listed and
-fetched again, the same events are returned again, and the same cursor comes
-back. Three consequences:
+### 185. `AUDIT_WORM_SEARCH_REQUESTS_TOTAL{outcome="rejected"}` is unreachable for the rejections its own comment claims to count ✅ DONE
 
-1. **Silently unreachable compliance records.** Every segment past key N in
-   that day can never be reached, while the response reports `truncated=True`
-   as if they were merely deferred — a compliance search cannot produce
-   records the archive holds.
-2. **An infinite paging loop** for a caller following `next_cursor` in good
-   faith, at `max_objects_scanned` real S3 GETs per lap.
-3. **Unbounded inflation of item 177's counters.** Each lap re-counts the
-   day's `chain_breaks`/`unverified`, so
-   `querygate_audit_worm_search_chain_breaks_total` climbs with how long the
-   pager ran rather than with how many segments actually broke. Item 177's
-   docs disclose per-scan counting, but this makes the magnitude untrustworthy
-   even within a single logical search.
+`build_worm_search_result` now counts its own bound rejections, so `querygate_audit_worm_search_requests_total{outcome="rejected"}` reaches the missing/over-wide window and out-of-range limit cases `metrics.py` always documented it as covering.
 
-**When it triggers — corrected 2026-08-12 (`claim-reviewer`), and it is worse
-than first filed.** The original note said "not default-triggering", reasoning
-that the default `AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` (2000) exceeds the
-~1440 segments/day a default 60s flush interval produces. That arithmetic is
-per **flushing process**, not per deployment. Segment keys are
-`prefix/YYYY/MM/DD/<timestamp>-<microsecond>.jsonl` and every replica and every
-uvicorn worker runs its own interval-driven `WormFlushMonitor` writing into the
-*same* day prefix. So the per-process ceiling multiplies: two replicas — or one
-pod with `NUM_OF_WORKERS=2` — **can** produce ~2880 objects/day against the 2000
-default, on exactly the topology `deploy/HA_DR.md` recommends, with no knob
-lowered and no interval shortened.
-
-**State the precondition, don't drop it.** ~1440/day/process is an upper bound
-under *sustained* traffic, not a property of the configuration: `flush_once`
-returns immediately on an empty drain, so a segment is written only for an
-interval that actually had an event, and nothing in QueryGate emits audit events
-on a schedule. Reaching the ceiling needs ≥1 auditable event in essentially every
-60s window in each process for a day. A busy multi-replica deployment hits this
-at stock settings; an idle one does not. (An earlier revision of this note
-asserted the stock-settings trigger without that precondition — overstating a
-defect is its own inaccuracy, and the customer-facing copies inherited it.)
-It also triggers on any single-process deployment that lowers the object budget
-below its daily segment count or shortens the flush interval below ~43s.
-
-**What to do (when prioritized):** make the day-truncation cursor exclusive
-rather than day-resetting — add an `after_key` field to the cursor payload
-(the existing fingerprint already protects it, and it is only ever used as a
-`StartAfter` listing marker, never as a raw `GetObject` key, so the module's
-"a cursor key is never used as a raw key path" property is preserved), give
-`_list_day_keys` a `start_after` parameter, emit
-`_encode_cursor(day, key=None, after_key=keys[-1], line=0, ...)` when `keys`
-is non-empty, and pass it through on resume. Keep the current day-start cursor
-only when `keys` is empty.
-
-**Acceptance criteria:** a test putting 5 single-event segments in one day
-with `max_objects_scanned=2` follows `next_cursor` to exhaustion and sees all
-5 events exactly once, with no cursor repeating and the loop terminating; a
-companion test asserts `chain_breaks_total` rises by exactly 1 across a whole
-cursor chain over one broken segment. Both fail today.
-
-**Effort:** M. **Depends on:** 134 (shipped).
-
-### 185. `AUDIT_WORM_SEARCH_REQUESTS_TOTAL{outcome="rejected"}` is unreachable for the rejections its own comment claims to count
-
-**Renumbered from 180 to 185 on 2026-08-12** — same merge-time collision as
-item 184; see that item's note for the full rationale.
-
-**Surfaced 2026-08-11 by `architecture-boundary-reviewer` auditing item 177's
-own commit.** Pre-existing since item 134 phase 2; unrelated to item 177's
-change beyond sitting in the same file.
-
-`build_worm_search_result` — the only production caller, from
-`api/admin_observability_routes.py` — runs `_validate_window` and
-`_validate_limit` **itself**, before deciding whether the backend is enabled
-and before calling `search_worm_archive`. So a missing `start_time`, an
-over-wide window, or an out-of-range `limit` raises there and never reaches
-`search_worm_archive`'s own
-`except QueryValidationError: ...labels(outcome="rejected").inc()`. In
-production that label therefore only ever counts cursor-fingerprint/day-range
-rejections — yet `metrics.py`'s comment on the counter explicitly lists
-"missing/over-wide time range, limit out of range" as what it counts. An
-operator alerting on a spike of bound-violating callers sees nothing.
-
-The existing test
-(`test_a_rejected_request_increments_the_rejected_outcome_not_ok`) passes
-because it calls `search_worm_archive` **directly**, exercising a path
-production never takes — so the gap is invisible to the suite.
-
-**What to do (when prioritized):** either move the counter up into
-`build_worm_search_result` (wrapping its two validation calls in the same
-`except QueryValidationError` + `.inc()`), or narrow `metrics.py`'s comment to
-say "cursor rejections only". The first is preferable — the metric is more
-useful where the rejections actually happen.
-
-**Acceptance criteria:** an integration test hitting
-`GET /api/v1/admin/observability/worm-search` with no `start_time` asserts the
-`rejected` counter rose by 1. Fails today.
-
-**Effort:** S. **Depends on:** 134 (shipped).
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 185).
 
 ### 186. The disclosure budget's per-shape cap is evadable: a select-alias *reference* mints a fresh shape bucket per probe
 
@@ -3421,7 +3306,11 @@ rather than fakeredis.
 Shipped a drift guard that regenerates the page in memory and byte-compares it, in the default unit suite — plus a negative control proving a markdown edit changes the output, and a section-count assertion pinning the failure mode actually measured (whole sections going missing).
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 193).
-### 194. Three crafted-or-corrupt WORM lines still escape `search_worm_archive` as an unhandled exception the route masks as a 500
+### 194. Three crafted-or-corrupt WORM lines still escape `search_worm_archive` as an unhandled exception the route masks as a 500 ✅ DONE (defects 1-2)
+
+**Defects (1) and (2) shipped 2026-08-23.** A non-ASCII digest is now a mismatch rather than a `TypeError`: `audit/ledger.py` grew `digests_equal`, used by all five `hmac.compare_digest` sites (both readers), so ordinary corruption of one byte in a `hash` no longer permanently 500s every future search covering that immutable object. Both `json.loads` handlers (the line loop and the seed walk) now catch `RecursionError` alongside `json.JSONDecodeError`, so a deeply-nested line is counted `malformed` and the rest of the page survives.
+
+**Defect (3) remains open and is the reason this item is not fully done.** `_contains_forbidden_content` still walks `query_shape` with no depth cap. Measured on 2026-08-23 against the shipped tree (Python 3.11, `sys.getrecursionlimit()` 1000): LIST nesting raises at depth **333** (332 survives), DICT nesting at **998** (997 survives) — the ~3x gap is the structural generator-frame cost the original note describes, so any cap must be sized against the LIST cost. `Policy.max_where_depth` defaults to **5**, so a legitimate `query_shape` sits three orders of magnitude below the LIST threshold. The remaining decision is the cap VALUE and is a maintainer call, since the screener is a security control whose `True` means *reject* and the cap must fail closed (over-nested ⇒ `malformed`).
 
 **Surfaced 2026-08-12 by `security-invariant-reviewer` and `claim-reviewer`
 independently, auditing item 178's own commit, and measured — not reasoned —
@@ -3485,6 +3374,7 @@ regression test, then restore the absolute form of the module docstring's
 standing-contract sentence.
 
 **Effort:** S–M. **Depends on:** 134 (shipped).
+
 ### 195. The narrowing path: `Policy.templates_only` enforcement plus an observed-shape recorder that drafts a template from real traffic ✅ DONE
 
 Shipped the discovery→narrowing bridge between the general `StructuredQuery`

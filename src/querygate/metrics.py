@@ -253,12 +253,14 @@ AUDIT_WORM_BUFFER_DROPPED_TOTAL = Counter(
 # Managed search over the WORM archive (TODO.md item 134 phase 2,
 # audit/worm_search.py). `outcome` is one of "ok" | "rejected" | "error" —
 # "rejected" means a bound was violated and no S3 call was made at all.
-# NOTE (TODO.md item 185): in production this currently only ever counts
-# CURSOR rejections (a cursor that doesn't match the current filters, or
-# whose day falls outside the window). A missing/over-wide time range or an
-# out-of-range limit is rejected earlier, by `build_worm_search_result`'s own
-# `_validate_window`/`_validate_limit`, which never reaches the counter — see
-# item 185 for the fix. "error" means S3 itself failed mid-scan
+# It genuinely covers all three bound classes (TODO.md item 185): cursor
+# rejections are counted inside `search_worm_archive`, while a missing/
+# over-wide time range or an out-of-range limit is counted by
+# `build_worm_search_result`, which runs `_validate_window`/`_validate_limit`
+# itself before the backend-enabled check and so never reaches the former.
+# Before item 185 the wrapper's rejections were counted nowhere, so this
+# label silently meant "cursor rejections only". "error" means S3 failed
+# mid-scan
 # (unreachable, misconfigured bucket); "ok" covers every genuinely served
 # request, complete or truncated.
 AUDIT_WORM_SEARCH_REQUESTS_TOTAL = Counter(
