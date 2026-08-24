@@ -3471,9 +3471,14 @@ server actually registers.
 `mcp/server.py` builds one shared `MCPServer` instance (`mcp_server` — `mcp`
 SDK v2, formerly `FastMCP`; TODO.md item 128's `2026-07-28` protocol
 conformance) and, on startup, calls `discover_and_register_tools()`
-(`mcp/tools/__init__.py`), which imports every non-underscore-prefixed
-module under `mcp/tools/` — so registering a new tool is just adding a file
-there, decorated with `@mcp_server.tool(...)`. That server is exposed as its
+(`mcp/tools/__init__.py`), which imports each module named in that package's
+explicit `TOOL_MODULES` tuple — so registering a new tool means adding the file,
+decorating it with `@mcp_server.tool(...)`, **and adding its name to
+`TOOL_MODULES`**. It used to be a filesystem glob, which registered nothing at
+all in a frozen or compiled build: no `.py` files on disk meant zero tools
+advertised, with no error (TODO.md item 214).
+`tests/unit/test_mcp_tool_registration.py` fails if the tuple and the directory
+disagree in either direction. That server is exposed as its
 own ASGI app (`streamable_http_app()`), wrapped in `MCPAuthMiddleware`, and
 mounted into the main FastAPI app at `cfg.mcp_mount_path` (default `/mcp`)
 by `setup_mcp()`.

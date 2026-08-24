@@ -308,7 +308,7 @@ REST surface (mirrors the write triad in `api/routes.py`):
 - `POST /{connection}/procedures/approve` — only if §7 decision 2 lands on
   reusing the write path's approval-token gate; mirrors `write/approve`.
 
-MCP surface (new file, auto-registers via `discover_and_register_tools()`
+MCP surface (new file, registers via `discover_and_register_tools()` once added to `TOOL_MODULES`
 with zero additional wiring — `mcp/tools/procedures.py`):
 `list_procedures`, `describe_procedure` (mirrors `list_tables`/
 `describe_table`), `call_stored_procedure` (mirrors `run_structured_writes`'s

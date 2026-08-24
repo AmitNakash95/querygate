@@ -19,7 +19,7 @@ dynamic = ["dependencies"]
 # licensed under terms that are not in force — a false statement, and exactly
 # the kind an automated tool propagates without a human ever re-reading
 # LICENSE. Both are added in the same change that removes the draft banner
-# from LICENSE; `make change-date-check-release` is the gate that refuses a
+# from LICENSE; `make eula-check-release` is the gate that refuses a
 # release while the banner is still there.
 license-files = ["LICENSE"]
 classifiers = [

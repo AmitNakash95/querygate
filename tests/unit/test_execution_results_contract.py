@@ -66,29 +66,49 @@ def test_service_reexports_the_same_objects_not_copies():
         )
 
 
-def test_service_defines_no_pydantic_models():
+#: Both enforcement funnels. Item 211's gate lands on each, so each must stay
+#: compilable — covering only the read side would ship the write gate as
+#: readable bytecode while the read gate was compiled.
+@pytest.mark.parametrize("module_name", ["service", "write_execution"])
+def test_neither_enforcement_funnel_defines_pydantic_models(module_name):
     """The property the extraction existed to create.
 
-    A module defining `BaseModel` subclasses cannot be Cython-compiled, and
-    `service.py` holds `_validate_and_compile` — the single read enforcement
-    funnel and the future home of item 211's subscription gate. If a model is
-    ever added back here, compilation breaks and this says so.
+    A module defining `BaseModel` subclasses cannot be Cython-compiled.
+    `service.py` holds `_validate_and_compile` (reads) and `write_execution.py`
+    holds the three write entry points. If a model is added back to either,
+    compilation breaks — and this says so at the cause rather than at build time.
     """
+    import importlib
     import inspect
 
     import pydantic as pyd
 
+    module = importlib.import_module(f"querygate.execution.{module_name}")
     defined_here = [
         name
-        for name, obj in vars(service).items()
+        for name, obj in vars(module).items()
         if inspect.isclass(obj)
         and issubclass(obj, pyd.BaseModel)
-        and obj.__module__ == service.__name__
+        and obj.__module__ == module.__name__
     ]
     assert not defined_here, (
-        "execution/service.py defines pydantic models again, which makes it "
+        f"execution/{module_name}.py defines pydantic models again, which makes it "
         f"un-compilable: {defined_here}. Put them in execution/results.py."
     )
+
+
+def test_the_write_models_moved_and_kept_their_stricter_config():
+    """`WriteResult` forbids extra fields and the read models do not.
+
+    That asymmetry is deliberate — a committed write's result must not grow an
+    unvalidated field — so the move must preserve it rather than harmonise it.
+    """
+    from querygate.execution import write_execution
+
+    assert write_execution.WriteResult is results.WriteResult
+    assert write_execution.WriteBatchItemResult is results.WriteBatchItemResult
+    assert results.WriteResult.model_config.get("extra") == "forbid"
+    assert results.BatchQueryItemResult.model_config.get("extra") != "forbid"
 
 
 def _openapi_schemas() -> dict:

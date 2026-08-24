@@ -70,31 +70,14 @@ if TYPE_CHECKING:
     from querygate.execution.service import ApprovalResolver
 
 
-class WriteResult(pyd.BaseModel):
-    """Redaction-safe result of a committed governed write. No row/predicate
-    values — the op, target table, and how many rows were affected."""
-
-    operation: str
-    table: str
-    affected_rows: int
-    executed: bool = True
-
-    model_config = pyd.ConfigDict(extra="forbid")
-
-
-class WriteBatchItemResult(pyd.BaseModel):
-    """One write's outcome in a batch — a committed `WriteResult`'s fields, or an
-    `error` (a failing write never drops the rest of the batch)."""
-
-    operation: Optional[str] = None
-    table: Optional[str] = None
-    affected_rows: Optional[int] = None
-    executed: bool = False
-    error: Optional[str] = None
-    # Sibling of BatchQueryItemResult's identical fields (TODO.md item 128) —
-    # populated only when `error` is specifically an ApprovalRequiredError.
-    approval_fingerprint: Optional[str] = None
-    approval_reasons: Optional[List[str]] = None
+# Response models live in `results.py` so this module defines no
+# `pydantic.BaseModel` subclass and can therefore be Cython-compiled — this is
+# item 211's write-side gate site. Re-exported so existing
+# `from querygate.execution.write_execution import WriteResult` imports keep working.
+from querygate.execution.results import (  # noqa: E402
+    WriteBatchItemResult,
+    WriteResult,
+)
 
 
 def _write_shape(statement: WriteStatement, table_name: str) -> dict:

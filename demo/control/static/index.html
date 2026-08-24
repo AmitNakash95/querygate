@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QueryGate — Live Demo</title>
+<meta name="robots" content="noindex,nofollow">
+<meta name="theme-color" content="#101216" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f5f6f8" media="(prefers-color-scheme: light)">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23101216'/%3E%3Ctext x='32' y='42' font-size='28' text-anchor='middle' font-family='Georgia,serif'%3E%3Ctspan fill='%23ffffff'%3EQG%3C/tspan%3E%3Ctspan fill='%23ff9a5c'%3E%3B%3C/tspan%3E%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body data-gate="off" data-mock="0">
+
+<a class="skip-link" href="#main-stage">Skip to main content</a>
+
+<div id="mock-banner" class="mock-banner" hidden>
+  <strong>MOCK MODE</strong>
+  <span>Fixture data only — nothing here touched a real server. Remove <code>?mock=1</code> to go live.</span>
+</div>
+
+<div id="live-announcer" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <svg class="brand-mark" viewBox="0 24 520 116" role="img" aria-label="QueryGate">
+      <text x="6" y="106" font-family="Georgia, 'Times New Roman', serif" font-weight="400">
+        <tspan font-size="90" fill="currentColor">QueryGate</tspan><tspan font-size="106" dy="6" fill="#ff9a5c">;</tspan>
+      </text>
+    </svg>
+    <span class="brand-tag">Live partner demo</span>
+  </div>
+
+  <div class="health-strip" id="health-strip" role="group" aria-label="Backend service health">
+    <button class="health-chip" data-service="db" type="button">
+      <i class="health-dot" aria-hidden="true"></i><span>Database</span>
+    </button>
+    <button class="health-chip" data-service="baseline_mcp" type="button">
+      <i class="health-dot" aria-hidden="true"></i><span>Baseline MCP</span>
+    </button>
+    <button class="health-chip" data-service="querygate" type="button">
+      <i class="health-dot" aria-hidden="true"></i><span>QueryGate</span>
+    </button>
+  </div>
+
+  <div class="topbar-actions">
+    <button id="help-btn" class="icon-button" type="button" aria-haspopup="dialog" aria-controls="help-dialog">
+      Keys <kbd>?</kbd>
+    </button>
+    <button id="reset-btn" class="button secondary" type="button" aria-disabled="false">Reset demo</button>
+  </div>
+</header>
+
+<div id="error-banner" class="error-banner" role="alert" hidden></div>
+
+<main id="main-stage">
+<section class="gate-hero" aria-labelledby="gate-headline">
+  <div class="gate-hero-inner">
+    <div class="gate-copy">
+      <p class="eyebrow" id="mood-eyebrow">ACT 1 — GATE OFF</p>
+      <h1 id="gate-headline">Anything the agent asks for, the database hands over.</h1>
+      <p class="gate-sub" id="gate-sub">Identical database privileges. Opposite outcomes. Flip it.</p>
+    </div>
+
+    <button id="gate-toggle" class="gate-switch" type="button" role="switch" aria-checked="false" aria-disabled="false" aria-label="QueryGate protection is off. Activate to turn it on.">
+      <span class="gate-switch-face off-face" aria-hidden="true">
+        <span class="gate-switch-word">QUERYGATE</span>
+        <span class="gate-switch-state">OFF</span>
+      </span>
+      <span class="gate-switch-face on-face" aria-hidden="true">
+        <span class="gate-switch-word">QUERYGATE</span>
+        <span class="gate-switch-state">ON</span>
+      </span>
+    </button>
+  </div>
+
+  <div class="probe-strip">
+    <div class="probe-readout">
+      <span class="probe-label">Live database response time</span>
+      <strong id="probe-value">— ms</strong>
+      <span id="probe-status" class="probe-status">connecting…</span>
+    </div>
+    <svg class="probe-spark" viewBox="0 0 600 64" preserveAspectRatio="none" role="img" aria-label="Database response time over the last minute, live">
+      <line x1="0" y1="48" x2="600" y2="48" class="probe-baseline" aria-hidden="true"></line>
+      <path id="probe-path" class="probe-line"></path>
+    </svg>
+  </div>
+</section>
+
+<div class="stage">
+  <section class="scenario-rail" aria-labelledby="scenario-heading">
+    <h2 id="scenario-heading">Scenarios</h2>
+    <p class="rail-hint">Press <kbd>1</kbd>–<kbd>6</kbd> to run one. <kbd>G</kbd> flips the gate.</p>
+    <ol id="scenario-list" class="scenario-list" aria-label="Demo scenarios"></ol>
+  </section>
+
+  <section class="result-stage" aria-labelledby="result-heading">
+    <h2 id="result-heading" class="sr-only">Result</h2>
+
+    <div id="result-empty" class="result-empty">
+      <p>Pick a scenario on the left — or press <kbd>1</kbd> through <kbd>6</kbd>.</p>
+    </div>
+
+    <article id="result-panel" class="result-panel" hidden>
+      <header class="result-head">
+        <div>
+          <p class="eyebrow" id="result-act"></p>
+          <h3 id="result-title"></h3>
+        </div>
+        <div id="outcome-badge" class="outcome-badge"></div>
+      </header>
+
+      <p id="result-note" class="result-note"></p>
+
+      <div class="db-indicator" id="db-indicator">
+        <div class="db-indicator-label">
+          <span>Your database</span>
+          <span id="db-verdict-tag" class="db-verdict-tag"></span>
+        </div>
+        <div class="db-indicator-flow">
+          <div class="db-indicator-count">
+            <span>calls before</span>
+            <strong id="db-before">—</strong>
+          </div>
+          <span class="db-indicator-arrow" aria-hidden="true">→</span>
+          <div class="db-indicator-count">
+            <span>calls after</span>
+            <strong id="db-after">—</strong>
+          </div>
+        </div>
+        <p id="db-verdict-text" class="db-verdict-text"></p>
+      </div>
+
+      <div class="result-metrics">
+        <div class="metric">
+          <span>Latency</span>
+          <strong id="metric-latency">—</strong>
+        </div>
+        <div class="metric">
+          <span>Rows returned</span>
+          <strong id="metric-rows">—</strong>
+        </div>
+        <div class="metric" id="blocked-by-metric" hidden>
+          <span>Blocked by</span>
+          <strong id="metric-blocked-by">—</strong>
+        </div>
+      </div>
+
+      <div id="rows-preview-wrap" class="rows-preview-wrap" hidden>
+        <h4>First rows returned <span id="rows-preview-count"></span></h4>
+        <div class="table-scroll" tabindex="0" aria-label="Result rows, scrollable"><table id="rows-table" class="rows-table"></table></div>
+      </div>
+
+      <section id="audit-panel" class="audit-panel" aria-labelledby="audit-heading">
+        <div class="audit-head">
+          <h4 id="audit-heading">Audit ledger</h4>
+          <span id="audit-chain-badge" class="audit-chain-badge">
+            <i class="audit-chain-dot" aria-hidden="true"></i><span id="audit-chain-badge-text"></span>
+          </span>
+        </div>
+
+        <p id="audit-chain-broken" class="audit-chain-broken" role="alert" hidden></p>
+
+        <div id="audit-empty" class="audit-empty" hidden>
+          <p id="audit-empty-headline" class="audit-empty-headline"></p>
+          <p id="audit-empty-reason" class="audit-empty-reason"></p>
+        </div>
+
+        <div id="audit-content" class="audit-content" hidden>
+          <div class="audit-chain-strip" aria-label="Position in the hash chain">
+            <div class="audit-chain-link">
+              <span>seq</span>
+              <strong id="audit-seq">—</strong>
+            </div>
+            <span class="audit-chain-arrow" aria-hidden="true">→</span>
+            <div class="audit-chain-link">
+              <span>prev_hash</span>
+              <code id="audit-prev-hash">—</code>
+            </div>
+            <span class="audit-chain-arrow" aria-hidden="true">→</span>
+            <div class="audit-chain-link audit-chain-link-hash">
+              <span>hash</span>
+              <code id="audit-hash">—</code>
+            </div>
+          </div>
+
+          <div class="audit-fields">
+            <div class="audit-field">
+              <span>Who</span>
+              <strong id="audit-who">—</strong>
+            </div>
+            <div class="audit-field">
+              <span>What</span>
+              <strong id="audit-what">—</strong>
+            </div>
+            <div class="audit-field">
+              <span>Verdict</span>
+              <strong id="audit-verdict" class="audit-verdict">—</strong>
+            </div>
+          </div>
+
+          <p id="audit-count-note" class="audit-count-note"></p>
+
+          <details id="audit-raw-drawer" class="payload-drawer">
+            <summary>View the full raw ledger record</summary>
+            <pre id="audit-raw" class="code-block payload-json" tabindex="0" aria-label="Raw audit ledger record JSON, scrollable"></pre>
+          </details>
+
+          <p class="audit-not-here"><strong>Not in this record:</strong> no SQL text, no predicate values, no rows, no credentials.</p>
+        </div>
+      </section>
+
+      <details id="payload-drawer" class="payload-drawer">
+        <summary>Is this real? View the literal MCP <code>tools/call</code> request &amp; response</summary>
+        <div class="payload-grid">
+          <div>
+            <h4>Request sent</h4>
+            <pre id="payload-request" class="code-block payload-json" tabindex="0" aria-label="MCP request JSON, scrollable"></pre>
+          </div>
+          <div>
+            <h4>Response received</h4>
+            <pre id="payload-response" class="code-block payload-json" tabindex="0" aria-label="MCP response JSON, scrollable"></pre>
+          </div>
+        </div>
+        <p class="payload-endpoint" id="payload-endpoint"></p>
+      </details>
+    </article>
+  </section>
+</div>
+
+<section class="config-stage" aria-labelledby="config-heading">
+  <div class="config-intro">
+    <p class="eyebrow">ACT 2 — THE CONFIG</p>
+    <h2 id="config-heading">The whole rulebook. Plain YAML.</h2>
+    <p>No code changes stop the agent below — this file does.</p>
+  </div>
+
+  <div class="config-panel">
+    <div class="document-tabs" role="tablist" aria-label="Config files">
+      <button class="document-tab active" role="tab" aria-selected="true" id="tab-policy" aria-controls="config-code" data-doc="policy" type="button">policy.demo.yaml</button>
+      <button class="document-tab" role="tab" aria-selected="false" id="tab-connections" aria-controls="config-code" data-doc="connections" type="button">connections.demo.yaml</button>
+    </div>
+    <div id="config-code" class="config-code" tabindex="0" role="tabpanel" aria-labelledby="tab-policy"></div>
+  </div>
+</section>
+</main>
+
+<dialog id="help-dialog" aria-labelledby="help-title">
+  <form method="dialog">
+    <h2 id="help-title">Keyboard shortcuts</h2>
+    <dl class="key-list">
+      <div><dt><kbd>1</kbd>–<kbd>6</kbd></dt><dd>Run scenario 1 through 6</dd></div>
+      <div><dt><kbd>G</kbd></dt><dd>Flip the QueryGate switch</dd></div>
+      <div><dt><kbd>R</kbd></dt><dd>Reset the demo</dd></div>
+      <div><dt><kbd>Esc</kbd></dt><dd>Close this dialog</dd></div>
+      <div><dt><kbd>?</kbd></dt><dd>Open this dialog</dd></div>
+    </dl>
+    <div class="dialog-actions">
+      <button class="button primary" value="close" type="submit">Close</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="mock-data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
