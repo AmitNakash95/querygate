@@ -29,6 +29,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 EULA_FILES = ("docs/legal/EULA.en.md", "docs/legal/EULA.he.md")
 
+#: `LICENSE` ships inside the wheel, the sdist and the image — enforced by
+#: `scripts/check_release_artifacts.py`. It is therefore part of what a release
+#: publishes, and it currently carries a draft banner saying it grants nothing.
+#:
+#: The deleted BSL Change-Date gate refused a release while that banner was
+#: present. Nothing else did, so dropping it left a hole: a tag pushed today
+#: would publish a signed image whose licence reads "NOT YET IN FORCE". Covered
+#: here rather than left to be rediscovered.
+LICENCE_FILE = "LICENSE"
+_DRAFT_BANNER = "DRAFT — FOR LAWYER REVIEW"
+#: `LICENSE` uses angle-bracket placeholders (`<LICENSOR — legal entity, to be
+#: supplied>`), not the EULA's square brackets, so it needs its own pattern.
+_ANGLE_PLACEHOLDER_RE = re.compile(r"<[A-Z_]{3,}[^<>\n]{0,120}>")
+
 # Any `[...]` span that is NOT a markdown link. Three exclusions, all needed:
 #   (?<!\])  — the *label* half of a reference link, `[text][ref]`; without this
 #              `[ref]` reads as a placeholder because nothing follows it.
@@ -64,6 +78,33 @@ def check(*, release: bool, texts: dict[str, str] | None = None) -> list[str]:
                 f"{name} still carries {len(found)} unfilled placeholder(s) in release mode: "
                 f"{shown}{more}. The licence of record cannot ship with blanks."
             )
+
+    # `LICENSE` is only checked against the real file — it has no test seam,
+    # because a caller-supplied `texts` must never be able to skip it.
+    if release and texts is None:
+        problems.extend(check_licence_file((ROOT / LICENCE_FILE).read_text("utf-8")))
+    return problems
+
+
+def check_licence_file(text: str) -> list[str]:
+    """Problems with `LICENSE` that must stop a release.
+
+    Split out so it is directly testable without a `texts` seam on `check()`.
+    """
+    problems: list[str] = []
+    if _DRAFT_BANNER in text:
+        problems.append(
+            f"{LICENCE_FILE} still carries the draft banner ({_DRAFT_BANNER!r}), which says "
+            "the file grants nothing and is not in force. It ships inside the wheel, the "
+            "sdist and the image, so a release would publish a product with no licence."
+        )
+    angle = _ANGLE_PLACEHOLDER_RE.findall(text)
+    if angle:
+        shown = ", ".join(repr(a) for a in angle[:4])
+        more = f" (+{len(angle) - 4} more)" if len(angle) > 4 else ""
+        problems.append(
+            f"{LICENCE_FILE} still carries {len(angle)} unfilled placeholder(s): {shown}{more}."
+        )
     return problems
 
 
