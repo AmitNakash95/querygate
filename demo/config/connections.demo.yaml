@@ -1,0 +1,26 @@
+# Partner-demo connection profile (demo/SPEC.md).
+#
+# One connection, `demo`, over the pitch database (querygate_demo_pitch on
+# 127.0.0.1:5544) via the agent_ro role — the SAME role and the SAME database
+# the deliberately-naive baseline MCP server (demo/baseline_mcp/) connects as.
+# Identical database privileges; the only difference is this file plus
+# policy.demo.yaml sitting in front of the connection.
+#
+# The connection string is never inlined — ${PITCH_AGENT_RO_DSN} is resolved
+# from the environment at load time (see env.demo), so this file is safe to
+# commit.
+#
+# `known_tables` intentionally includes `employees`: the connection can see
+# it (agent_ro has SELECT on every table, employees included) exactly the
+# same as the baseline server can. What withholds it from an agent talking to
+# QueryGate is policy.demo.yaml's `allowed_tables`, not a lack of visibility
+# here. That distinction is the whole demo, so don't "fix" it by dropping
+# employees from this list.
+
+connections:
+  - id: demo
+    dialect: postgresql
+    connection_string: ${PITCH_AGENT_RO_DSN}
+    description: "Partner-demo pitch database — customers/orders/order_items/products/employees"
+    enabled: true
+    known_tables: [customers, orders, order_items, products, employees]

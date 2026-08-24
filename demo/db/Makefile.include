@@ -1,0 +1,96 @@
+# Make targets for the QueryGate partner-demo pitch database
+# (demo/db/docker-compose.demo.yml, port 127.0.0.1:5544).
+#
+# Meant to be included from the repo root Makefile:
+#   include demo/db/Makefile.include
+#
+# Self-contained: every recipe here uses paths relative to the repo root
+# (where `make` is invoked from), not to this file's own directory, and does
+# not depend on any other target already defined in the root Makefile.
+
+PITCH_DB_COMPOSE := demo/db/docker-compose.demo.yml
+PITCH_DB_PYTHON  := $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo "poetry run python")
+
+.PHONY: pitch-db-up
+pitch-db-up: ## Start the dedicated pitch-demo Postgres (127.0.0.1:5544, querygate_demo_pitch) and wait for it to be healthy
+	docker compose -f $(PITCH_DB_COMPOSE) up -d
+	@echo "Waiting for querygate-pitch-db to become healthy..."
+	@until [ "$$(docker inspect -f '{{.State.Health.Status}}' querygate-pitch-db 2>/dev/null)" = "healthy" ]; do \
+		sleep 1; \
+	done
+	@echo "querygate-pitch-db is healthy on 127.0.0.1:5544"
+
+.PHONY: pitch-db-seed
+pitch-db-seed: ## Seed the pitch-demo database (deterministic, idempotent; truncates + reseeds)
+	$(PITCH_DB_PYTHON) demo/db/seed.py
+
+.PHONY: pitch-db-down
+pitch-db-down: ## Stop the pitch-demo Postgres (keeps the named volume, so data survives)
+	docker compose -f $(PITCH_DB_COMPOSE) down
+
+.PHONY: pitch-db-reset
+pitch-db-reset: ## Tear down the pitch-demo Postgres AND its volume, then bring it back up and reseed from scratch
+	docker compose -f $(PITCH_DB_COMPOSE) down -v
+	$(MAKE) pitch-db-up
+	$(MAKE) pitch-db-seed
+
+.PHONY: pitch-db-psql
+pitch-db-psql: ## Open a psql shell as pitch_owner (the OWNER — writes succeed; not the demo's read-only role)
+	docker compose -f $(PITCH_DB_COMPOSE) exec querygate-pitch-db psql -U pitch_owner -d querygate_demo_pitch
+
+.PHONY: pitch-prove-readonly
+pitch-prove-readonly: ## Prove on stage that agent_ro really is read-only (runs the four writes and shows them all fail)
+	@echo "Connecting as agent_ro — the SAME role both MCP servers use."
+	@echo
+	@docker compose -f $(PITCH_DB_COMPOSE) exec -e PGPASSWORD=agent_ro_demo_pw_only -T querygate-pitch-db \
+		psql -U agent_ro -h 127.0.0.1 -d querygate_demo_pitch -v ON_ERROR_STOP=0 -c \
+		"SELECT count(*) AS \"rows agent_ro CAN read\" FROM customers;" 2>&1
+	@for stmt in \
+		"INSERT INTO products (name,category,price,in_stock,created_at) VALUES ('x','y',1,true,now())" \
+		"UPDATE products SET price = 0" \
+		"DELETE FROM products" \
+		"CREATE TABLE exfil (id int)"; do \
+		printf '  %-72s ' "$$stmt"; \
+		docker compose -f $(PITCH_DB_COMPOSE) exec -e PGPASSWORD=agent_ro_demo_pw_only -T querygate-pitch-db \
+			psql -U agent_ro -h 127.0.0.1 -d querygate_demo_pitch -q -c "$$stmt" 2>&1 \
+			| head -1 | sed 's/^ERROR:  /REFUSED: /'; \
+	done
+	@echo
+	@echo "Layer 2 — even with the session read-only flag deliberately turned OFF,"
+	@echo "the GRANTs still refuse. Read-only here is a privilege, not a setting:"
+	@echo
+	@$(PITCH_DB_PYTHON) -c "$$PITCH_GRANT_PROOF"
+	@echo
+	@echo "Read-only holds at both layers. This role's privileges are identical"
+	@echo "in both halves of the demo."
+
+# Layer 2 of the proof. `ALTER ROLE ... SET default_transaction_read_only = on`
+# is only a session DEFAULT — anyone holding the connection string can turn it
+# off with `?options=-c default_transaction_read_only=off`, and we demonstrate
+# that here rather than hoping nobody in the room knows it. What actually holds
+# is the GRANT: agent_ro was never given INSERT/UPDATE/DELETE on anything, so
+# the writes still fail with "permission denied" once the flag is gone.
+define PITCH_GRANT_PROOF
+import asyncio, asyncpg
+DSN = ("postgresql://agent_ro:agent_ro_demo_pw_only@127.0.0.1:5544/querygate_demo_pitch"
+       "?options=-c%20default_transaction_read_only%3Doff")
+async def main():
+    c = await asyncio.wait_for(asyncpg.connect(DSN), 10)
+    print("    session default_transaction_read_only is now:",
+          await c.fetchval("SHOW default_transaction_read_only"))
+    for label, stmt in [
+        ("INSERT INTO products", "INSERT INTO products (name,category,price,in_stock,created_at)"
+                                 " VALUES ('probe','probe',1,true,now())"),
+        ("UPDATE products", "UPDATE products SET price = 0"),
+        ("DELETE FROM products", "DELETE FROM products"),
+    ]:
+        try:
+            await c.execute(stmt)
+            print(f"    {label:<24} SUCCEEDED  <-- this should never print")
+        except Exception as exc:
+            print(f"    {label:<24} REFUSED: {str(exc)[:52]}")
+    await c.close()
+asyncio.run(main())
+endef
+export PITCH_GRANT_PROOF
+

@@ -1,0 +1,145 @@
+# ─── Partner demo orchestration ───────────────────────────────────────────────
+#
+# One-command control of the whole pitch stack. See demo/RUNBOOK.md.
+#
+#   make pitch-up        bring everything up and wait until it is actually ready
+#   make pitch-status    is each piece alive?
+#   make pitch-kill      PANIC BUTTON — free the database immediately
+#   make pitch-down      stop the three app processes (database keeps running)
+#   make pitch-stop      stop everything including the database
+#
+# Included from the repo root Makefile. demo/db/Makefile.include owns the
+# database targets (pitch-db-*); this file owns the processes on top of it.
+
+PITCH_RUN   := demo/.run
+PITCH_PY    := $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo "poetry run python")
+PITCH_OWNER_DSN := postgresql://pitch_owner:pitch_owner_demo_pw_only@127.0.0.1:5544/querygate_demo_pitch
+
+.PHONY: pitch-up
+pitch-up: ## Bring the ENTIRE partner demo up (db + baseline MCP + QueryGate + control UI) and verify it is ready
+	@mkdir -p $(PITCH_RUN)
+	@$(MAKE) --no-print-directory pitch-db-up
+	@echo "→ checking the demo data is seeded…"
+	@rows=$$(docker exec querygate-pitch-db psql -U pitch_owner -d querygate_demo_pitch -tAc \
+		"select count(*) from customers" 2>/dev/null || echo 0); \
+	if [ "$$rows" -lt 250000 ]; then \
+		echo "  only $$rows customers — seeding (takes ~15s)…"; \
+		$(MAKE) --no-print-directory pitch-db-seed; \
+	else echo "  $$rows customers already seeded"; fi
+	@$(MAKE) --no-print-directory pitch-start-procs
+	@$(MAKE) --no-print-directory pitch-wait
+	@echo ""
+	@echo "  ╭──────────────────────────────────────────────────────────╮"
+	@echo "  │  DEMO READY                                              │"
+	@echo "  │                                                          │"
+	@echo "  │  Control UI    http://127.0.0.1:8900                     │"
+	@echo "  │  QueryGate     http://127.0.0.1:8010   (admin at /admin) │"
+	@echo "  │  Baseline MCP  http://127.0.0.1:8811/mcp                 │"
+	@echo "  │  Database      127.0.0.1:5544                            │"
+	@echo "  │                                                          │"
+	@echo "  │  Talk track:   demo/RUNBOOK.md                           │"
+	@echo "  │  Panic button: make pitch-kill                           │"
+	@echo "  ╰──────────────────────────────────────────────────────────╯"
+
+.PHONY: pitch-start-procs
+# nohup, so closing the terminal you launched from does not SIGHUP the demo
+# out from under you mid-meeting. The three services are otherwise ordinary
+# background children of this recipe's shell.
+pitch-start-procs:
+	@mkdir -p $(PITCH_RUN)
+	@echo "→ starting baseline (unsafe) MCP server on :8811…"
+	@if lsof -ti tcp:8811 >/dev/null 2>&1; then echo "  already running"; else \
+		( nohup demo/baseline_mcp/run.sh > $(PITCH_RUN)/baseline.log 2>&1 & echo $$! > $(PITCH_RUN)/baseline.pid ); fi
+	@echo "→ starting QueryGate on :8010…"
+	@if lsof -ti tcp:8010 >/dev/null 2>&1; then echo "  already running"; else \
+		( nohup demo/config/run_querygate.sh > $(PITCH_RUN)/querygate.log 2>&1 & echo $$! > $(PITCH_RUN)/querygate.pid ); fi
+	@echo "→ starting control UI on :8900…"
+	@if lsof -ti tcp:8900 >/dev/null 2>&1; then echo "  already running"; else \
+		( nohup demo/control/run.sh > $(PITCH_RUN)/control.log 2>&1 & echo $$! > $(PITCH_RUN)/control.pid ); fi
+
+.PHONY: pitch-wait
+pitch-wait:
+	@echo "→ waiting for all three to answer…"
+	@for i in $$(seq 1 60); do \
+		a=$$(curl -sf -o /dev/null -w '%{http_code}' http://127.0.0.1:8010/health 2>/dev/null || echo 000); \
+		b=$$(curl -sf -o /dev/null -w '%{http_code}' http://127.0.0.1:8900/api/health 2>/dev/null || echo 000); \
+		c=$$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8811/mcp \
+		     -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+		     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' 2>/dev/null || echo 000); \
+		if [ "$$a" = "200" ] && [ "$$b" = "200" ] && [ "$$c" != "000" ]; then echo "  all up after $${i}s"; exit 0; fi; \
+		sleep 1; \
+	done; \
+	echo "  TIMED OUT — run 'make pitch-status', then check demo/.run/*.log"; exit 1
+
+.PHONY: pitch-status
+pitch-status: ## Show whether each part of the demo stack is alive
+	@printf "  %-16s " "database:"; \
+	  docker inspect -f '{{.State.Health.Status}}' querygate-pitch-db 2>/dev/null || echo "not running"
+	@printf "  %-16s " "QueryGate:"; \
+	  curl -sf http://127.0.0.1:8010/health >/dev/null 2>&1 && echo "up (:8010)" || echo "DOWN"
+	@printf "  %-16s " "baseline MCP:"; \
+	  lsof -ti tcp:8811 >/dev/null 2>&1 && echo "up (:8811)" || echo "DOWN"
+	@printf "  %-16s " "control UI:"; \
+	  curl -sf http://127.0.0.1:8900/api/health >/dev/null 2>&1 && echo "up (:8900)" || echo "DOWN"
+	@printf "  %-16s " "agent backends:"; \
+	  docker exec querygate-pitch-db psql -U pitch_owner -d querygate_demo_pitch -tAc \
+	    "select count(*) from pg_stat_activity where usename='agent_ro' and state='active'" 2>/dev/null \
+	    | tr -d ' ' || echo "?"
+
+.PHONY: pitch-kill
+pitch-kill: ## PANIC BUTTON — terminate every running agent query and free the database instantly
+	@n=$$(docker exec querygate-pitch-db psql -U pitch_owner -d querygate_demo_pitch -tAc \
+	  "select count(*) from pg_terminate_backend((select pid from pg_stat_activity where usename='agent_ro' and state='active' limit 1))" 2>/dev/null; \
+	  docker exec querygate-pitch-db psql -U pitch_owner -d querygate_demo_pitch -tAc \
+	  "select count(*) from (select pg_terminate_backend(pid) from pg_stat_activity where usename='agent_ro' and state<>'idle') t" 2>/dev/null | tr -d ' '); \
+	  echo "  terminated agent backends; database is free"
+	@$(MAKE) --no-print-directory pitch-status
+
+.PHONY: pitch-down
+pitch-down: ## Stop the three demo processes (leaves the database running)
+	@for p in baseline querygate control; do \
+		if [ -f $(PITCH_RUN)/$$p.pid ]; then kill $$(cat $(PITCH_RUN)/$$p.pid) 2>/dev/null || true; rm -f $(PITCH_RUN)/$$p.pid; fi; \
+	done
+	@for port in 8811 8010 8900 8901; do \
+		pids=$$(lsof -ti tcp:$$port 2>/dev/null || true); \
+		if [ -n "$$pids" ]; then kill $$pids 2>/dev/null || true; fi; \
+	done
+	@echo "  demo processes stopped, deck included (database still up on :5544)"
+
+.PHONY: pitch-stop
+pitch-stop: ## Stop EVERYTHING including the demo database
+	@$(MAKE) --no-print-directory pitch-down
+	@$(MAKE) --no-print-directory pitch-db-down
+
+.PHONY: pitch-logs
+pitch-logs: ## Tail all three demo process logs
+	@tail -n 40 -f $(PITCH_RUN)/*.log
+
+.PHONY: pitch-top
+pitch-top: ## Watch what the agent is currently doing to the database
+	@watch -n 1 "docker exec querygate-pitch-db psql -U pitch_owner -d querygate_demo_pitch -c \
+	  \"select pid, usename, state, round(extract(epoch from now()-query_start)) as secs, left(query,60) as query \
+	    from pg_stat_activity where usename in ('agent_ro','probe_user') and state <> 'idle' order by query_start\""
+
+.PHONY: pitch-selfcheck
+pitch-selfcheck: ## PRE-FLIGHT — assert the demo's actual claims against the live stack (run this before the meeting)
+	@$(PITCH_PY) demo/selfcheck.py
+
+.PHONY: pitch-deck
+pitch-deck: ## Serve the demo deck on :8901 with the live demo wired in (run pitch-up first)
+	@echo "  demo deck → http://127.0.0.1:8901   (talk track: press n)"
+	@$(PITCH_PY) demo/deck/serve.py
+
+.PHONY: pitch-deck-check
+pitch-deck-check: ## Assert the deck's own claims + the deck server's boundary (run before the meeting)
+	@$(PITCH_PY) -m pytest demo/deck/test_serve.py -q
+
+.PHONY: pitch-deck-down
+pitch-deck-down: ## Stop the demo deck server
+	@pids=$$(lsof -ti tcp:8901 2>/dev/null || true); \
+	  if [ -n "$$pids" ]; then kill $$pids 2>/dev/null || true; echo "  deck server stopped"; \
+	  else echo "  deck server was not running"; fi
+
+.PHONY: pitch-prove-audit
+pitch-prove-audit: ## ACT 4 — prove the audit ledger is tamper-evident, live (edit/delete/truncate all caught)
+	@$(PITCH_PY) demo/prove_audit.py

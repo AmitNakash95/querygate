@@ -37,7 +37,7 @@ rather than believed.
 
 | Document | What it is |
 |---|---|
-| [`RELEASING.md`](RELEASING.md) | The reproducible release process: gates, SBOM, dependency audit, container signing and provenance, and BSL Change-Date stamping. |
+| [`RELEASING.md`](RELEASING.md) | The reproducible release process: gates, SBOM, dependency audit, container signing and provenance, and the EULA placeholder gate. |
 | [`LOAD_TESTING.md`](LOAD_TESTING.md) | The real-Postgres load and soak harness for the concurrency and timeout guardrails. |
 | [`THIRD_PARTY_LICENCES.md`](THIRD_PARTY_LICENSES.md) | Generated inventory of every locked Python package's licence. `make license-check` gates it deny-by-default. |
 | [`CONTAINER_IMAGE_LICENCES.md`](CONTAINER_IMAGE_LICENCES.md) | The non-Python half of the shipped image (OS packages, the ODBC driver) that the Python inventory does not cover. |

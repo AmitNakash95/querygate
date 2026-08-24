@@ -1,4 +1,4 @@
-"""Response and catalog-info models returned by `StructuredQueryService`.
+"""Response models returned by the read and write enforcement services.
 
 **Why these live here and not in `service.py`.** Item 214's compiler spike
 measured that a module defining `pydantic.BaseModel` subclasses cannot be
@@ -23,8 +23,14 @@ five trivial optional fields, so the exposure is negligible, but the claim is
 "ten of twelve", not "all". `tests/unit/test_execution_results_contract.py`
 pins the split.
 
-`service.py` re-exports each name, so existing `from ...service import
-StructuredQueryResult` imports keep working unchanged.
+Both funnels are covered here, not just the read side: `write_execution.py` is
+item 211's *other* gate site, and leaving its two models behind would have
+shipped the write subscription gate as readable bytecode while the read gate was
+compiled — the stated motive half-achieved in the place it matters most.
+
+`service.py` and `write_execution.py` each re-export their own names, so existing
+`from ...service import StructuredQueryResult` and `from ...write_execution
+import WriteResult` imports keep working unchanged.
 """
 
 from __future__ import annotations
@@ -163,3 +169,37 @@ class BatchExplainItemResult(pyd.BaseModel):
     tables: Optional[List[str]] = None
     limit: Optional[int] = None
     error: Optional[str] = None
+
+
+# --- write path ---------------------------------------------------------------
+#
+# `WriteResult` sets `extra="forbid"` and the read models do not. That asymmetry
+# is deliberate and predates this move: a committed write's result must not grow
+# an unvalidated field. Kept rather than harmonised.
+
+
+class WriteResult(pyd.BaseModel):
+    """Redaction-safe result of a committed governed write. No row/predicate
+    values — the op, target table, and how many rows were affected."""
+
+    operation: str
+    table: str
+    affected_rows: int
+    executed: bool = True
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
+class WriteBatchItemResult(pyd.BaseModel):
+    """One write's outcome in a batch — a committed `WriteResult`'s fields, or an
+    `error` (a failing write never drops the rest of the batch)."""
+
+    operation: Optional[str] = None
+    table: Optional[str] = None
+    affected_rows: Optional[int] = None
+    executed: bool = False
+    error: Optional[str] = None
+    # Sibling of BatchQueryItemResult's identical fields (TODO.md item 128) —
+    # populated only when `error` is specifically an ApprovalRequiredError.
+    approval_fingerprint: Optional[str] = None
+    approval_reasons: Optional[List[str]] = None
