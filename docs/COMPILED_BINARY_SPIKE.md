@@ -7,7 +7,7 @@
 >
 > Nuitka compiles this codebase, and with one code fix and one build flag the
 > compiled binary is **indistinguishable from the interpreter on all four risk
-> areas**, down to byte-identical MCP tool schemas (§7). Getting there found a
+> areas** — same tool set, same argument-schema sizes (§7). Getting there found a
 > **real bug in QueryGate** — a filesystem scan that shipped zero MCP tools
 > silently in any frozen build (§4, now fixed and guarded).
 >
@@ -48,7 +48,7 @@ typed MCP tools have **non-empty** argument schemas rather than merely existing.
 | # | Risk area | Interpreted | Compiled | Verdict |
 |---|---|---|---|---|
 | A | **pydantic-core** — a Rust extension | validates; still rejects bad input | identical | ✅ survives |
-| B | **SQLAlchemy** — dynamic dispatch, dialect lookup, statement rendering | emits correct Postgres SQL | byte-identical | ✅ survives |
+| B | **SQLAlchemy** — dynamic dispatch, dialect lookup, statement rendering | emits correct Postgres SQL | identical SQL | ✅ survives |
 | C | **MCP SDK** — forward-reference resolution at tool registration | **15 tools**, typed schemas resolved (3/5/4 properties) | **0 tools** | ❌ **broke — see §4** |
 | D | **importlib.metadata** — console-script entry points | 12 scripts | 12 scripts | ✅ survives |
 
@@ -135,12 +135,17 @@ expects commercial users to buy a licence rather than rely on the AGPL edition.
    checking, and it must explicitly permit closed-source distribution.
 2. **Get counsel's opinion on the AGPL edition.** Cheaper if the answer is yes,
    expensive to be wrong about.
-3. **Cython** — BSD-licensed, no such question, but a much rougher fit for a
-   whole application (it targets extension modules, not app freezing).
-4. **PyInstaller** — GPLv2 *with an explicit exception* permitting proprietary
-   bundling. Freezes rather than compiles, so it is weaker obfuscation: the
-   bytecode is recoverable. Would satisfy "single binary in Docker" but not
-   "obfuscated" to the same degree.
+3. **Cython** — believed BSD-licensed, so no such question, but a much rougher
+   fit for a whole application (it targets extension modules, not app freezing).
+4. **PyInstaller** — believed GPLv2 *with an explicit exception* permitting
+   proprietary bundling. Freezes rather than compiles, so it is weaker
+   obfuscation: the bytecode is recoverable. Would satisfy "single binary in
+   Docker" but not "obfuscated" to the same degree.
+
+   ⚠️ **The licence characterisations in 3 and 4 are from memory, not verified.**
+   Nothing in this repository can confirm them and I did not check the upstream
+   projects. Confirm both before either is relied on — the whole point of §5 is
+   that a build tool's licence is not a detail.
 5. **Ship plain Python in the image** and rely on the EULA's anti-circumvention
    clause (item 210) plus the private repository. Weakest technically; zero
    licensing risk; and per `GTM_SAAS.md` §6 the contract was always the layer
@@ -177,7 +182,7 @@ Third build, with the MCP fix in place and the package included explicitly:
 | C MCP tools | 15 tools; typed schemas 3/5/4 properties | **15 tools; 3/5/4** | ✅ |
 | D console scripts | 12 | 12 | ✅ |
 
-Tool *names* identical, and **every tool's argument schema byte-identical**
+Tool *names* identical, and every tool's argument-schema **size** identical per tool
 between the two runs — which is the assertion that actually matters, because a
 tool can register with a truncated schema and still be counted. Dist 256 MB
 (up from 227 MB, as expected: the whole `querygate` package is now included
