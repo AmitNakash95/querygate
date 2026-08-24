@@ -11,10 +11,12 @@
 > **real bug in QueryGate** — a filesystem scan that shipped zero MCP tools
 > silently in any frozen build (§4, now fixed and guarded).
 >
-> The blocker is not technical. Nuitka 4.1.3 declares **AGPLv3+**, which is a
-> live question for a proprietary closed-source product and is not mine to
-> answer — see §5. The recommendation there is to price Nuitka Commercial before
-> spending counsel time on the AGPL edition.
+> Nuitka 4.1.3 declares **AGPLv3+**, a live question for a proprietary product
+> (§5). **But §9 supersedes that: use Cython + PyInstaller instead.** Both are
+> licence-clean (Apache-2.0; GPLv2 with an explicit non-free-program exception,
+> verified from package metadata), and the modules Cython *cannot* compile turn
+> out to be the ones already published as OpenAPI/MCP schemas — so nothing worth
+> protecting is lost. **No purchase and no counsel time needed.**
 >
 > Scope caveat, stated up front: this spike measured **four named risk areas on
 > macOS arm64**, not the whole application, not the test suite against a
@@ -215,3 +217,100 @@ advertises the same tool set as the interpreter", not merely "the binary runs".
 - **Next steps if Nuitka is cleared:** run the full suite against a compiled
   build; build for Linux inside the Docker image; exercise the ODBC path; then
   measure startup, size and the support-debugging story.
+
+---
+
+## 9. Cython + PyInstaller — evaluated 2026-08-24, and it changes the recommendation
+
+Proposed by the owner as a free alternative to Nuitka. Measured rather than
+reasoned about, and the conclusion is more favourable than my §5 option-list
+guessed.
+
+### 9.1 Licences — clean, and verified this time
+
+Read from the installed packages' own metadata, not from memory (§5's options 3
+and 4 were written from recall, which was the wrong standard):
+
+| Package | Declared licence |
+|---|---|
+| **Cython 3.3.0** | `Apache-2.0` — fully permissive |
+| **PyInstaller 6.22.2** | `GPLv2-or-later with a special exception which allows to use PyInstaller to build and distribute non-free programs (including commercial ones)` |
+
+PyInstaller's exception is stated in its own licence field, in those words. **So
+this combination has no licence question at all** — the blocker that stops
+Nuitka does not apply.
+
+### 9.2 Two hard failures, both measured
+
+**Pydantic models cannot be Cythonized.** Compiling `query_ast/models.py`
+succeeds, but importing it raises at class-creation time:
+
+```
+PydanticUserError: A non-annotated attribute was detected:
+  `as_expression = <cyfunction CaseSelectItem.as_expression>`
+```
+
+Cython compiles methods into `cyfunction` objects, which pydantic v2's
+`ModelMetaclass` does not recognise as functions — so every method reads as an
+un-annotated candidate *field*. This is fundamental, not a config nit.
+**48 modules define `BaseModel` subclasses**, including all five model modules
+that matter: `query_ast/models.py`, `write_ast/models.py`, `policy/models.py`,
+`connections/models.py`, `audit/events.py`.
+
+**Cython enforces annotations as runtime types.** `compiler/sqlalchemy_compiler.py`
+compiled, then failed at import with
+`TypeError: Expected str, got DatabaseDialect` on
+`dialect: str = DatabaseDialect.POSTGRESQL` — despite `DatabaseDialect` being a
+`StrEnum`. This repo uses annotations idiomatically, not as Cython type
+declarations, so **`-X annotation_typing=False` is mandatory codebase-wide.**
+With that directive the module compiled and **all 123 compiler tests passed
+against the `.so`.** The directive costs most of Cython's *speed* benefit, which
+is irrelevant here — we want opacity, not throughput.
+
+### 9.3 Why this is better than it first looks
+
+The obvious reading is "Cython protects the wrong half — the AST models are the
+IP and they stay readable." That reading is **wrong**, and measuring it is what
+changed the recommendation:
+
+**The AST models are already public.** `create_app().openapi()` publishes **215
+component schemas**, including `StructuredQuery` and every AST node
+(`AggregateSelectItem`, `CaseSelectItem`, `ExpressionSelectItem`, …). The MCP
+tool schemas publish the same graph. Any customer already has the complete AST
+shape — it is the API contract. Compiling those modules protects nothing that
+is not already in the open.
+
+What is genuinely worth protecting is the **enforcement logic**: policy
+validation, schema validation, the compiler, the session guardrails, and the
+future subscription gate. Every one of those is a pure-logic module with no
+`BaseModel`, and every one Cythonizes.
+
+**One refactor stands in the way.** `execution/service.py` — the read
+enforcement funnel, and where item 211's gate call site goes — defines 12
+`BaseModel`s, so it cannot be compiled as-is. All twelve are result/response
+types (`StructuredQueryResult`, `ExplainResult`, `VerdictResult`,
+`BatchQueryItemResult`, the catalog-info trio, …) and all are already in the
+published OpenAPI schema. Extracting them to `execution/results.py` would leave
+`service.py` fully compilable. Same for `execution/write_execution.py`
+(2 models).
+
+### 9.4 Revised recommendation
+
+**Prefer Cython + PyInstaller over Nuitka**, and stop waiting on the AGPL
+question:
+
+1. It is **free and licence-clean** — no purchase, no counsel time.
+2. It protects **exactly the modules worth protecting**, and the ones it cannot
+   protect are already published as schemas.
+3. Selective compilation is arguably *better* than Nuitka's all-or-nothing: the
+   protected set is an explicit, reviewable list rather than a side effect.
+
+**Work it implies**, none of it blocked on anyone: extract response models out of
+`execution/service.py` and `execution/write_execution.py`; add
+`-X annotation_typing=False` and a per-module compile list to the build; verify
+the full suite against a mixed `.so`/`.py` tree; then PyInstaller-bundle and
+verify again.
+
+**Still untested:** PyInstaller itself. §9 measured Cython only. The bundling
+step, the mixed-extension tree, Linux/Docker, and the ODBC path all remain
+open — see §6, which still applies.
