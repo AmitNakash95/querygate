@@ -15,8 +15,10 @@ compiling, so the twelve response models it used to define moved here, leaving
 Little is lost by leaving these interpreted: **ten of the twelve are already
 published** in the OpenAPI component schemas, so they are a public API contract
 rather than protectable logic. The exceptions are `BatchExplainItemResult` and
-`BatchVerdictItemResult`, which appear in neither the OpenAPI components nor the
-MCP tool schemas — they are internal shapes, and they stay readable. Both are
+`BatchVerdictItemResult`, whose *class names* are absent from the OpenAPI
+components — but whose exact field sets are published via the MCP mirrors
+`BatchExplainItemToolResult` / `BatchVerdictItemToolResult`, so their shape is
+public even where the name is not. Both are
 five trivial optional fields, so the exposure is negligible, but the claim is
 "ten of twelve", not "all". `tests/unit/test_execution_results_contract.py`
 pins the split.
