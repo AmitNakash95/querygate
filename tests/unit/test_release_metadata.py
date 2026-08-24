@@ -19,6 +19,9 @@ from pathlib import Path
 
 import pytest
 
+from querygate import __version__
+from querygate.core.config import AppConfig
+
 pytestmark = pytest.mark.unit
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -62,8 +65,45 @@ def test_the_current_version_has_a_dated_changelog_entry():
     )
 
 
+def test_the_parsed_date_value_is_asserted_not_just_its_presence():
+    """Narrowing the date group to `(\\d{4})` would otherwise stay green: the
+    *requirement* of a date was pinned, the *parse* was not."""
+    assert release_dates()["0.1.0"] == "2026-07-18"
+
+
 def test_the_detector_would_catch_an_undated_version():
     """Negative control: the parser must not match a heading with no date."""
     assert not _RELEASE_HEADING.search("## [9.9.9]\n")
     assert not _RELEASE_HEADING.search("## [9.9.9] — unreleased\n")
     assert _RELEASE_HEADING.search("## [9.9.9] — 2026-01-02\n")
+
+
+# --- restored coverage --------------------------------------------------------
+#
+# These two tests predate the licensing work and had nothing to do with the BSL
+# Change Date. They were destroyed when this file was rewritten wholesale to
+# rescue the changelog binding out of the deleted `test_change_date.py` — the
+# rescue was selective rather than systematic, and this file's own path already
+# existed. Restored verbatim.
+#
+# `test_default_example_config_paths_work_outside_repository_cwd` matters more
+# than it looks: `AppConfig`'s defaults resolve through
+# `importlib.resources.files("examples")`, and that is exactly the mechanism a
+# frozen/zipped distribution breaks. It is the only guard of that property in
+# the suite — deleted, ironically, in the same branch that adopts PyInstaller
+# freezing (TODO.md item 214).
+
+
+def test_runtime_version_matches_application_default():
+    assert AppConfig(_env_file=None).app_version == __version__
+
+
+def test_default_example_config_paths_work_outside_repository_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    config = AppConfig(_env_file=None)
+
+    assert Path(config.connections_file).is_file()
+    assert Path(config.policy_file).is_file()
+    assert Path(config.connections_file).name == "connections.example.yaml"
+    assert Path(config.policy_file).name == "policy.example.yaml"

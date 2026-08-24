@@ -123,20 +123,30 @@ def test_release_mode_refuses_the_draft_license_via_the_top_level_check():
 
 
 def test_a_settled_license_passes():
-    settled = "Parameters\n\nLicensor: Acme Ltd\n\nLicensed Work: QueryGate 1.0.0\n"
+    settled = (
+        "QueryGate Commercial Licence\n\nLicensor: Acme Ltd\n\n"
+        "Licensed Work: QueryGate 1.0.0\n\n"
+        + "Proprietary and confidential. All rights reserved. " * 6
+    )
     assert check_eula.check_licence_file(settled) == []
 
 
 def test_the_draft_banner_alone_is_enough_to_refuse():
     """Placeholders could all be filled and the banner still make it inert."""
-    banner_only = "DRAFT — FOR LAWYER REVIEW. NOT LEGAL ADVICE.\n\nLicensor: Acme Ltd\n"
+    banner_only = (
+        "DRAFT — FOR LAWYER REVIEW. NOT LEGAL ADVICE.\n\nLicensor: Acme Ltd\n"
+        + "QueryGate is licensed, not sold. All rights reserved. " * 6
+    )
     problems = check_eula.check_licence_file(banner_only)
     assert len(problems) == 1 and "draft banner" in problems[0]
 
 
 def test_angle_placeholders_alone_are_enough_to_refuse():
     """And the inverse: banner removed, placeholders forgotten."""
-    text = "Licensor: <LICENSOR — legal entity, to be supplied>\n"
+    text = (
+        "Licensor: <LICENSOR — legal entity, to be supplied>\n"
+        + "QueryGate is licensed, not sold. All rights reserved. " * 6
+    )
     problems = check_eula.check_licence_file(text)
     assert len(problems) == 1 and "placeholder" in problems[0]
 
@@ -151,7 +161,11 @@ def test_a_texts_seam_cannot_be_used_to_skip_the_license_check():
 
 def test_prose_in_angle_brackets_is_not_a_placeholder():
     """`<html>` or an email in angle brackets must not read as a blank."""
-    assert check_eula.check_licence_file("Contact <a@b.com> or see <html>.\n") == []
+    prose = (
+        "Contact <a@b.com> or see <html>.\n"
+        + "QueryGate is licensed, not sold. All rights reserved. " * 6
+    )
+    assert check_eula.check_licence_file(prose) == []
 
 
 # --- wrapped placeholders -----------------------------------------------------
@@ -192,3 +206,164 @@ def test_ordinary_prose_with_a_less_than_sign_is_not_a_wrapped_placeholder():
 def test_a_settled_licence_has_no_wrapped_placeholders():
     settled = "Parameters\n\nLicensor: Acme Ltd\n\nLicensed Work: QueryGate 1.0.0\n"
     assert check_eula.wrapped_placeholders(settled) == []
+
+
+# --- the CLI contract ---------------------------------------------------------
+#
+# `main()` is the ONLY thing the Makefile and both CI workflows ever call, and it
+# had no test. The deleted `test_change_date.py` had two for exactly this layer.
+# Without them, mutating `check(release=args.release)` to `check(release=False)`
+# leaves every other test green and turns the pre-tag release gate into a
+# permanent no-op — a tag would publish a signed image with a blank licence.
+
+
+def test_main_returns_nonzero_when_the_gate_finds_problems(monkeypatch, capsys):
+    monkeypatch.setattr(check_eula, "check", lambda **kw: ["planted problem"])
+    assert check_eula.main(["--check"]) == 1
+    assert "planted problem" in capsys.readouterr().err
+
+
+def test_main_returns_zero_when_the_gate_is_clean(monkeypatch):
+    monkeypatch.setattr(check_eula, "check", lambda **kw: [])
+    assert check_eula.main(["--check", "--release"]) == 0
+
+
+def test_the_release_flag_actually_reaches_the_check(monkeypatch):
+    """The mutation that would silently disable the release gate."""
+    seen = {}
+
+    def spy(**kwargs):
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(check_eula, "check", spy)
+    check_eula.main(["--check", "--release"])
+    assert seen.get("release") is True, seen
+
+
+def test_a_bare_check_does_not_silently_enable_release_mode(monkeypatch):
+    """The negative half — otherwise development is blocked by unsettled text."""
+    seen = {}
+
+    def spy(**kwargs):
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(check_eula, "check", spy)
+    check_eula.main(["--check"])
+    assert seen.get("release") is False, seen
+
+
+def test_main_passes_no_texts_seam(monkeypatch):
+    """`texts` is test-only. If production ever passed it, the LICENSE half of
+    the gate would silently vanish and nothing else would notice."""
+    seen = {}
+
+    def spy(**kwargs):
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(check_eula, "check", spy)
+    check_eula.main(["--check", "--release"])
+    assert "texts" not in seen, seen
+
+
+# --- narrowing the live tests to their stated subjects -------------------------
+#
+# `test_live_release_mode_currently_refuses` asserted only that SOME problem
+# exists — and LICENSE supplies two before the EULA is consulted. So it would
+# have stayed green after counsel filled the EULA, never prompting the flip its
+# own failure message asks for. Same shape for the draft-banner test.
+
+
+def test_live_release_mode_refuses_specifically_because_of_the_eula():
+    problems = check_eula.check(release=True)
+    assert any(
+        name in p for p in problems for name in check_eula.EULA_FILES
+    ), f"no EULA-attributed problem; the gate is only firing on LICENSE: {problems}"
+
+
+def test_live_license_specifically_carries_the_draft_banner():
+    text = (check_eula.ROOT / check_eula.LICENCE_FILE).read_text("utf-8")
+    problems = check_eula.check_licence_file(text)
+    assert any("draft banner" in p for p in problems), problems
+
+
+# --- the _ALLOWED exclusions --------------------------------------------------
+
+
+def test_the_allowed_exclusions_actually_suppress():
+    assert check_eula.placeholders("Replace every [BRACKETED] placeholder\n") == []
+
+
+def test_the_allowed_exclusions_do_not_swallow_real_blanks():
+    """Guards against someone 'fixing' a noisy gate by widening _ALLOWED."""
+    assert "ADDRESS" in check_eula.placeholders("of [ADDRESS].\n")
+    assert "LICENSOR LEGAL NAME" in check_eula.placeholders("[LICENSOR LEGAL NAME] of\n")
+
+
+# --- the LICENSE content rules ------------------------------------------------
+#
+# These had no tests when first written — I verified them interactively and a
+# `git checkout` silently reverted the lot with the suite still green, which is
+# precisely the "guard that cannot fail" pattern. Pinned now.
+#
+# The deleted BSL gate pinned `Change License: Apache License, Version 2.0`
+# "so a silent edit cannot weaken it". Its purpose — a POSITIVE assertion about
+# what LICENSE says — is what these restore.
+
+_PAD = "Proprietary and confidential. All rights reserved. " * 6
+
+
+def test_a_permissive_grant_in_license_is_refused():
+    """The unrecoverable case: shipping a proprietary product under MIT."""
+    for text, expected in (
+        ("MIT License\n\nPermission is hereby granted, free of charge, to any person", "MIT"),
+        ("Licensed under the Apache License, Version 2.0 (the 'License')", "Apache-2.0"),
+        ("Redistribution and use in source and binary forms, with or without", "BSD"),
+        ("GNU GENERAL PUBLIC LICENSE\nVersion 3", "GPL"),
+    ):
+        problems = check_eula.check_licence_file(text + _PAD)
+        assert any(expected in p for p in problems), f"{expected} not refused: {problems}"
+
+
+def test_the_bsl_change_license_parameter_is_not_a_grant():
+    """A mention must not trip the gate — the BSL draft names Apache-2.0 as its
+    Change License, and that is a parameter, not a grant."""
+    text = "Change License:       Apache License, Version 2.0\n" + _PAD
+    assert not any("Apache" in p for p in check_eula.check_licence_file(text))
+
+
+def test_an_empty_or_truncated_license_is_refused():
+    for text in ("", "   \n", "All rights reserved."):
+        problems = check_eula.check_licence_file(text)
+        assert any("too short" in p for p in problems), f"{text!r} accepted: {problems}"
+
+
+def test_the_content_rules_fire_in_dev_mode_too():
+    """Two tiers: a permissive grant is never acceptable, so unlike the draft
+    banner it must not wait for release mode."""
+    mit = "Permission is hereby granted, free of charge, to any person" + _PAD
+    assert check_eula.check_licence_file(mit, release=False)
+    banner = "DRAFT — FOR LAWYER REVIEW. NOT LEGAL ADVICE.\n" + _PAD
+    assert check_eula.check_licence_file(banner, release=False) == []
+
+
+def test_square_bracket_placeholders_in_license_are_checked():
+    """LICENSE previously used only the angle pattern, so the EULA's bracket
+    style — which docs/RELEASING.md advertises as gated — went unchecked."""
+    text = "Licensor: [LICENSOR LEGAL NAME]\n" + _PAD
+    assert check_eula.check_licence_file(text)
+
+
+def test_a_lowercase_angle_placeholder_is_caught():
+    text = "Licensor: <licensor legal entity, to be supplied>\n" + _PAD
+    assert check_eula.check_licence_file(text)
+
+
+def test_html_tags_and_emails_are_not_placeholders():
+    """The false-positive control for widening past ALL-CAPS."""
+    for body in ("html", "br", "a@b.com", "support@example.com", "https://x.y"):
+        assert not check_eula._is_angle_placeholder(body), body
+    for body in ("LICENSOR LEGAL NAME", "licensor legal entity", "LICENSOR_NAME", "XX"):
+        assert check_eula._is_angle_placeholder(body), body
