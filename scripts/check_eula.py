@@ -54,9 +54,32 @@ _PLACEHOLDER_RE = re.compile(r"(?<!\])\[([^\[\]\n]{2,120})\](?![(\[])")
 _ALLOWED = frozenset({"sic", "BRACKETED"})
 
 
+#: A placeholder whose closing delimiter is on the *next* line. Both patterns
+#: above exclude `\n`, so a wrapped placeholder is invisible to them — a
+#: false negative in the dangerous direction. The BSL gate this replaces had a
+#: dedicated test for exactly this shape (`test_a_placeholder_that_wraps_onto_a
+#: _second_line_fails`), so dropping the coverage would have been a regression.
+#: Deliberately narrow: an opening delimiter followed by placeholder-shaped
+#: content (uppercase ASCII, or any non-Latin script) and no close on the line.
+_WRAPPED_RE = re.compile(
+    r"(?:\[|<)(?:[A-Z][A-Z_ ]{2,}|[^\x00-\x7F][^\]\>\n]{2,})[^\]\>\n]*$",
+    re.MULTILINE,
+)
+
+
+def wrapped_placeholders(text: str) -> list[str]:
+    """Lines that open a placeholder and never close it on the same line."""
+    return [m.group(0).strip() for m in _WRAPPED_RE.finditer(text)]
+
+
 def placeholders(text: str) -> list[str]:
-    """Every unfilled placeholder in `text`, in order of appearance."""
-    return [m.group(1) for m in _PLACEHOLDER_RE.finditer(text) if m.group(1) not in _ALLOWED]
+    """Every unfilled placeholder in `text`, in order of appearance.
+
+    Includes wrapped ones (`_WRAPPED_RE`), reported by the line that opens them,
+    so a placeholder cannot hide by straddling a line break.
+    """
+    found = [m.group(1) for m in _PLACEHOLDER_RE.finditer(text) if m.group(1) not in _ALLOWED]
+    return found + wrapped_placeholders(text)
 
 
 def check(*, release: bool, texts: dict[str, str] | None = None) -> list[str]:
@@ -98,7 +121,7 @@ def check_licence_file(text: str) -> list[str]:
             "the file grants nothing and is not in force. It ships inside the wheel, the "
             "sdist and the image, so a release would publish a product with no licence."
         )
-    angle = _ANGLE_PLACEHOLDER_RE.findall(text)
+    angle = _ANGLE_PLACEHOLDER_RE.findall(text) + wrapped_placeholders(text)
     if angle:
         shown = ", ".join(repr(a) for a in angle[:4])
         more = f" (+{len(angle) - 4} more)" if len(angle) > 4 else ""
