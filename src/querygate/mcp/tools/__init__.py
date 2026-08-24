@@ -9,9 +9,14 @@ the MCP server advertised **zero tools** — with no exception, no warning, and 
 process that started and served happily. The same break applies to any frozen
 or zipped deployment (PyInstaller, zipapp, a zipimported wheel).
 
-A static tuple is also what lets a compiler see these modules at all: an
-`importlib.import_module(f"...{path.stem}")` call is invisible to static
-analysis, so the modules were not even guaranteed to be in the binary.
+The tuple fixes the *discovery* failure. It does **not** make the modules
+visible to a compiler — the import is still `importlib.import_module(f"…")`,
+which static analysis cannot follow, and the spike measured exactly that: with
+the tuple but without `--include-package=querygate`, the build raised
+`ModuleNotFoundError`. The imports cannot be hoisted to module scope to fix
+that, because `rebuild_recursive_ast_cycle(force=True)` below must run *before*
+any tool module builds its schema. So a frozen build must include this package
+explicitly, and the failure is now loud rather than silent.
 
 `tests/unit/test_mcp_tool_registration.py` asserts this tuple matches the
 directory listing, so adding a tool file without registering it fails the suite
