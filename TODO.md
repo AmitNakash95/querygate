@@ -3922,15 +3922,28 @@ will do.
 - **Rewrite `docs/LICENSING_FAQ.md` end to end** — roughly thirteen claims go
   false. Highest exposure: the "no kill switch, no time bomb, no check that can
   refuse to start or block a query" promise.
-- **⚠️ Do not sweep by hand — the repo already has the tool and the scar.**
-  `scripts/claim_drift_sites.py` exists precisely because five consecutive
-  `claim-reviewer` rounds found every hand-assembled list shorter than reality
-  (it names `src/` comments and docstrings, `examples/`, and
-  `docs/TODO_ARCHIVE.md` as the usual misses). Add a `licensing` class to it
-  — patterns `BSL|BUSL|Business Source|Change Date|Additional Use Grant|
-  source-available|free forever|no outbound calls|licence flip` — run `--all`,
-  fix every hit, re-run to empty. **The list below is a starting checklist, not
-  the scope.** Two files whose BSL text is executable rather than prose and that
+- **✅ The `licensing` class is added to `scripts/claim_drift_sites.py` and the
+  sweep is measured: 209 live sites across 25 files** (2026-08-24), against the
+  ~20 documents the hand list below named. Exactly the understatement the tool's
+  own docstring predicts. Run `python3 scripts/claim_drift_sites.py licensing`,
+  fix, re-run to empty; **treat the list below as a checklist, not the scope.**
+  Two scoping facts the measurement gives us:
+  - **117 of the 209 are in five BSL-*execution* artifacts** —
+    `GTM_EXECUTION_PLAN.md` (56, already banner-marked superseded),
+    `LICENSE_NOTES.md` (29), `PRE_BSL_CLEANUP_PLAN.md` (21),
+    `BSL_EXECUTION_PROMPT.md` (11), `GTM_EXECUTION_PROMPT.md` (9). These are
+    plans *for the flip that was cancelled*, not live claims about the product.
+    Banner-mark or archive them **as whole documents**; line-editing them is
+    wasted work and would destroy the historical record of why the decision
+    changed.
+  - **That leaves ~92 sites of genuine editing** across `LICENSING_FAQ.md` (23),
+    `CONTRIBUTING.md` + `.github/cla/` (13 — the CLA exists for outside
+    contributors to a public repo, of which there are now none),
+    `CONTAINER_IMAGE_LICENCES.md` (5), `PRODUCT_GUIDE.md` (4), `docs/README.md`
+    (3), `README.md` (2), `sales/index.html` (1), and the executable BSL
+    rationale in `scripts/check_licenses.py`,
+    `scripts/check_release_artifacts.py`, `security/copyleft-license-allowlist.json`
+    and `tests/unit/test_third_party_licenses.py`. Two files whose BSL text is executable rather than prose and that
   a prose sweep misses: `pyproject.toml`'s `license-files` comment block (which
   also defers the SPDX expression and classifier that now become truthful) and
   `scripts/check_release_artifacts.py`'s three BSL-specific rationale strings and

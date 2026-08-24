@@ -65,6 +65,26 @@ class ClaimClass:
 # Patterns intentionally target the claim's phrasing, not the feature's name, so
 # an accurate mention of the feature does not hit.
 _CLASSES: Dict[str, ClaimClass] = {
+    "licensing": ClaimClass(
+        "licensing",
+        "QueryGate ships proprietary/closed-source on a paid subscription (item 210, "
+        "docs/business/GTM_SAAS.md). Every BSL-flip, free-forever, source-available and "
+        "no-outbound-calls claim in the repo is now false. This class is the inverse of "
+        "the others: it hunts claims about a future that was CANCELLED, not a shipped "
+        "feature that is understated.",
+        [
+            r"\bBSL\b|\bBUSL\b|business source licen[cs]e",
+            r"additional use grant|change date|change licen[cs]e",
+            r"licen[cs]e flip|the flip\b|pre-bsl|post-bsl",
+            r"source[- ]available",
+            r"free (forever|internal production)|no (user|database|seat) cap",
+            r"no licen[cs]e key|no activation|no trial period",
+            r"no outbound calls|no telemetry of any kind|never phones? home",
+            r"no kill switch|no time bomb",
+            r"apache[- ]2\.0 (after|in|on)|converts? to (apache|open source)",
+            r"the (entire )?source is public|readable, buildable, forkable",
+        ],
+    ),
     "cost-estimation": ClaimClass(
         "cost-estimation",
         "MSSQL cost estimation shipped as item 26 phase 2; docs/code comments still say Postgres-only.",
