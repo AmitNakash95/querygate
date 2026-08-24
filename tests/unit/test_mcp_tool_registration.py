@@ -50,10 +50,48 @@ def test_the_tuple_is_sorted_and_has_no_duplicates():
     assert len(set(tools_pkg.TOOL_MODULES)) == len(tools_pkg.TOOL_MODULES)
 
 
-def test_discovery_imports_every_registered_module():
-    count = tools_pkg.discover_and_register_tools()
-    assert count == len(tools_pkg.TOOL_MODULES)
-    assert count > 0, "a zero return is exactly the silent failure this guards"
+#: The complete agent-facing MCP surface. Asserted as a SET, not a count: a
+#: `>= len(TOOL_MODULES)` check has nine tools of slack, so every tool in
+#: query/write/schema/templates/connections could vanish and `help`'s seven
+#: alone would still satisfy it. The MCP surface is the agent-facing API, so a
+#: tool silently appearing or disappearing is a scope change, not a nit.
+EXPECTED_TOOLS = frozenset(
+    {
+        "describe_my_querygate_access",
+        "describe_table",
+        "explain_querygate_config_field",
+        "explain_querygate_error",
+        "get_querygate_guide_topic",
+        "get_querygate_setup_checklist",
+        "inspect_querygate_configuration",
+        "list_connections",
+        "list_query_templates",
+        "list_tables",
+        "run_query_template",
+        "run_structured_queries",
+        "run_structured_writes",
+        "search_catalog",
+        "search_querygate_guide",
+    }
+)
+
+
+def test_discovery_actually_imports_the_modules():
+    """Asserts the observable effect, not the return value.
+
+    `discover_and_register_tools()` returns `len(TOOL_MODULES)` — comparing that
+    to `len(TOOL_MODULES)` is true by construction, and would stay green with
+    the import loop deleted entirely.
+    """
+    import sys
+
+    for name in tools_pkg.TOOL_MODULES:
+        sys.modules.pop(f"querygate.mcp.tools.{name}", None)
+    tools_pkg.discover_and_register_tools()
+    still_missing = [
+        n for n in tools_pkg.TOOL_MODULES if f"querygate.mcp.tools.{n}" not in sys.modules
+    ]
+    assert not still_missing, f"discovery did not import: {still_missing}"
 
 
 def test_the_server_actually_advertises_tools():
@@ -66,10 +104,12 @@ def test_the_server_actually_advertises_tools():
     from querygate.mcp.server import create_mcp_server
 
     server = create_mcp_server()
-    advertised = asyncio.run(server.list_tools())
-    assert len(advertised) >= len(tools_pkg.TOOL_MODULES), (
-        f"{len(advertised)} tools advertised for "
-        f"{len(tools_pkg.TOOL_MODULES)} registered modules"
+    advertised = {t.name for t in asyncio.run(server.list_tools())}
+    assert advertised == EXPECTED_TOOLS, (
+        f"the advertised MCP surface changed.\n"
+        f"  missing: {sorted(EXPECTED_TOOLS - advertised)}\n"
+        f"  unexpected: {sorted(advertised - EXPECTED_TOOLS)}\n"
+        "If deliberate, update EXPECTED_TOOLS — this set is the agent-facing API."
     )
 
 

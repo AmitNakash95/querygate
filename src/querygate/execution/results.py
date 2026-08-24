@@ -25,6 +25,8 @@ pins the split.
 StructuredQueryResult` imports keep working unchanged.
 """
 
+from __future__ import annotations
+
 from typing import List, Literal, Optional, Union
 
 import pydantic as pyd
