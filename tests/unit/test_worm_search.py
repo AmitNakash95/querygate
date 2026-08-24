@@ -53,6 +53,7 @@ def _bounds(**overrides) -> WormSearchBounds:
         default_limit=50,
         max_limit=500,
         request_timeout_seconds=20.0,
+        max_query_shape_depth=64,
     )
     kwargs.update(overrides)
     return WormSearchBounds(**kwargs)
@@ -2235,6 +2236,126 @@ class TestCorruptLinesAreCountedNotRaised:
         assert [e.connection_id for e in result.events] == ["survivor"]
 
 
+class TestQueryShapeDepthCap:
+    """TODO.md item 194 defect 3. `query_shape` is a plain `Dict[str, Any]` —
+    the one field the event schemas' `extra="forbid"` cannot constrain — so an
+    unbounded screener walk over it raised `RecursionError` out of the line
+    loop, discarding a page's already-accumulated genuine records as a masked
+    500. The cap FAILS CLOSED, because the screener is a security control
+    whose `True` means *reject*."""
+
+    @staticmethod
+    def _nested(depth: int, *, as_list: bool):
+        """A `query_shape` nested `depth` levels. The LIST form is the
+        expensive one — a generator frame plus a call frame per level, roughly
+        3x the dict cost — so it is what a cap must be sized against."""
+        node: object = "leaf"
+        for _ in range(depth):
+            node = [node] if as_list else {"k": node}
+        return {"from": "customers", "deep": node}
+
+    @pytest.mark.parametrize("as_list", [True, False])
+    async def test_a_query_shape_past_the_cap_is_malformed_not_returned(self, s3, as_list):
+        """Fails closed: over the cap is `malformed`, the same outcome a
+        denylisted key gets — never "screened clean and returned"."""
+        event = _event("a", minute=0)
+        event.query_shape = self._nested(200, as_list=as_list)
+        _put_events(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", [event])
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(max_query_shape_depth=64),
+        )
+
+        assert result.malformed == 1
+        assert result.events == []
+
+    async def test_a_legitimately_shaped_query_shape_is_still_returned(self, s3):
+        """The cap must not reject ordinary content. `Policy.max_where_depth`
+        defaults to 5, so a realistic `query_shape` sits an order of magnitude
+        under the default cap of 64."""
+        event = _event("a", minute=0)
+        event.query_shape = self._nested(8, as_list=True)
+        _put_events(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", [event])
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+        )
+
+        assert result.malformed == 0
+        assert [e.connection_id for e in result.events] == ["a"]
+
+    async def test_a_forbidden_key_below_the_cap_is_still_caught(self, s3):
+        """The cap must not become a way to smuggle content past the screener:
+        a denylisted key nested just under the limit is still rejected. A cap
+        implemented as `return False` on over-depth would turn a resource
+        bound into a screening bypass; this pins the other direction."""
+        event = _event("a", minute=0)
+        node: object = {"connection_string": "postgresql://u:p@h/db"}
+        for _ in range(20):
+            node = [node]
+        event.query_shape = {"from": "customers", "deep": node}
+        _put_events(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", [event])
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(max_query_shape_depth=64),
+        )
+
+        assert result.malformed == 1
+        assert result.events == []
+
+    @pytest.mark.parametrize("as_list", [True, False])
+    def test_a_query_shape_at_the_configured_ceiling_does_not_raise(self, as_list):
+        """The ceiling on the config field must be a value the walk actually
+        survives, not merely a plausible-looking number. Exercised at exactly
+        `_MAX_QUERY_SHAPE_DEPTH_CEILING` in the LIST form, which is the
+        expensive branch the cap is sized against."""
+        ceiling = worm_search_module._MAX_QUERY_SHAPE_DEPTH_CEILING
+        shape = self._nested(ceiling + 50, as_list=as_list)
+
+        assert worm_search_module._contains_forbidden_content(shape, max_depth=ceiling) is True
+
+    def test_the_config_ceiling_is_enforced_on_the_bounds_model(self):
+        """A bounds object built in-process must not be able to exceed what an
+        operator is allowed to configure — otherwise the ceiling is advisory."""
+        with pytest.raises(pyd.ValidationError):
+            _bounds(max_query_shape_depth=worm_search_module._MAX_QUERY_SHAPE_DEPTH_CEILING + 1)
+
+    def test_the_config_default_is_the_agreed_value(self):
+        """Pins the owner's decision (2026-08-24): default 64, configurable."""
+        cfg = AppConfig(environment="localhost", mcp_enabled=False)
+
+        assert cfg.audit_worm_search_max_query_shape_depth == 64
+        assert worm_search_module._bounds_from_config(cfg).max_query_shape_depth == 64
+
+    def test_a_configured_depth_reaches_the_screener(self):
+        """The config value must actually arrive — not be read and discarded."""
+        cfg = AppConfig(
+            environment="localhost",
+            mcp_enabled=False,
+            audit_worm_search_max_query_shape_depth=7,
+        )
+
+        assert worm_search_module._bounds_from_config(cfg).max_query_shape_depth == 7
+
+
 class TestBoundsRejection:
     def test_a_default_limit_above_the_max_limit_is_a_configuration_error(self):
         """A misconfigured default above the documented ceiling would
@@ -2249,6 +2370,7 @@ class TestBoundsRejection:
                 default_limit=1000,
                 max_limit=10,
                 request_timeout_seconds=1,
+                max_query_shape_depth=64,
             )
 
     async def test_missing_start_time_is_rejected(self, s3):
