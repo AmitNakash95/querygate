@@ -14,9 +14,10 @@
 > Nuitka 4.1.3 declares **AGPLv3+**, a live question for a proprietary product
 > (§5). **But §9 supersedes that: use Cython + PyInstaller instead.** Both are
 > licence-clean (Apache-2.0; GPLv2 with an explicit non-free-program exception,
-> verified from package metadata), and the modules Cython *cannot* compile turn
-> out to be the ones already published as OpenAPI/MCP schemas — so nothing worth
-> protecting is lost. **No purchase and no counsel time needed.**
+> verified from package metadata), and the modules Cython *cannot* compile are
+> very largely ones already published as OpenAPI/MCP schemas — so little worth
+> protecting is lost (§9.3 quantifies the exceptions). **No purchase and no
+> counsel time needed.**
 >
 > Scope caveat, stated up front: this spike measured **four named risk areas on
 > macOS arm64**, not the whole application, not the test suite against a
@@ -137,17 +138,15 @@ expects commercial users to buy a licence rather than rely on the AGPL edition.
    checking, and it must explicitly permit closed-source distribution.
 2. **Get counsel's opinion on the AGPL edition.** Cheaper if the answer is yes,
    expensive to be wrong about.
-3. **Cython** — believed BSD-licensed, so no such question, but a much rougher
-   fit for a whole application (it targets extension modules, not app freezing).
-4. **PyInstaller** — believed GPLv2 *with an explicit exception* permitting
-   proprietary bundling. Freezes rather than compiles, so it is weaker
-   obfuscation: the bytecode is recoverable. Would satisfy "single binary in
-   Docker" but not "obfuscated" to the same degree.
+3. **Cython** — **Apache-2.0** (verified in §9.1), so no such question.
+4. **PyInstaller** — **GPLv2-or-later with an explicit exception permitting
+   non-free programs** (verified in §9.1). Freezes rather than compiles, so on
+   its own it is weak obfuscation: the bytecode is recoverable. Paired with
+   Cython it is the recommended path — see §9.
 
-   ⚠️ **The licence characterisations in 3 and 4 are from memory, not verified.**
-   Nothing in this repository can confirm them and I did not check the upstream
-   projects. Confirm both before either is relied on — the whole point of §5 is
-   that a build tool's licence is not a detail.
+   *(These two were originally written from memory and marked unverified. §9.1
+   read both from the installed packages' own metadata; the text above is that
+   measurement, not the recollection.)*
 5. **Ship plain Python in the image** and rely on the EULA's anti-circumvention
    clause (item 210) plus the private repository. Weakest technically; zero
    licensing risk; and per `GTM_SAAS.md` §6 the contract was always the layer
@@ -279,6 +278,14 @@ component schemas**, including `StructuredQuery` and every AST node
 tool schemas publish the same graph. Any customer already has the complete AST
 shape — it is the API contract. Compiling those modules protects nothing that
 is not already in the open.
+
+⚠️ **Not quite every model, and the difference was measured rather than
+assumed.** Of the twelve response models extracted from `execution/service.py`,
+**ten** are published; `BatchExplainItemResult` and `BatchVerdictItemResult`
+appear in neither the OpenAPI components nor the MCP tool schemas and would stay
+readable. Both are five trivial optional fields, so this does not change the
+recommendation — but "all the unprotectable modules are already public" is an
+overstatement, and an earlier draft of this section made it.
 
 What is genuinely worth protecting is the **enforcement logic**: policy
 validation, schema validation, the compiler, the session guardrails, and the
