@@ -83,6 +83,17 @@ All notable changes to QueryGate are documented here.
 
 ### Added
 
+- **The `query_shape` forbidden-content screener is depth-bounded and fails
+  closed** — `AUDIT_WORM_SEARCH_MAX_QUERY_SHAPE_DEPTH` (default 64, hard
+  ceiling 256). `query_shape` is the one event field the schemas'
+  `extra="forbid"` cannot constrain, so a crafted or corrupted archived line
+  could nest deeply enough to raise out of the screener's walk, turning a WORM
+  search into a masked 500 that also discarded every genuine record the page
+  had already accumulated. Over the cap now counts `malformed` — the same
+  outcome a denylisted key gets, never "screened clean". **Upgrade impact:**
+  none for realistic content; `Policy.max_where_depth` defaults to 5, an order
+  of magnitude under the cap. Raise the variable if you archive unusually
+  nested query shapes.
 - **The WORM audit archive tier now runs against any S3-API-compatible object
   store, not AWS S3 alone** — `AUDIT_WORM_S3_ENDPOINT_URL` (empty by default,
   meaning AWS S3 resolved by region exactly as before) points both the flush

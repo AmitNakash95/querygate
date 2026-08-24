@@ -74,14 +74,17 @@ U+FFFD) is now a mismatch rather than a `TypeError`, via
 and a deeply-nested line no longer escapes either `json.loads` handler, since
 both the line loop and the seed walk catch `RecursionError` (a `RuntimeError`,
 which `except json.JSONDecodeError` never covered) and count the line
-`malformed`. **Still open — `_contains_forbidden_content` walks `query_shape`
-with no depth cap** (measured 2026-08-23 on CPython 3.11 at the default
-recursion limit: LIST nesting raises around depth ~330, DICT around ~1000, and
-lower inside an async handler; `Policy.max_where_depth` defaults to 5, so
-legitimate content sits far below either). It is the same defect class item
-178 closed for `seq`; it does not leak (the masked body is
-`PUBLIC_INTERNAL_ERROR`) — the cost is availability plus the loss of a whole
-page's already-accumulated genuine records. **Reachable
+`malformed`. Also closed (defect 3, 2026-08-24): `_contains_forbidden_content`'s walk of
+`query_shape` is now bounded by `WormSearchBounds.max_query_shape_depth`
+(`AUDIT_WORM_SEARCH_MAX_QUERY_SHAPE_DEPTH`, default 64, hard ceiling 256) and
+**fails closed** — over the cap is `malformed`, the same answer a denylisted
+key gets, never "screened clean". `query_shape` is a plain `Dict[str, Any]`,
+the one field the event schemas' `extra="forbid"` cannot constrain, so an
+unbounded walk over it raised `RecursionError` out of the line loop and
+discarded a whole page's already-accumulated genuine records as a masked 500.
+**All three shapes item 194 filed are now counted, never raised** — the
+absolute form of this contract, restored as that item's definition of done
+required. **Reachable
 by alerting, not just by reading a response (TODO.md item 177):** both counts
 are also published as `querygate_audit_worm_search_chain_breaks_total` and
 `querygate_audit_worm_search_unverified_total`, on the served path AND when a
@@ -320,20 +323,64 @@ _FORBIDDEN_QUERY_SHAPE_KEYS = frozenset(
 )
 
 
-def _contains_forbidden_content(node: object) -> bool:
+# TODO.md item 194 defect 3. The hard ceiling on
+# `AUDIT_WORM_SEARCH_MAX_QUERY_SHAPE_DEPTH`. The cap exists to keep the
+# `query_shape` walk clear of the interpreter's recursion limit, so letting an
+# operator raise it without limit would reintroduce the very defect it closes.
+# 256 sits under the measured ~330-deep LIST threshold with margin for the
+# smaller stack available inside an async request handler, and
+# `test_a_query_shape_at_the_configured_ceiling_does_not_raise` pins that the
+# maximum configurable value is actually survivable rather than merely
+# plausible.
+_MAX_QUERY_SHAPE_DEPTH_CEILING = 256
+
+
+def _contains_forbidden_content(node: object, *, max_depth: int, _depth: int = 0) -> bool:
     """Recursively screens a parsed `query_shape` for a denylisted key.
     `normalize_query_shape` never emits any of these keys for a
     legitimately constructed event, so this can only ever fire on a forged
-    or corrupted line."""
+    or corrupted line.
+
+    **Depth-bounded, and it FAILS CLOSED (TODO.md item 194 defect 3).** This
+    is a security control whose `True` means *reject*, so exceeding the cap
+    returns `True` — the line is counted `malformed` and never returned,
+    which is the same answer a denylisted key gets. Returning `False` on an
+    over-nested node would be the one outcome that turns a resource bound
+    into a screening bypass.
+
+    Before the cap this walk was unbounded, and `query_shape` is the one
+    field `extra="forbid"` cannot constrain (a plain `Dict[str, Any]`), so a
+    crafted line whose nesting sat under `json.loads`'s own limit but over
+    this second Python-level walk's budget raised `RecursionError` out of the
+    line loop — discarding the page's already-accumulated genuine records as
+    a masked 500. Measured 2026-08-23 on CPython 3.11 at the default
+    recursion limit: LIST nesting first raised around depth ~330 (the list
+    branch costs a generator frame *plus* a call frame per level, roughly 3x
+    the dict branch's ~1000), and lower inside an async request handler. The
+    cap must therefore be sized against the LIST cost.
+
+    `max_depth` is the caller's `WormSearchBounds.max_query_shape_depth`
+    (`AUDIT_WORM_SEARCH_MAX_QUERY_SHAPE_DEPTH`, default 64). 64 is ~12x
+    `Policy.max_where_depth`'s default of 5 — with room for `set_op` arms and
+    CTE bodies — and roughly 5x under the measured list threshold before the
+    async-handler reduction is even counted. The config field is bounded above
+    (`le=_MAX_QUERY_SHAPE_DEPTH_CEILING`) precisely so raising it cannot
+    reintroduce the defect this cap exists to close.
+    """
+    if _depth > max_depth:
+        return True
     if isinstance(node, dict):
         for key, value in node.items():
             if isinstance(key, str) and key.lower() in _FORBIDDEN_QUERY_SHAPE_KEYS:
                 return True
-            if _contains_forbidden_content(value):
+            if _contains_forbidden_content(value, max_depth=max_depth, _depth=_depth + 1):
                 return True
         return False
     if isinstance(node, list):
-        return any(_contains_forbidden_content(item) for item in node)
+        return any(
+            _contains_forbidden_content(item, max_depth=max_depth, _depth=_depth + 1)
+            for item in node
+        )
     return False
 
 
@@ -358,6 +405,10 @@ class WormSearchBounds(pyd.BaseModel):
     default_limit: int = pyd.Field(ge=1)
     max_limit: int = pyd.Field(ge=1)
     request_timeout_seconds: float = pyd.Field(gt=0)
+    # TODO.md item 194 defect 3. Bounded above by the same ceiling the config
+    # field uses, so a bounds object built in-process cannot exceed what an
+    # operator is allowed to configure.
+    max_query_shape_depth: int = pyd.Field(ge=1, le=_MAX_QUERY_SHAPE_DEPTH_CEILING)
 
     model_config = pyd.ConfigDict(extra="forbid")
 
@@ -1306,11 +1357,24 @@ async def search_worm_archive(
                     unwrapped = unwrap_envelope(parsed)
                     try:
                         event = _EVENT_ADAPTER.validate_python(unwrapped)
-                    except pyd.ValidationError:
+                    except (pyd.ValidationError, RecursionError):
+                        # `RecursionError` for the same reason the two
+                        # `json.loads` handlers catch it (item 194 defect 2):
+                        # this is a second recursive descent over an
+                        # attacker-influenced document, one line before the
+                        # screener's own now-bounded walk. `json.loads`
+                        # already bounds nesting below its own limit, so this
+                        # is defence in depth rather than a known-reachable
+                        # path — but it costs one exception class and keeps
+                        # the "a crafted line is COUNTED, never raised"
+                        # contract true for the whole line loop rather than
+                        # for most of it.
                         malformed += 1
                         continue
                     query_shape = getattr(event, "query_shape", None)
-                    if query_shape is not None and _contains_forbidden_content(query_shape):
+                    if query_shape is not None and _contains_forbidden_content(
+                        query_shape, max_depth=bounds.max_query_shape_depth
+                    ):
                         # A forged/corrupted line that passed top-level
                         # schema validation but smuggles forbidden content
                         # inside query_shape (WS-2) — reject the whole line,
@@ -1414,6 +1478,7 @@ def _bounds_from_config(cfg) -> WormSearchBounds:
         default_limit=cfg.audit_worm_search_default_limit,
         max_limit=cfg.audit_worm_search_max_limit,
         request_timeout_seconds=cfg.audit_worm_search_request_timeout_seconds,
+        max_query_shape_depth=cfg.audit_worm_search_max_query_shape_depth,
     )
 
 

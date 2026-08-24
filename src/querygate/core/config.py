@@ -487,6 +487,20 @@ class AppConfig(BaseSettings):
     # fetches (never mid-fetch), so a request degrades to a truncated,
     # resumable page rather than hanging past this bound.
     audit_worm_search_request_timeout_seconds: float = pyd.Field(default=20.0, gt=0)
+    # Max nesting depth the `query_shape` forbidden-content screener will walk
+    # before rejecting a line outright (TODO.md item 194 defect 3). `query_shape`
+    # is a plain `Dict[str, Any]` — the one field the event schemas'
+    # `extra="forbid"` cannot constrain — so a crafted line could nest deeply
+    # enough to raise `RecursionError` out of an unbounded walk, discarding a
+    # page's already-accumulated genuine records as a masked 500.
+    #
+    # FAILS CLOSED: over the cap means `malformed`, the same outcome a
+    # denylisted key gets, never "screened clean". Default 64 is ~12x
+    # `Policy.max_where_depth`'s default of 5, with room for `set_op` arms and
+    # CTE bodies, and roughly 5x under the measured list-nesting threshold.
+    # Bounded above at 256 on purpose: raising it without limit would
+    # reintroduce the defect the cap closes.
+    audit_worm_search_max_query_shape_depth: int = pyd.Field(default=64, ge=1, le=256)
 
     # HMAC key that signs in-query approval tokens (execution/approval.py,
     # TODO.md item 92). Empty (the default) means the approval gate cannot issue

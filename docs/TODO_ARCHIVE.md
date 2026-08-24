@@ -14215,6 +14215,81 @@ Note for the record: `tests/unit/test_product_guide.py` does **not** cover this
 reviewer asserted otherwise while auditing the GTM branch; that was wrong, and
 is why this needed a file of its own rather than an extra assertion.
 
+### 194. Three crafted-or-corrupt WORM lines still escape `search_worm_archive` as an unhandled exception the route masks as a 500 ✅ DONE
+
+**All three shapes closed.** Defects 1-2 shipped 2026-08-23 (`digests_equal` for a non-ASCII digest at every comparison site in both readers; `RecursionError` caught alongside `json.JSONDecodeError` in both `json.loads` handlers). Defect 3 shipped 2026-08-24 with the owner's decision — `_contains_forbidden_content`'s walk of `query_shape` is bounded by `AUDIT_WORM_SEARCH_MAX_QUERY_SHAPE_DEPTH` (default 64, hard ceiling 256) and fails closed, so over-depth is counted `malformed` rather than raised. The cap returns `True` (reject) on over-depth because the screener's `True` means reject; returning `False` would have converted a resource bound into a screening bypass, and a test pins that direction. The config field is bounded above so raising it cannot reintroduce the defect, and a test exercises the walk at exactly that ceiling in the expensive LIST form. Eight mutations, eight killed.
+
+**Defects (1) and (2) shipped 2026-08-23.** A non-ASCII digest is now a mismatch rather than a `TypeError`: `audit/ledger.py` grew `digests_equal`, used by all five `hmac.compare_digest` sites (both readers), so ordinary corruption of one byte in a `hash` no longer permanently 500s every future search covering that immutable object. Both `json.loads` handlers (the line loop and the seed walk) now catch `RecursionError` alongside `json.JSONDecodeError`, so a deeply-nested line is counted `malformed` and the rest of the page survives.
+
+**Defect (3) remains open and is the reason this item is not fully done.** `_contains_forbidden_content` still walks `query_shape` with no depth cap. Measured on 2026-08-23 against the shipped tree (Python 3.11, `sys.getrecursionlimit()` 1000): LIST nesting first raises around depth **~330**, DICT around **~1000** — the ~3x gap is the structural generator-frame cost the original note describes, so any cap must be sized against the LIST cost. The exact integer is harness-sensitive (±1 per intervening frame) and is LOWER inside an async request handler, so it is deliberately stated as an approximation: the cap must be chosen with margin, never tuned to a measured boundary. `Policy.max_where_depth` defaults to **5**, so a legitimate `query_shape` sits three orders of magnitude below the LIST threshold. The remaining decision is the cap VALUE and is a maintainer call, since the screener is a security control whose `True` means *reject* and the cap must fail closed (over-nested ⇒ `malformed`).
+
+**Surfaced 2026-08-12 by `security-invariant-reviewer` and `claim-reviewer`
+independently, auditing item 178's own commit, and measured — not reasoned —
+against the post-fix tree.** All three are **pre-existing** (items 154/172),
+not caused by item 178; what item 178 briefly added was a module-docstring
+sentence asserting they did not exist, corrected in that same commit to name
+them and point here.
+
+Each is the same defect class item 178 closed for `seq`: a line the reader is
+supposed to *count* as `malformed`/`unverified` instead raises out of
+`search_worm_archive`, hits the route's `mask_unexpected()`
+(`api/admin_observability_routes.py`), and returns a generic HTTP 500. The
+cost is availability plus the loss of every genuine record the page had
+already accumulated — nothing leaks (the masked body is
+`PUBLIC_INTERNAL_ERROR`). Because a WORM object is immutable, one bad object
+poisons every future search whose window covers that day, permanently.
+
+1. **A non-ASCII `hash` raises `TypeError` in `hmac.compare_digest`**
+   (`audit/ledger.py`'s `verify_envelope_hash`). `LedgerRecord.hash` is a
+   plain `str` with no hex/ASCII constraint. **This is the one that does not
+   need an attacker:** `_get_object_text` decodes the object body with
+   `errors="replace"`, so a single corrupted byte inside a genuine segment's
+   `hash` field becomes U+FFFD and 500s the endpoint. Measured:
+   `verify_envelope_hash({... "hash": "abc\ufffd"})` raises rather than
+   returning `False`.
+2. **`json.loads` on a deeply-nested line raises `RecursionError`**, which is
+   a `RuntimeError` and so is not caught by the `except json.JSONDecodeError`
+   at either call site (the main line loop and the seed walk). Measured:
+   1,000 nested arrays raises, 900 does not — and that is a ~2 KB line
+   (`"[" * 1000 + "]" * 1000`), four orders of magnitude under
+   `_MAX_OBJECT_BYTES`, so the byte bounds are no defence at all. The
+   available stack inside an async request handler is smaller than in a bare
+   probe, so the production threshold is lower still.
+3. **`_contains_forbidden_content` walks `query_shape` with no depth cap.**
+   **Superseded 2026-08-23 — the ~480/~2x figures below were re-measured and
+   are wrong; see the depths recorded at the top of this item (~330 list,
+   ~1000 dict, a ~3x gap). The original text is kept only for the structural
+   explanation, which still holds.** Measured through the real function, and
+   the threshold is **shape-dependent**:
+   LIST nesting raises at depth ~480 (300 is fine), while DICT nesting survives
+   to ~1000. The ~2x gap is structural — the list branch is
+   `any(_contains_forbidden_content(item) for item in node)`, costing a
+   generator frame *plus* a call frame per level, where the dict branch costs
+   one. Any cap must therefore be sized against the LIST cost, not the dict
+   one. Reachable past every other guard — the envelope
+   can be genuine, hash-verifying, chain-linked, and schema-valid, since
+   `query_shape` is a `Dict[str, Any]` that `extra="forbid"` cannot constrain.
+
+**What to do (when prioritized).** (1) and (2) are mechanical: make
+`verify_envelope_hash` return `False` for a non-ASCII `hash` (an `.isascii()`
+pre-check, or compare on `.encode()`d bytes) — note it is shared by four
+readers, so the change is theirs too, and `audit/ledger.py`'s own
+`verify_chain` has the SAME `hmac.compare_digest(expected, record.hash)`
+hazard (measured: identical `TypeError`), reachable via `querygate-audit
+verify` against a locally-corrupted ledger, so the real scope is five call
+sites and both readers, not four and one; and widen both handlers to
+`except (json.JSONDecodeError, RecursionError)`. (3) needs **a maintainer
+decision on the depth cap**, which is why this is not a same-session fix: the
+screener is a security control whose `True` means *reject*, so a cap must
+fail closed (over-nested ⇒ `malformed`) and must sit above anything
+`audit/events.py`'s `normalize_query_shape` can legitimately emit — bounded
+by `max_where_depth` plus a constant for `set_op` arms and cte bodies, which
+should be measured rather than assumed. Pin each shape with its own
+regression test, then restore the absolute form of the module docstring's
+standing-contract sentence.
+
+**Effort:** S–M. **Depends on:** 134 (shipped).
+
 ### 195. The narrowing path: `Policy.templates_only` enforcement plus an observed-shape recorder that drafts a template from real traffic ✅ DONE
 
 **Why.** QueryGate's read AST is deliberately expressive (items 99–106), so a
