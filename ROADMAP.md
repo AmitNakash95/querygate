@@ -82,6 +82,83 @@ independently eligible item, or stop if roadmap order/dependencies leave none.
 Never steal or auto-expire a claim based on its timestamp. Remove your own
 claim when the work ships or before explicitly handing the item back.
 
+### Phase S — Ship as a paid SaaS product (gates everything else)
+
+Owner decision, 2026-08-23: QueryGate is **proprietary, closed-source, sold as a
+paid monthly subscription**. See `docs/business/GTM_SAAS.md`, which supersedes
+`GTM_EXECUTION_PLAN.md` and the Shape A / BSL decision of 2026-08-21 in full.
+
+This phase precedes Phase 0 not because it is more valuable, but because it is
+**gating**: until the product can be bought, installed, activated and enforced,
+no amount of moat deepens revenue. Items 199–209 are reserved for the concurrent
+human-SSO/identity stream; these start at 210.
+
+**Sequencing rules inside this phase:**
+
+- **214's spike runs first, before anything else in the phase.** If this
+  codebase cannot be compiled (pydantic-core is a Rust extension, the MCP SDK
+  resolves tool annotations against the wrapping function's `__globals__` at
+  registration time), the whole packaging plan changes shape and we need that
+  answer in week one.
+- **210 unblocks every doc-touching item** — until the BSL apparatus is gone,
+  every licensing claim in the repo contradicts the product.
+- **211 ships in `observe` mode.** Enforcement going live is a control-plane
+  action (issuing `enforcement: enforce`), never a code change — so the gate is
+  exercised on real deployments before it can stop a query.
+- **217 is blocked on a legal entity existing** (Stripe will not onboard
+  without one). That is not a code dependency and cannot be worked around.
+
+- [ ] **214** — Single obfuscated compiled binary. **Spike ✅ done
+  (2026-08-24) — see `docs/COMPILED_BINARY_SPIKE.md`.** Technically GO: all four
+  risk areas identical to the interpreter with `--standalone
+  --include-package=querygate`, after fixing the MCP registration bug the spike
+  found. **NOT blocked — the toolchain changed.** Nuitka is AGPLv3+ (refused by
+  `make license-check`), but §9 evaluated **Cython + PyInstaller**: both
+  licence-clean, and the modules Cython cannot compile (pydantic models) are
+  already published as OpenAPI/MCP schemas, so nothing worth protecting is lost.
+  Next, none of it gated on the owner: extract response models out of
+  `execution/service.py` (12) and `write_execution.py` (2) so the enforcement
+  funnels become compilable; add `-X annotation_typing=False` plus a per-module
+  compile list; verify the suite against a mixed `.so`/`.py` tree; then
+  PyInstaller-bundle. Still open: Linux/Docker, the ODBC path, and a
+  support-debugging procedure.
+- [ ] **210** — Proprietary licence transition; retire the BSL apparatus.
+  *Unblocks every other item that touches licensing text, and removes two CI
+  gates that would otherwise fail once `LICENSE` changes.*
+- [ ] **212** — Control plane: accounts, Stripe subscriptions, entitlement
+  issuance. *The vendor side; without it 211 has nothing to verify. Ordered
+  before 211 because 211's own dependency column names it.*
+- [ ] **211** — Subscription layer: the entitlement gate (two funnels, reads and
+  writes). *The wrapper that makes it a subscription. Ships in observe mode.
+  Its observe-mode shell can be built against a fixture entitlement, so it may
+  start in parallel once 212's payload format is frozen.*
+- [ ] **213** — Activation: bind a deployment to a subscription via OAuth2 +
+  MFA. **Blocked on item 199 (`identity/`), which is not merged** — it is
+  uncommitted work on the identity stream, absent from this branch and from HEAD.
+  *Reuses 199's mechanism, not its store: `identity/` is deployment-side and
+  governs who may use the gateway; activation is vendor-side and governs whether
+  it may run at all.*
+- [ ] **220** — Deny-by-default at table/column granularity (a `Policy`
+  allow-list with no allow-all fallback). **Blocks 215.** *Today an empty
+  `allowed_tables` means allow-**everything**, so the "safe-by-default starter
+  policy" 215 promises is inexpressible. Opt-in, default off, so no existing
+  deployment shifts behaviour.*
+- [ ] **215** — One-command install and first-boot self-configuration.
+  *"Single command and it's set up" is the promise; today it needs two YAML
+  files plus env configuration.*
+- [ ] **216** — Renewal countdown and lapse UX. *Depends on 211.*
+- [ ] **217** — Customer portal: signup, checkout, downloads, docs.
+  **Blocked on the legal entity.**
+- [ ] **218** — Setup guides and quickstart docs for the SaaS motion.
+- [ ] **219** — Pre-launch codebase cleanup pass. *Runs `repo-audit`,
+  `dep-audit`, `test-gap`, `claim-verify`, `security-invariant-check`, and
+  closes the two open defects (192, 194).*
+
+**Superseded by this phase:** item **197** (offline entitlement token,
+soft-warn, not-before-customers) is replaced in premise by 210–213 — the token
+now blocks rather than warns. Item **198** (Notary) keeps its scope and stays
+deferred; it is not part of shipping the subscription.
+
 ### Phase 0 — Moat & proof (highest ROI: wins the security review)
 
 - [x] **90** — Delegated agent identity into policy + dual-identity audit (F1).
