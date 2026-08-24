@@ -360,3 +360,162 @@ verify again.
 **Still untested:** PyInstaller itself. §9 measured Cython only. The bundling
 step, the mixed-extension tree, Linux/Docker, and the ODBC path all remain
 open — see §6, which still applies.
+
+---
+
+## 10. Whole-codebase Cython sweep — 2026-08-24
+
+§9 measured three modules and projected the rest. This section replaces the
+projection with a count, and found two things projection could not.
+
+**116 of 117 compilable modules transpile.** An AST sweep classifies
+`src/querygate/` as **117 modules with no `BaseModel`** (compilable) and **47
+that define one** (blocked by §9.2). Cythonizing all 117 with
+`-X annotation_typing=False` produced exactly **one hard failure**:
+
+```
+src/querygate/api/_errors.py:120:27: starred expression is not allowed here
+```
+
+`except (HTTPException, *_ACTIONABLE):` is valid Python and Cython rejects it
+outright. Fixed by hoisting the tuple to a module constant — same tuple, same
+behaviour, one binding — so the count is now **117/117**. Worth noting the
+shape: the blocker was not a deep incompatibility but a single syntax
+construct, and it sat on the REST error path.
+
+**`python -m querygate.<module>` does not work on a compiled module.** Measured:
+
+```
+$ python -m querygate.cli
+/…/python: No code object available for querygate.cli
+```
+
+A Cython extension module has no code object, and `runpy` needs one. This is a
+**packaging constraint with a documentation consequence**: CLAUDE.md's Commands
+section tells operators to run `poetry run python -m querygate.run`, and
+`docs/RELEASING.md` and the quickstart use the same form. Console-script entry
+points (`querygate`, `querygate-audit`, …) are unaffected — they import and call
+rather than executing a module — so the fix is to standardise on those and stop
+documenting `-m`. Any module that must stay `-m`-invokable has to stay
+interpreted.
+
+### 10.1 What stays readable, quantified
+
+§9.3 said the AST validators stay readable. The number:
+
+| Module | Validators | Lines |
+|---|---|---|
+| `query_ast/models.py` | 21 | 396 |
+| `write_ast/models.py` | 4 | 50 |
+| `policy/models.py` | 3 | 50 |
+| `connections/models.py` | 2 | 106 |
+| **Total** | **30** | **602** |
+
+602 lines of enforcement logic — join-form, window-scope, CTE-name, set-op and
+credential-shape checks — inside modules Cython cannot compile.
+
+**There is a mitigation and it is mechanical.** A pydantic model is only
+un-compilable because of its *methods*; the field declarations are declarative
+and are the published contract anyway. Moving each validator's body into a
+sibling `validators.py` and leaving a one-line delegation behind puts the logic
+in a compilable module while the model shell stays interpreted:
+
+```python
+# query_ast/models.py — interpreted, and already public via OpenAPI
+@pyd.model_validator(mode="after")
+def _validate_join_form(self):
+    return _validators.validate_join_form(self)
+
+# query_ast/validators.py — compilable
+def validate_join_form(q): ...
+```
+
+Filed as TODO.md item 221. It is not free — 30 call sites across four modules on
+the enforcement core — so it is a deliberate decision, not a cleanup.
+
+### 10.2 Honest limits of this sweep
+
+- The bulk compile was run **in the working tree**, which was the wrong place
+  for it; the artifacts were removed afterwards and the tree verified clean, but
+  a scratch copy was the right venue and a repeat should use one.
+- A **clean full-suite run against a fully mixed `.so`/`.py` tree was not
+  completed** — the sweep surfaced the two findings above and was then torn
+  down. `service.py` + `write_execution.py` compiled together *were* verified
+  against the full suite (§9.3); 117 modules at once were not.
+- Linux, the Docker image, and the ODBC path remain untested, exactly as §6 says.
+
+---
+
+## 11. PyInstaller — measured 2026-08-24, and it found the worst bug yet
+
+§9 recommended Cython + PyInstaller while conceding PyInstaller "has not been
+run at all". It has now. It works, it is smaller than Nuitka, and it surfaced a
+defect that would have shipped a container that cannot start.
+
+### 11.1 The bundle behaves like the interpreter
+
+`pyinstaller --onedir --collect-submodules querygate --collect-data querygate`,
+running the same four-probe script as §3:
+
+| Probe | Interpreted | PyInstaller |
+|---|---|---|
+| A pydantic-core | validates, still rejects | identical |
+| B SQLAlchemy | correct SQL | identical |
+| **C MCP tools** | **15**, schemas 3/5/4 | **15**, 3/5/4 — identical |
+| D console scripts | 12 | 0 — see below |
+
+**Bundle: 110 MB**, against Nuitka's 227 MB / 256 MB.
+
+Two things worth noting. **MCP tools survived with no equivalent of Nuitka's
+`--include-package`** — `--collect-submodules querygate` picks up the modules
+`importlib.import_module` hides from static analysis. And the D row is a **probe
+artifact, not a product break**: `importlib.metadata.entry_points()` returns
+nothing in a bundle because there is no installed distribution metadata, but no
+runtime code in `src/querygate/` calls it — only the probe did. A bundled
+product ships entry binaries rather than discovering entry points.
+
+### 11.2 The finding: a frozen bundle cannot start on default config
+
+```
+AppConfig()               → ModuleNotFoundError: No module named 'examples'
+import querygate.help.corpus → ModuleNotFoundError
+```
+
+`core/config.py` resolves `connections_file` / `policy_file` through
+`importlib.resources.files("examples")`, and **`examples` is a separate package
+from `querygate`** — so `--collect-data querygate` does not collect it. The
+result is a container that builds cleanly, passes every packaging check, and
+then dies on startup for anyone who has not supplied their own config. Item 215
+("no operator-authored file required to reach activation") makes default config
+the *normal* path, so this would hit the flagship install flow first.
+
+**Remedy, verified:**
+
+```
+--collect-all examples --collect-data querygate.help
+```
+
+Re-measured: `connections_exists: true`, `policy_exists: true`,
+`help_corpus_import: true`.
+
+**This is exactly the class `tests/unit/test_release_metadata.py::
+test_default_example_config_paths_work_outside_repository_cwd` guards** — the
+test I deleted by overwriting the file, and restored after two reviewers caught
+it. It is the only assertion in the suite that would have failed on this, and it
+was deleted in the same branch that adopted the packaging that breaks it. Keep
+it, and treat the other four `importlib.resources` call sites
+(`catalog_cli.py`, `catalog/adaptive_learning_benchmark.py`, `help/corpus.py`,
+`mcp/tools/__init__.py`) as the same risk class until each is exercised in a
+bundle.
+
+### 11.3 Where item 214 now stands
+
+| Question | Status |
+|---|---|
+| Does Cython compile the enforcement core? | **Measured** — 117/117 compilable modules, both funnels verified against the full suite |
+| Does PyInstaller bundle and run? | **Measured** — identical behaviour, 110 MB |
+| Licences | **Verified** — Apache-2.0 / GPLv2-with-exception |
+| Does the bundle start on default config? | **Measured, was broken, remedy verified** |
+| Linux, Docker image, ODBC path | **Untested** |
+| Full suite against a 117-module mixed tree | **Not completed** (§10.2) |
+| ~602 lines of validator logic still readable | **Quantified** — item 221 |
