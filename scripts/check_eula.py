@@ -41,7 +41,24 @@ LICENCE_FILE = "LICENSE"
 _DRAFT_BANNER = "DRAFT — FOR LAWYER REVIEW"
 #: `LICENSE` uses angle-bracket placeholders (`<LICENSOR — legal entity, to be
 #: supplied>`), not the EULA's square brackets, so it needs its own pattern.
-_ANGLE_PLACEHOLDER_RE = re.compile(r"<[A-Z_]{3,}[^<>\n]{0,120}>")
+_ANGLE_SPAN_RE = re.compile(r"<([^<>\n]{2,120})>")
+
+
+def _is_angle_placeholder(body: str) -> bool:
+    """Whether a `<...>` span is a fill-in blank rather than prose.
+
+    An ALL-CAPS-only pattern missed `<licensor legal entity, to be supplied>`;
+    widening it to accept lowercase immediately started matching `<html>` and
+    `<a@b.com>`. So shape matters more than case: a placeholder *describes* a
+    blank, so it either shouts or carries a separator. An email, a URL and an
+    HTML tag do none of that.
+    """
+    if any(ch in body for ch in "@/"):
+        return False
+    if body.isupper():
+        return True
+    return " " in body or "_" in body
+
 
 # Any `[...]` span that is NOT a markdown link. Three exclusions, all needed:
 #   (?<!\])  — the *label* half of a reference link, `[text][ref]`; without this
@@ -53,6 +70,22 @@ _PLACEHOLDER_RE = re.compile(r"(?<!\])\[([^\[\]\n]{2,120})\](?![(\[])")
 # Spans that are legitimately bracketed prose rather than a fill-in blank.
 _ALLOWED = frozenset({"sic", "BRACKETED"})
 
+#: The deleted BSL gate pinned `Change License: Apache License, Version 2.0`
+#: "so a silent edit cannot weaken it". That specific pin died with the flip,
+#: but its PURPOSE — a positive assertion about what LICENSE says — had no
+#: successor, so an empty or accidentally-permissive LICENSE passed cleanly.
+#: These match operative GRANT clauses, not mentions: the BSL draft names
+#: "Apache License, Version 2.0" as a Change License parameter and must not trip.
+_PERMISSIVE_GRANTS = (
+    ("MIT", re.compile(r"Permission is hereby granted, free of charge", re.I)),
+    ("Apache-2.0", re.compile(r"Licensed under the Apache License", re.I)),
+    ("BSD", re.compile(r"Redistribution and use in source and binary forms", re.I)),
+    ("GPL", re.compile(r"GNU (GENERAL|LESSER GENERAL) PUBLIC LICENSE", re.I)),
+)
+
+#: A LICENSE shorter than this is not a licence.
+_MIN_LICENCE_CHARS = 200
+
 
 #: A placeholder whose closing delimiter is on the *next* line. Both patterns
 #: above exclude `\n`, so a wrapped placeholder is invisible to them — a
@@ -62,7 +95,7 @@ _ALLOWED = frozenset({"sic", "BRACKETED"})
 #: Deliberately narrow: an opening delimiter followed by placeholder-shaped
 #: content (uppercase ASCII, or any non-Latin script) and no close on the line.
 _WRAPPED_RE = re.compile(
-    r"(?:\[|<)(?:[A-Z][A-Z_ ]{2,}|[^\x00-\x7F][^\]\>\n]{2,})[^\]\>\n]*$",
+    r"(?:\[|<)(?:[A-Z][A-Za-z_ ]{2,}|[^\x00-\x7F][^\]\>\n]{2,})[^\]\>\n]*$",
     re.MULTILINE,
 )
 
@@ -102,26 +135,51 @@ def check(*, release: bool, texts: dict[str, str] | None = None) -> list[str]:
                 f"{shown}{more}. The licence of record cannot ship with blanks."
             )
 
-    # `LICENSE` is only checked against the real file — it has no test seam,
-    # because a caller-supplied `texts` must never be able to skip it.
-    if release and texts is None:
-        problems.extend(check_licence_file((ROOT / LICENCE_FILE).read_text("utf-8")))
+    # `LICENSE` is checked against the real file only — `texts` is a seam for
+    # the EULA detectors and must never substitute for it.
+    if texts is None:
+        problems.extend(
+            check_licence_file((ROOT / LICENCE_FILE).read_text("utf-8"), release=release)
+        )
     return problems
 
 
-def check_licence_file(text: str) -> list[str]:
-    """Problems with `LICENSE` that must stop a release.
+def check_licence_file(text: str, *, release: bool = True) -> list[str]:
+    """Problems with `LICENSE`.
 
-    Split out so it is directly testable without a `texts` seam on `check()`.
+    Two tiers, deliberately. A permissive grant or a truncated file is **never**
+    acceptable and is reported in both modes, so the per-push gate has real
+    teeth. The draft banner and unfilled placeholders are a *known, tracked*
+    state (item 210 replaces the BSL draft with the proprietary notice), so they
+    are release-only — failing every push on already-scheduled work just teaches
+    people to ignore a red CI.
     """
     problems: list[str] = []
+    for name, pattern in _PERMISSIVE_GRANTS:
+        if pattern.search(text):
+            problems.append(
+                f"{LICENCE_FILE} contains the operative grant clause of a permissive "
+                f"licence ({name}). QueryGate ships proprietary; publishing an image "
+                "whose LICENSE gives the product away is not recoverable."
+            )
+    if len(text.strip()) < _MIN_LICENCE_CHARS:
+        problems.append(
+            f"{LICENCE_FILE} is {len(text.strip())} characters — too short to be a "
+            "licence. An empty or truncated LICENSE ships in the wheel, sdist and image."
+        )
+    if not release:
+        return problems
     if _DRAFT_BANNER in text:
         problems.append(
             f"{LICENCE_FILE} still carries the draft banner ({_DRAFT_BANNER!r}), which says "
             "the file grants nothing and is not in force. It ships inside the wheel, the "
             "sdist and the image, so a release would publish a product with no licence."
         )
-    angle = _ANGLE_PLACEHOLDER_RE.findall(text) + wrapped_placeholders(text)
+    angle = (
+        [m.group(1) for m in _ANGLE_SPAN_RE.finditer(text) if _is_angle_placeholder(m.group(1))]
+        + [m.group(1) for m in _PLACEHOLDER_RE.finditer(text) if m.group(1) not in _ALLOWED]
+        + wrapped_placeholders(text)
+    )
     if angle:
         shown = ", ".join(repr(a) for a in angle[:4])
         more = f" (+{len(angle) - 4} more)" if len(angle) > 4 else ""
