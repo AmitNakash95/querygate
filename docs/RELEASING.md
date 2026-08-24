@@ -252,18 +252,24 @@ same tag gate as the image: publishing is never automatic on a `main` commit.
 
 ## The EULA is the licence of record
 
-QueryGate ships **proprietary and closed-source** under a paid monthly
-subscription (`docs/business/GTM_SAAS.md`, TODO.md item 210). There is no BSL
-flip and no Change Date: `docs/legal/EULA.en.md` (with the Hebrew
-`EULA.he.md`) is the document a customer accepts, and `LICENSE` carries the
-proprietary notice.
+QueryGate **will ship** proprietary and closed-source under a paid monthly
+subscription — decision recorded in `docs/business/GTM_SAAS.md`, transition
+tracked as **open** item 210. There is no BSL flip and no Change Date.
+
+⚠️ **None of that has landed yet, which is exactly why these gates exist.**
+`LICENSE` is still an unstamped BSL draft carrying
+`DRAFT — FOR LAWYER REVIEW … NOT YET IN FORCE` and four `<…>` placeholders, and
+`docs/legal/EULA.{en,he}.md` still carry 19 unfilled blanks. When the transition
+completes, `EULA.en.md` (with the Hebrew `EULA.he.md`) becomes the document a
+customer accepts and `LICENSE` carries the proprietary notice.
 
 ```bash
 make eula-check            # tolerant: reports outstanding placeholders, exit 0
 make eula-check-release    # pre-tag: refuses ANY unfilled placeholder
 ```
 
-- **`make eula-check`** runs on every push (CI) and inside `make release-check`.
+- **`make eula-check`** runs on pushes to `main` and on every pull request (CI),
+  and inside `make release-check`.
   While counsel has not settled the text it reports how many placeholders remain
   and passes, so development is never blocked by an unfinished legal document.
 - **`make eula-check-release`** is the pre-tag gate, wired into
