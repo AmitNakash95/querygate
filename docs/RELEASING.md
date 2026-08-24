@@ -250,40 +250,30 @@ Until that step lands, the wheel and sdist are distributed as release artifacts 
 verified by `SHA256SUMS` / `make verify-release`. When it does land it must inherit the
 same tag gate as the image: publishing is never automatic on a `main` commit.
 
-## Stamping the BSL Change Date
+## The EULA is the licence of record
 
-QueryGate's licence **will be** the Business Source License 1.1 (`LICENSE` is a draft
-not yet in force), converting to Apache-2.0
-**four years after each release** (`docs/business/GTM_EXECUTION_PLAN.md` §2.3). That is
-per *release*, not a constant: `LICENSE` names the release it governs and carries that
-release's own Change Date, which is why `Licensed Work` reads `QueryGate <version>`
-rather than "all versions" — one date cannot govern releases stamped four years apart.
-
-The date is **derived, never typed**:
+QueryGate ships **proprietary and closed-source** under a paid monthly
+subscription (`docs/business/GTM_SAAS.md`, TODO.md item 210). There is no BSL
+flip and no Change Date: `docs/legal/EULA.en.md` (with the Hebrew
+`EULA.he.md`) is the document a customer accepts, and `LICENSE` carries the
+proprietary notice.
 
 ```bash
-make stamp-change-date     # LICENSE <- this version + (CHANGELOG release date + 4 years)
+make eula-check            # tolerant: reports outstanding placeholders, exit 0
+make eula-check-release    # pre-tag: refuses ANY unfilled placeholder
 ```
 
-It reads the version from `pyproject.toml` and the release date from that version's
-`CHANGELOG.md` heading (`## [0.1.0] — 2026-07-18`), so a version with no dated changelog
-entry is refused rather than stamped with a guess. Add the changelog entry first.
-
-Two gates hold it:
-
-- **`make change-date-check`** runs on every push (CI) and inside `make release-check`.
-  It fails if the Change Date is not exactly four years after the release date, if it is
-  not a real ISO date, if `Licensed Work` no longer names the current version (a version
-  bump without re-stamping), or if the Change License has been altered from Apache-2.0.
-  While `LICENSE` is still the unstamped draft it asserts the draft is *consistent* —
-  a half-filled draft, banner present but placeholders quietly removed, fails.
-- **`make change-date-check-release`** is the pre-tag gate: everything above, and it
-  additionally refuses any remaining draft banner or `<LICENSOR>` / `<VERSION>` /
-  `<CHANGE_DATE>` placeholder. It runs in `.github/workflows/release.yml` before the
-  image is built, so a tag pushed against an unstamped licence fails the release
-  rather than publishing one. Run it locally before tagging too.
-
-`tests/unit/test_change_date.py` drift-tests both, so the rules cannot rot silently.
+- **`make eula-check`** runs on every push (CI) and inside `make release-check`.
+  While counsel has not settled the text it reports how many placeholders remain
+  and passes, so development is never blocked by an unfinished legal document.
+- **`make eula-check-release`** is the pre-tag gate, wired into
+  `.github/workflows/release.yml` *before* the image is built. A tag pushed while
+  the licence of record still reads `[LICENSOR LEGAL NAME]` or `[ADDRESS]` fails
+  the release rather than publishing a signed image with a blank licence.
+- The placeholder pattern deliberately matches **any** bracketed span, not
+  `\[[A-Z_ ]+\]`. `EULA.he.md`'s placeholders are Hebrew, so an ASCII-uppercase
+  pattern would give a green build on an entirely unfilled Hebrew licence.
+  Markdown links are excluded. Drift-tested by `tests/unit/test_eula.py`.
 
 ## Tagging
 
