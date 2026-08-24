@@ -152,3 +152,43 @@ def test_a_texts_seam_cannot_be_used_to_skip_the_license_check():
 def test_prose_in_angle_brackets_is_not_a_placeholder():
     """`<html>` or an email in angle brackets must not read as a blank."""
     assert check_eula.check_licence_file("Contact <a@b.com> or see <html>.\n") == []
+
+
+# --- wrapped placeholders -----------------------------------------------------
+#
+# Both delimiter patterns exclude `\n`, so a placeholder split across two lines
+# was invisible to them. The BSL gate this replaces had a dedicated test for that
+# shape; dropping the coverage would have been a silent regression.
+
+
+def test_a_placeholder_wrapping_onto_a_second_line_is_caught():
+    wrapped = "Licensor:  <LICENSOR — legal entity,\n           to be supplied>\n"
+    assert check_eula.wrapped_placeholders(wrapped)
+    assert check_eula.check_licence_file(wrapped)
+
+
+def test_a_wrapped_square_bracket_placeholder_is_caught():
+    wrapped = "Between [LICENSOR LEGAL\nNAME], of somewhere.\n"
+    assert check_eula.placeholders(wrapped)
+    assert check_eula.check(release=True, texts={"docs/legal/EULA.en.md": wrapped})
+
+
+def test_a_wrapped_hebrew_placeholder_is_caught():
+    """The Hebrew file is the one an ASCII-shaped guard misses twice over."""
+    wrapped = "בין [השם המשפטי\nשל מעניק הרישיון], מכתובת.\n"
+    assert check_eula.wrapped_placeholders(wrapped)
+
+
+def test_ordinary_prose_with_a_less_than_sign_is_not_a_wrapped_placeholder():
+    for benign in (
+        "The term is less than 12 months, and\nrenews automatically.\n",
+        "See section 4 (a < b) for the\ncalculation.\n",
+        "Contact us at <support@example.com>\nfor questions.\n",
+        "A [markdown link](../x.md) and a\nsecond line.\n",
+    ):
+        assert check_eula.wrapped_placeholders(benign) == [], benign
+
+
+def test_a_settled_licence_has_no_wrapped_placeholders():
+    settled = "Parameters\n\nLicensor: Acme Ltd\n\nLicensed Work: QueryGate 1.0.0\n"
+    assert check_eula.wrapped_placeholders(settled) == []
