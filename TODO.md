@@ -244,6 +244,7 @@ order-of-magnitude, not commitments.
 | 217 | Customer portal — OAuth2 signup, Stripe Checkout, subscription and deployment management, cancellation flow stating the no-refund terms before confirming, downloads and docs | XL | 212 |
 | 218 | Setup guides and quickstart docs for the SaaS motion — one-screen quickstart, per-target deploy guides, air-gapped guide, troubleshooting, rewritten `CUSTOMER_README.md` and landing/sales copy | M | 215 |
 | 219 | Pre-launch codebase cleanup pass — `repo-audit`, `dep-audit`, `test-gap`, `claim-verify`, `security-invariant-check`; delete BSL dead code; close open defects 192 and 194; full CI matrix green | L | 210 |
+| 221 | Move validator bodies out of the model classes into compilable sibling modules — 30 validators / 602 lines of enforcement logic (join form, window scope, CTE names, set ops, credential shape) currently ship readable because a module defining `BaseModel` cannot be Cython-compiled | M | 214 |
 | 220 | Deny-by-default at table and column granularity: a `Policy` allow-list with no allow-all fallback, so an empty `allowed_tables` denies instead of allowing. Opt-in (default off) so no existing deployment changes behaviour; the starter policy turns it on | M | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
@@ -4483,3 +4484,55 @@ allowed to be*.
 existing policy with an empty allow-list and the flag unset still allows (no
 behaviour change), and one that the same policy with the flag set denies; both
 mutation-verified; `examples/policy.example.yaml` and the product guide updated.
+
+### 221. Move validator bodies out of the model classes so the enforcement logic can be compiled
+
+**Effort: M. Depends on the item 214 packaging decision.** Owner decision needed
+before starting — this touches the AST enforcement core.
+
+**Why it matters:** item 214's spike measured that a module defining
+`pydantic.BaseModel` subclasses cannot be Cython-compiled at all (pydantic v2's
+metaclass rejects `cyfunction` methods). That leaves **30 validators, 602 lines**
+of real enforcement logic readable in the shipped image:
+
+| Module | Validators | Lines |
+|---|---|---|
+| `query_ast/models.py` | 21 | 396 |
+| `write_ast/models.py` | 4 | 50 |
+| `policy/models.py` | 3 | 50 |
+| `connections/models.py` | 2 | 106 |
+
+Join-form, window-scope, CTE-name, set-op and credential-shape checks — the
+Structural pillar's actual implementation. The *shape* of these models is
+already public (OpenAPI publishes 215 component schemas including every AST
+node), so nothing is lost by leaving the declarations interpreted. The **logic**
+is a different question, and today it ships in the clear.
+
+**What it is:** a mechanical split, per module —
+
+```python
+# query_ast/models.py — stays interpreted; it is the published contract
+@pyd.model_validator(mode="after")
+def _validate_join_form(self):
+    return _validators.validate_join_form(self)
+
+# query_ast/validators.py — compilable, holds the logic
+def validate_join_form(q): ...
+```
+
+- One `validators.py` per model module; the model keeps only the decorator and a
+  one-line delegation.
+- **No behaviour change.** Same functions, same raise sites, same messages.
+- The AST models' recursive-rebuild ordering must survive (see
+  `mcp/tools/__init__.py`'s docstring and item 214) — validators run at
+  validation time, not import time, so this should be inert, but assert it.
+
+**Definition of done:** all four modules split; `pytest -m unit` and
+`-m security` unchanged in count and outcome; each `validators.py` verified to
+Cython-compile with the suite green against the `.so`; a source-level test that
+no `@pyd.*validator`-decorated function in the four model modules contains more
+than a delegation; `security-invariant-check` clean.
+
+**Do not start without the owner's go-ahead** — 30 call sites on the enforcement
+core is not a cleanup, and if item 214 lands on a packaging approach that does
+not need it, the whole item is unnecessary.

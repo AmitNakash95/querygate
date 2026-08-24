@@ -153,6 +153,12 @@ human-SSO/identity stream; these start at 210.
 - [ ] **217** — Customer portal: signup, checkout, downloads, docs.
   **Blocked on the legal entity.**
 - [ ] **218** — Setup guides and quickstart docs for the SaaS motion.
+- [ ] **221** — Move validator bodies out of the model classes so the
+  enforcement logic can be compiled. *Measured residual from 214's spike: 30
+  validators / 602 lines of Structural-pillar logic ship readable, because a
+  module defining `BaseModel` cannot be Cythonized. Mechanical but touches the
+  AST core — **owner decision before starting**, and unnecessary if 214 lands
+  somewhere that does not need it.*
 - [ ] **219** — Pre-launch codebase cleanup pass. *Runs `repo-audit`,
   `dep-audit`, `test-gap`, `claim-verify`, `security-invariant-check`, and
   closes the two open defects (192, 194).*
