@@ -21,7 +21,8 @@
    * <LICENSING_CONTACT — email address or URL>
    * <VERSION — stamped per release>
    * <CHANGE_DATE — stamped per release>
- Change Date stamping is a separate, later work package; see docs/RELEASING.md.
+ This draft is superseded: QueryGate ships proprietary under docs/legal/EULA.en.md
+ (decision 2026-08-23, docs/business/GTM_SAAS.md). Replacing this file is TODO item 210.
 
  Drafting notes for counsel: docs/LICENSE_NOTES.md
  Plain-language explanation for users: docs/LICENSING_FAQ.md

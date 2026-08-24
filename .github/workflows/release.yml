@@ -65,7 +65,7 @@ jobs:
           python-version: "3.11"
 
       - name: EULA placeholder gate (pre-tag)
-        run: python3 scripts/check_eula.py --check --release
+        run: make eula-check-release
 
       - uses: docker/setup-buildx-action@v3
 

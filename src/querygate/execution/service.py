@@ -11,7 +11,6 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, Union
 
-import pydantic as pyd
 import sqlalchemy as sa
 from sqlalchemy.exc import DataError, ProgrammingError
 
@@ -22,14 +21,11 @@ from querygate.catalog.models import (
     CatalogDraftObjectType,
     CatalogDraftTarget,
     CatalogUsageSignalKind,
-    SensitivityClass,
     agent_visible,
     visible_relationships,
 )
 from querygate.catalog.retrieval import (
-    CatalogCitation,
     CatalogSearchResponse,
-    CompactCatalogCitation,
     policy_hidden_identifier_tokens,
     policy_safe_catalog_aliases,
     policy_safe_catalog_text,

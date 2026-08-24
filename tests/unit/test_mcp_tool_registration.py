@@ -127,3 +127,79 @@ def test_typed_tools_still_resolve_their_argument_schemas():
         assert name in by_name, f"{name} is not advertised"
         schema = getattr(by_name[name], "input_schema", None) or {}
         assert schema.get("properties"), f"{name} advertised an empty argument schema"
+
+
+def test_the_ast_rebuild_runs_before_any_tool_module_is_imported():
+    """The ordering the module docstring calls load-bearing, and which had no test.
+
+    `discover_and_register_tools()` must call `rebuild_recursive_ast_cycle(force=True)`
+    *before* importing any tool module: registration builds each tool's JSON
+    schema over the recursive model graph, and a stale graph was observed
+    misattaching a `$ref`'s sibling `description`. That defect is invisible to
+    every count- or presence-based check — the schema is present, just subtly
+    wrong — so without this test, hoisting the imports to module scope (the
+    obvious "fix" for the compiler problem) breaks the guarantee silently.
+    """
+    import sys
+
+    order: list[str] = []
+    real_rebuild = tools_pkg.rebuild_recursive_ast_cycle
+
+    def recording_rebuild(*args, **kwargs):
+        order.append("rebuild")
+        return real_rebuild(*args, **kwargs)
+
+    for name in tools_pkg.TOOL_MODULES:
+        sys.modules.pop(f"querygate.mcp.tools.{name}", None)
+
+    original = tools_pkg.rebuild_recursive_ast_cycle
+    tools_pkg.rebuild_recursive_ast_cycle = recording_rebuild
+    try:
+        real_import = tools_pkg.importlib.import_module
+
+        def recording_import(name, *args, **kwargs):
+            if name.startswith("querygate.mcp.tools."):
+                order.append(f"import:{name.rsplit('.', 1)[-1]}")
+            return real_import(name, *args, **kwargs)
+
+        tools_pkg.importlib.import_module = recording_import
+        try:
+            tools_pkg.discover_and_register_tools()
+        finally:
+            tools_pkg.importlib.import_module = real_import
+    finally:
+        tools_pkg.rebuild_recursive_ast_cycle = original
+
+    assert order, "neither the rebuild nor any import was observed"
+    assert (
+        order[0] == "rebuild"
+    ), f"the AST rebuild must run before any tool module import; observed {order[:3]}"
+
+
+def test_the_mcp_mirrors_have_not_drifted_from_the_service_models():
+    """`BatchXItemToolResult(**r.model_dump())` silently DROPS unknown fields.
+
+    pydantic's default is `extra="ignore"`, so a field added to the service model
+    and forgotten on the MCP mirror is present over REST and absent over MCP,
+    with no exception and a green suite. Item 92/128 added
+    `approval_fingerprint`/`approval_reasons` in exactly that shape.
+    """
+    from querygate.execution import results
+    from querygate.mcp.tools import query as query_tools
+
+    pairs = [
+        ("BatchQueryItemToolResult", results.BatchQueryItemResult),
+        ("BatchExplainItemToolResult", results.BatchExplainItemResult),
+        ("BatchVerdictItemToolResult", results.BatchVerdictItemResult),
+        ("VerdictPlanToolResult", results.VerdictPlan),
+    ]
+    for mirror_name, service_model in pairs:
+        mirror = getattr(query_tools, mirror_name, None)
+        if mirror is None:  # pragma: no cover - mirror renamed or removed
+            continue
+        missing = set(service_model.model_fields) - set(mirror.model_fields)
+        assert not missing, (
+            f"{mirror_name} is missing {sorted(missing)} present on "
+            f"{service_model.__name__}. `**model_dump()` drops them silently, so the "
+            "field would be visible over REST and invisible over MCP."
+        )
