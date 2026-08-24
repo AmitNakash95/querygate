@@ -95,3 +95,60 @@ def test_the_problem_message_names_the_file_and_the_count():
     assert len(problems) == 1
     assert "docs/legal/EULA.en.md" in problems[0]
     assert "2 unfilled placeholder" in problems[0]
+
+
+# --- LICENSE, not just the EULA -----------------------------------------------
+#
+# The deleted BSL Change-Date gate refused a release while `LICENSE` carried its
+# draft banner. Replacing it with an EULA-only gate left that ungated: `LICENSE`
+# ships inside the wheel, sdist and image (enforced by
+# `scripts/check_release_artifacts.py`), so a tag pushed today would publish a
+# signed image whose licence says "NOT YET IN FORCE". These pin the recovered
+# coverage.
+
+
+def test_live_license_still_carries_the_draft_banner():
+    """Documents the real state. Flips to the negative when the notice lands."""
+    text = (check_eula.ROOT / check_eula.LICENCE_FILE).read_text("utf-8")
+    assert check_eula.check_licence_file(text), (
+        "LICENSE no longer looks like a draft — update this test and "
+        "test_live_release_mode_currently_refuses together"
+    )
+
+
+def test_release_mode_refuses_the_draft_license_via_the_top_level_check():
+    """`check(release=True)` must reach LICENSE, not only the EULA files."""
+    problems = check_eula.check(release=True)
+    assert any(check_eula.LICENCE_FILE in p for p in problems), problems
+
+
+def test_a_settled_license_passes():
+    settled = "Parameters\n\nLicensor: Acme Ltd\n\nLicensed Work: QueryGate 1.0.0\n"
+    assert check_eula.check_licence_file(settled) == []
+
+
+def test_the_draft_banner_alone_is_enough_to_refuse():
+    """Placeholders could all be filled and the banner still make it inert."""
+    banner_only = "DRAFT — FOR LAWYER REVIEW. NOT LEGAL ADVICE.\n\nLicensor: Acme Ltd\n"
+    problems = check_eula.check_licence_file(banner_only)
+    assert len(problems) == 1 and "draft banner" in problems[0]
+
+
+def test_angle_placeholders_alone_are_enough_to_refuse():
+    """And the inverse: banner removed, placeholders forgotten."""
+    text = "Licensor: <LICENSOR — legal entity, to be supplied>\n"
+    problems = check_eula.check_licence_file(text)
+    assert len(problems) == 1 and "placeholder" in problems[0]
+
+
+def test_a_texts_seam_cannot_be_used_to_skip_the_license_check():
+    """`texts` exists for the EULA detectors; it must not disable LICENSE."""
+    assert check_eula.check(release=True, texts={}) == []
+    assert any(
+        check_eula.LICENCE_FILE in p for p in check_eula.check(release=True)
+    ), "the real call must still reach LICENSE"
+
+
+def test_prose_in_angle_brackets_is_not_a_placeholder():
+    """`<html>` or an email in angle brackets must not read as a blank."""
+    assert check_eula.check_licence_file("Contact <a@b.com> or see <html>.\n") == []
