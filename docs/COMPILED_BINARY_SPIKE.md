@@ -313,12 +313,21 @@ shape is public even where the name is not.
 What is genuinely worth protecting is the **enforcement logic**: policy
 validation, schema validation, the compiler, the session guardrails, and the
 future subscription gate. Those are pure-logic modules with no `BaseModel`.
-**One of them has actually been measured** — `compiler/sqlalchemy_compiler.py`
-compiled and 123/123 of its tests passed against the `.so`;
-`execution/service.py` compiled and the full unit suite passed against it. The
-rest is projection from n=2, and this codebase has already produced two distinct
-Cython import-time failures out of the first two modules tried (§9.2), so treat
-"every one Cythonizes" as a hypothesis to test module by module, not a result.
+**Three have actually been measured** (2026-08-24):
+
+| Module | Result |
+|---|---|
+| `compiler/sqlalchemy_compiler.py` | compiled; 123/123 of its tests green against the `.so` |
+| `execution/service.py` — the read funnel | compiled; full unit suite green |
+| `execution/write_execution.py` — the write funnel | compiled; full unit suite green |
+
+The last two were compiled **together**, with the whole suite (3,395 tests)
+passing against both native extensions at once — so the two enforcement funnels
+item 211's gate lands on are both proven compilable, not projected.
+
+Beyond those three it is still projection, and this codebase produced two
+distinct Cython import-time failures out of the first two modules tried (§9.2).
+Treat "every module Cythonizes" as a hypothesis to test module by module.
 
 **One refactor stands in the way.** `execution/service.py` — the read
 enforcement funnel, and where item 211's gate call site goes — defines 12
@@ -340,8 +349,10 @@ waiting on the AGPL question:
 3. Selective compilation is arguably *better* than Nuitka's all-or-nothing: the
    protected set is an explicit, reviewable list rather than a side effect.
 
-**Work it implies**, none of it blocked on anyone: extract response models out of
-`execution/service.py` and `execution/write_execution.py`; add
+**Work it implies**, none of it blocked on anyone: ~~extract response models out
+of `execution/service.py` and `execution/write_execution.py`~~ (**done** — both
+funnels are free of `BaseModel` definitions and both compile, pinned by
+`tests/unit/test_execution_results_contract.py`); add
 `-X annotation_typing=False` and a per-module compile list to the build; verify
 the full suite against a mixed `.so`/`.py` tree; then PyInstaller-bundle and
 verify again.
