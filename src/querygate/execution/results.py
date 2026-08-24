@@ -12,9 +12,14 @@ subscription gate lands (TODO.md item 211). That is exactly the module worth
 compiling, so the twelve response models it used to define moved here, leaving
 `service.py` free of `BaseModel` definitions and therefore compilable.
 
-Nothing is lost by leaving these interpreted: every one of them is already
-published in the OpenAPI component schemas and the MCP tool schemas, so they are
-a public API contract rather than protectable logic.
+Little is lost by leaving these interpreted: **ten of the twelve are already
+published** in the OpenAPI component schemas, so they are a public API contract
+rather than protectable logic. The exceptions are `BatchExplainItemResult` and
+`BatchVerdictItemResult`, which appear in neither the OpenAPI components nor the
+MCP tool schemas — they are internal shapes, and they stay readable. Both are
+five trivial optional fields, so the exposure is negligible, but the claim is
+"ten of twelve", not "all". `tests/unit/test_execution_results_contract.py`
+pins the split.
 
 `service.py` re-exports each name, so existing `from ...service import
 StructuredQueryResult` imports keep working unchanged.
