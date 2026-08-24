@@ -108,10 +108,15 @@ human-SSO/identity stream; these start at 210.
 - **217 is blocked on a legal entity existing** (Stripe will not onboard
   without one). That is not a code dependency and cannot be worked around.
 
-- [ ] **214** — Single obfuscated compiled binary — **spike first**, then build.
-  *Go/no-go on the entire packaging plan; do it before committing to anything
-  else in this phase.*
-  🚧 **CLAIMED** — owner: `claude/saas-gtm`; started: `2026-08-24T04:31Z`
+- [ ] **214** — Single obfuscated compiled binary. **Spike ✅ done
+  (2026-08-24) — see `docs/COMPILED_BINARY_SPIKE.md`.** Technically GO: all four
+  risk areas identical to the interpreter with `--standalone
+  --include-package=querygate`, after fixing the MCP registration bug the spike
+  found. **The build half is BLOCKED on an owner decision, not on engineering:**
+  Nuitka 4.1.3 is AGPLv3+ and `make license-check` refuses it. Price Nuitka
+  Commercial, or get counsel's read on the AGPL edition, before any further work
+  here. Remaining after that: full suite against a compiled artifact,
+  Linux/Docker build, the ODBC path, and a support-debugging procedure.
 - [ ] **210** — Proprietary licence transition; retire the BSL apparatus.
   *Unblocks every other item that touches licensing text, and removes two CI
   gates that would otherwise fail once `LICENSE` changes.*
