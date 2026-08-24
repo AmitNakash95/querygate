@@ -55,18 +55,17 @@ jobs:
           fi
 
       # The licence gate, before anything is built or published. `LICENSE` is a
-      # BSL draft carrying placeholders until the entity exists and the release is
-      # stamped; without this, pushing a tag would publish a signed image whose
-      # licence says "NOT YET IN FORCE". Release mode additionally refuses any
-      # remaining draft banner or <LICENSOR>/<VERSION>/<CHANGE_DATE> placeholder,
-      # and verifies the Change Date is exactly four years after this version's
-      # CHANGELOG release date.
+      # The EULA is the licence of record for the proprietary subscription
+      # (item 210). Without this, pushing a tag would publish a signed image
+      # whose licence still reads "[LICENSOR LEGAL NAME]" / "[ADDRESS]".
+      # Release mode refuses any unfilled placeholder, in either language --
+      # EULA.he.md's placeholders are Hebrew, so an ASCII-only pattern misses them.
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: BSL licence and Change Date gate (pre-tag)
-        run: python3 scripts/check_change_date.py --check --release
+      - name: EULA placeholder gate (pre-tag)
+        run: python3 scripts/check_eula.py --check --release
 
       - uses: docker/setup-buildx-action@v3
 

@@ -111,6 +111,7 @@ human-SSO/identity stream; these start at 210.
 - [ ] **214** — Single obfuscated compiled binary — **spike first**, then build.
   *Go/no-go on the entire packaging plan; do it before committing to anything
   else in this phase.*
+  🚧 **CLAIMED** — owner: `claude/saas-gtm`; started: `2026-08-24T04:31Z`
 - [ ] **210** — Proprietary licence transition; retire the BSL apparatus.
   *Unblocks every other item that touches licensing text, and removes two CI
   gates that would otherwise fail once `LICENSE` changes.*
