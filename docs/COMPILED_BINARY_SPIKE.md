@@ -2,13 +2,23 @@
 
 **Date:** 2026-08-24 · **Nuitka:** 4.1.3 · **Python:** 3.11.9 · **Host:** macOS arm64, clang 17
 
-> **Verdict: technically GO. Legally BLOCKED pending counsel.**
+> **Verdict: technically GO — all four risk areas clean. Legally BLOCKED
+> pending an owner decision.**
 >
-> Nuitka compiles this codebase and the compiled binary behaves identically to
-> the interpreter on three of four risk areas. The fourth found a **real bug in
-> QueryGate** (now fixed) plus a build-flag requirement. But Nuitka 4.1.3
-> declares **AGPLv3+**, which is a live question for a proprietary
-> closed-source product and is not mine to answer — see §5.
+> Nuitka compiles this codebase, and with one code fix and one build flag the
+> compiled binary is **indistinguishable from the interpreter on all four risk
+> areas**, down to byte-identical MCP tool schemas (§7). Getting there found a
+> **real bug in QueryGate** — a filesystem scan that shipped zero MCP tools
+> silently in any frozen build (§4, now fixed and guarded).
+>
+> The blocker is not technical. Nuitka 4.1.3 declares **AGPLv3+**, which is a
+> live question for a proprietary closed-source product and is not mine to
+> answer — see §5. The recommendation there is to price Nuitka Commercial before
+> spending counsel time on the AGPL edition.
+>
+> Scope caveat, stated up front: this spike measured **four named risk areas on
+> macOS arm64**, not the whole application, not the test suite against a
+> compiled artifact, and not Linux/Docker/ODBC. §6 lists what that leaves open.
 
 ---
 
@@ -156,14 +166,42 @@ Stated plainly so nobody reads more into it than it earns:
 - **Debuggability.** Item 214 requires a documented support procedure for
   reading a stack trace out of a compiled build *before* shipping. Not started.
 
-## 7. Build with `--include-package=querygate`
+## 7. Build with `--include-package=querygate` — clean
 
-Result recorded on completion — see the commit that adds this section's table.
+Third build, with the MCP fix in place and the package included explicitly:
+
+| Probe | Interpreted | Compiled | |
+|---|---|---|---|
+| A pydantic-core | (full result object) | identical | ✅ |
+| B SQLAlchemy | (full result object) | identical | ✅ |
+| C MCP tools | 15 tools; typed schemas 3/5/4 properties | **15 tools; 3/5/4** | ✅ |
+| D console scripts | 12 | 12 | ✅ |
+
+Tool *names* identical, and **every tool's argument schema byte-identical**
+between the two runs — which is the assertion that actually matters, because a
+tool can register with a truncated schema and still be counted. Dist 256 MB
+(up from 227 MB, as expected: the whole `querygate` package is now included
+rather than only what static analysis reached).
+
+**So the build recipe is:**
+
+```
+--standalone --include-package=querygate
+```
+
+The `--include-package` flag is **not optional** and its absence is not
+cosmetic: without it the tool modules are absent from the binary and
+`discover_and_register_tools()` raises `ModuleNotFoundError` at startup. That is
+a loud failure now — before the §4 fix, the same condition was silent. The build
+must assert on it rather than trusting the flag to be remembered: the
+compiled-artifact test in item 214's DoD should include "the compiled binary
+advertises the same tool set as the interpreter", not merely "the binary runs".
 
 ## 8. Recommendation
 
-- **Proceed technically.** Three of four risk areas survive untouched, and the
-  fourth was a genuine bug in QueryGate that is now fixed and guarded.
+- **Proceed technically.** All four risk areas are clean once the §4 fix and the
+  §7 build flag are in place; the one failure was a genuine QueryGate bug, now
+  fixed and guarded.
 - **Do not proceed with Nuitka** until §5 is resolved by the owner. This is the
   gating item for the rest of item 214.
 - **Keep the MCP fix regardless of the packaging outcome.** It is a real

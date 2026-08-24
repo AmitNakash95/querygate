@@ -3928,7 +3928,7 @@ will do.
   own docstring predicts. Run `python3 scripts/claim_drift_sites.py licensing`,
   fix, re-run to empty; **treat the list below as a checklist, not the scope.**
   Two scoping facts the measurement gives us:
-  - **117 of the 209 are in five BSL-*execution* artifacts** —
+  - **126 of the 209 are in five BSL-*execution* artifacts** —
     `GTM_EXECUTION_PLAN.md` (56, already banner-marked superseded),
     `LICENSE_NOTES.md` (29), `PRE_BSL_CLEANUP_PLAN.md` (21),
     `BSL_EXECUTION_PROMPT.md` (11), `GTM_EXECUTION_PROMPT.md` (9). These are
@@ -3936,7 +3936,7 @@ will do.
     Banner-mark or archive them **as whole documents**; line-editing them is
     wasted work and would destroy the historical record of why the decision
     changed.
-  - **That leaves ~92 sites of genuine editing** across `LICENSING_FAQ.md` (23),
+  - **That leaves 83 sites of genuine editing** across `LICENSING_FAQ.md` (23),
     `CONTRIBUTING.md` + `.github/cla/` (13 — the CLA exists for outside
     contributors to a public repo, of which there are now none),
     `CONTAINER_IMAGE_LICENCES.md` (5), `PRODUCT_GUIDE.md` (4), `docs/README.md`
