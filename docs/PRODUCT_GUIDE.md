@@ -4397,9 +4397,18 @@ reasoning behind them, newest first. Added to incrementally as work happens
   rejections),
   rather than narrowing `metrics.py`'s comment to match the broken behaviour;
   the metric is more useful where the rejections are. Item 194's third defect
-  (`_contains_forbidden_content`'s uncapped walk) is deliberately still open:
-  the cap VALUE is a maintainer decision, since the screener is a security
-  control whose `True` means *reject* and must fail closed.
+  (`_contains_forbidden_content`'s uncapped walk) was closed on 2026-08-24
+  with the owner's decision: **cap 64, fail closed, and expose it as a config
+  variable** (`AUDIT_WORM_SEARCH_MAX_QUERY_SHAPE_DEPTH`). Two details are
+  load-bearing. The cap returns `True` (reject) on over-depth, not `False` —
+  the screener's `True` means *reject*, so the opposite choice would have
+  turned a resource bound into a screening bypass, and a test pins that
+  direction specifically. And the config field is bounded ABOVE at 256 rather
+  than left free: the cap exists to keep the walk clear of the interpreter's
+  recursion limit, so an operator raising it without limit would reintroduce
+  the defect it closes. A test exercises the walk at exactly that ceiling in
+  the expensive LIST form, so the maximum configurable value is proven
+  survivable rather than merely plausible.
 
 - **2026-08-23 — Enabling SSO closes the console to shared secrets, by
   default.** The conservative choice was a permissive default with an opt-in

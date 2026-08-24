@@ -624,7 +624,7 @@ claim when the work ships or before explicitly handing the item back.
   deny-by-default and separately granted), but it makes `INFERENCE_RISKS.md`'s
   "bounded since item 179" read broader than it is; the docs half is
   unambiguous, the flooring half is a product decision.* **Depends on 93, 179.**
-- [ ] **194** — three crafted-or-corrupt WORM lines still escape
+- [x] **194** — three crafted-or-corrupt WORM lines still escape
   `search_worm_archive` as an unhandled exception the route masks as a 500 (a
   non-ASCII `hash` in `hmac.compare_digest`, plus unbounded recursion in
   `json.loads` and in `_contains_forbidden_content`). *Surfaced 2026-08-12 by
