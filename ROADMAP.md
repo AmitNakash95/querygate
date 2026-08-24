@@ -112,11 +112,16 @@ human-SSO/identity stream; these start at 210.
   (2026-08-24) — see `docs/COMPILED_BINARY_SPIKE.md`.** Technically GO: all four
   risk areas identical to the interpreter with `--standalone
   --include-package=querygate`, after fixing the MCP registration bug the spike
-  found. **The build half is BLOCKED on an owner decision, not on engineering:**
-  Nuitka 4.1.3 is AGPLv3+ and `make license-check` refuses it. Price Nuitka
-  Commercial, or get counsel's read on the AGPL edition, before any further work
-  here. Remaining after that: full suite against a compiled artifact,
-  Linux/Docker build, the ODBC path, and a support-debugging procedure.
+  found. **NOT blocked — the toolchain changed.** Nuitka is AGPLv3+ (refused by
+  `make license-check`), but §9 evaluated **Cython + PyInstaller**: both
+  licence-clean, and the modules Cython cannot compile (pydantic models) are
+  already published as OpenAPI/MCP schemas, so nothing worth protecting is lost.
+  Next, none of it gated on the owner: extract response models out of
+  `execution/service.py` (12) and `write_execution.py` (2) so the enforcement
+  funnels become compilable; add `-X annotation_typing=False` plus a per-module
+  compile list; verify the suite against a mixed `.so`/`.py` tree; then
+  PyInstaller-bundle. Still open: Linux/Docker, the ODBC path, and a
+  support-debugging procedure.
 - [ ] **210** — Proprietary licence transition; retire the BSL apparatus.
   *Unblocks every other item that touches licensing text, and removes two CI
   gates that would otherwise fail once `LICENSE` changes.*
