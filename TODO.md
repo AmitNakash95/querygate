@@ -3853,7 +3853,10 @@ will do.
   false. Highest exposure: the "no kill switch, no time bomb, no check that can
   refuse to start or block a query" promise.
 - **✅ The `licensing` class is added to `scripts/claim_drift_sites.py` and the
-  sweep is measured: 209 live sites across 25 files** (2026-08-24), against the
+  sweep is measured: 209 live sites across 31 files** when first counted
+  (2026-08-24); **225 today**, because later commits in this very branch added
+  more. The number goes stale fast — **re-run the command rather than trusting
+  it.** Measured against the
   ~20 documents the hand list below named. Exactly the understatement the tool's
   own docstring predicts. Run `python3 scripts/claim_drift_sites.py licensing`,
   fix, re-run to empty; **treat the list below as a checklist, not the scope.**
@@ -3866,7 +3869,11 @@ will do.
     Banner-mark or archive them **as whole documents**; line-editing them is
     wasted work and would destroy the historical record of why the decision
     changed.
-  - **That leaves 83 sites of genuine editing** across `LICENSING_FAQ.md` (23),
+  - **That leaves 83 sites of genuine editing.** The named files below account
+    for 62 of them; the remaining ~21 sit across a further dozen files —
+    including `GTM_SAAS.md` itself (4), `RELEASING.md` (3) and
+    `test_no_phone_home.py` (3) — so run the command for the live list rather
+    than treating this as the decomposition. Named:  `LICENSING_FAQ.md` (23),
     `CONTRIBUTING.md` + `.github/cla/` (13 — the CLA exists for outside
     contributors to a public repo, of which there are now none),
     `CONTAINER_IMAGE_LICENCES.md` (5), `PRODUCT_GUIDE.md` (4), `docs/README.md`

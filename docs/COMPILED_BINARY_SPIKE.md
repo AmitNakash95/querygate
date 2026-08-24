@@ -55,7 +55,10 @@ typed MCP tools have **non-empty** argument schemas rather than merely existing.
 | C | **MCP SDK** — forward-reference resolution at tool registration | **15 tools**, typed schemas resolved (3/5/4 properties) | **0 tools** | ❌ **broke — see §4** |
 | D | **importlib.metadata** — console-script entry points | 12 scripts | 12 scripts | ✅ survives |
 
-Build cost: ~4 minutes wall clock, **227 MB** standalone dist, 73 files.
+Build cost: **6m42s** wall clock on a cold ccache (1,794/1,794 C files missed),
+**227 MB** standalone dist — 73 top-level entries but **2,019 files**, 1,903 of
+them `botocore` data. Worth stating plainly for a packaging decision: this is a
+directory tree, not a single binary.
 
 ## 4. The MCP finding — our bug, not the compiler's
 
@@ -107,7 +110,11 @@ accommodate it.
 **Therefore the build requires `--include-package=querygate`.** Result of that
 build: see §7.
 
-## 5. The licence finding — this one is blocking, and it is not a technical call
+## 5. The Nuitka licence finding — **superseded by §9**, retained for the record
+
+> This section blocked the item until §9 replaced the toolchain. Nuitka's AGPL
+> question is now **moot, not resolved** — we are not using Nuitka. Kept because
+> the reasoning applies to any future build tool.
 
 Nuitka 4.1.3 declares:
 
@@ -203,7 +210,9 @@ must assert on it rather than trusting the flag to be remembered: the
 compiled-artifact test in item 214's DoD should include "the compiled binary
 advertises the same tool set as the interpreter", not merely "the binary runs".
 
-## 8. Recommendation
+## 8. Recommendation — **superseded by §9.4**
+
+> Written before the Cython evaluation. §9.4 is the operative recommendation.
 
 - **Proceed technically.** All four risk areas are clean once the §4 fix and the
   §7 build flag are in place; the one failure was a genuine QueryGate bug, now
@@ -279,18 +288,37 @@ tool schemas publish the same graph. Any customer already has the complete AST
 shape — it is the API contract. Compiling those modules protects nothing that
 is not already in the open.
 
-⚠️ **Not quite every model, and the difference was measured rather than
-assumed.** Of the twelve response models extracted from `execution/service.py`,
-**ten** are published; `BatchExplainItemResult` and `BatchVerdictItemResult`
-appear in neither the OpenAPI components nor the MCP tool schemas and would stay
-readable. Both are five trivial optional fields, so this does not change the
-recommendation — but "all the unprotectable modules are already public" is an
-overstatement, and an earlier draft of this section made it.
+⚠️ **Two corrections, and the first is material to the recommendation.**
+
+**OpenAPI publishes the AST's *shape*, not its *logic*.** Field names, types,
+defaults, enum values and JSON-Schema-expressible constraints are public. The
+**validator bodies are not** — and there are **28** of them in modules Cython
+cannot compile: 21 `@field_validator`/`@model_validator` blocks in
+`query_ast/models.py`, 4 in `write_ast/models.py`, 3 in `policy/models.py`, plus
+behavioural helpers like `CaseSelectItem.as_expression` (the very method named in
+§9.2's error message). Those validators *are* enforcement logic — join-form
+checks, window-scope checks, CTE-name checks, set-op checks. So "compiling those
+modules protects nothing that is not already open" is **wrong**: a meaningful
+share of the AST enforcement boundary stays readable under selective
+compilation. The recommendation trades that residual for licence cleanliness; it
+does not eliminate it, and §9.4 should be read with that in mind.
+
+**And the twelve response models split 10/2, not 12/0.**
+`BatchExplainItemResult` and `BatchVerdictItemResult` are absent from the
+OpenAPI components. Their *class names* are unpublished — but their exact field
+sets are public via the MCP mirrors `BatchExplainItemToolResult` and
+`BatchVerdictItemToolResult` in `run_structured_queries`' output schema. So the
+shape is public even where the name is not.
 
 What is genuinely worth protecting is the **enforcement logic**: policy
 validation, schema validation, the compiler, the session guardrails, and the
-future subscription gate. Every one of those is a pure-logic module with no
-`BaseModel`, and every one Cythonizes.
+future subscription gate. Those are pure-logic modules with no `BaseModel`.
+**One of them has actually been measured** — `compiler/sqlalchemy_compiler.py`
+compiled and 123/123 of its tests passed against the `.so`;
+`execution/service.py` compiled and the full unit suite passed against it. The
+rest is projection from n=2, and this codebase has already produced two distinct
+Cython import-time failures out of the first two modules tried (§9.2), so treat
+"every one Cythonizes" as a hypothesis to test module by module, not a result.
 
 **One refactor stands in the way.** `execution/service.py` — the read
 enforcement funnel, and where item 211's gate call site goes — defines 12
@@ -303,12 +331,12 @@ published OpenAPI schema. Extracting them to `execution/results.py` would leave
 
 ### 9.4 Revised recommendation
 
-**Prefer Cython + PyInstaller over Nuitka**, and stop waiting on the AGPL
-question:
+**Prefer Cython + PyInstaller over Nuitka as the direction to test next**, and stop
+waiting on the AGPL question:
 
 1. It is **free and licence-clean** — no purchase, no counsel time.
-2. It protects **exactly the modules worth protecting**, and the ones it cannot
-   protect are already published as schemas.
+2. It protects the modules most worth protecting — measured for two of them —
+   though **not** the AST validators (§9.3), which stay readable.
 3. Selective compilation is arguably *better* than Nuitka's all-or-nothing: the
    protected set is an explicit, reviewable list rather than a side effect.
 

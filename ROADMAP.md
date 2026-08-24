@@ -112,10 +112,13 @@ human-SSO/identity stream; these start at 210.
   (2026-08-24) — see `docs/COMPILED_BINARY_SPIKE.md`.** Technically GO: all four
   risk areas identical to the interpreter with `--standalone
   --include-package=querygate`, after fixing the MCP registration bug the spike
-  found. **NOT blocked — the toolchain changed.** Nuitka is AGPLv3+ (refused by
+  found. **No longer *legally* blocked — the toolchain changed.** Technically still
+  unproven: PyInstaller has not been run at all, and only two modules have been
+  verified end to end under Cython. Nuitka is AGPLv3+ (refused by
   `make license-check`), but §9 evaluated **Cython + PyInstaller**: both
-  licence-clean, and the modules Cython cannot compile (pydantic models) are
-  already published as OpenAPI/MCP schemas, so nothing worth protecting is lost.
+  licence-clean. The modules Cython cannot compile (pydantic models) are largely
+  published as OpenAPI/MCP schemas — but **not their ~28 validators**, which are
+  enforcement logic and stay readable (spike §9.3). A real residual, not zero.
   Next, none of it gated on the owner: extract response models out of
   `execution/service.py` (12) and `write_execution.py` (2) so the enforcement
   funnels become compilable; add `-X annotation_typing=False` plus a per-module
