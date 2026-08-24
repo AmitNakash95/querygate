@@ -234,6 +234,17 @@ order-of-magnitude, not commitments.
 | 201 | ✅ The WORM archive tier is reachable only against AWS S3 (`endpoint_url` is never set), so on-prem/air-gapped deployments cannot have the immutable copy at all | S | 134 |
 | 202 | Non-ASCII input handling around a few HMAC-based comparisons needs hardening (fail-closed; being addressed) | S | 194, 199 |
 | 203 | A narrow tamper-detection edge case in resumed audit-chain verification (being addressed) | S | 172, 194 |
+| 210 | ✅ Proprietary licence transition: retire the BSL apparatus in favor of Apache-2.0 | M | — |
+| 211 | Reversed with the Apache-2.0 decision (see item 210); not part of this distribution | — | 210 |
+| 212 | Reversed with the Apache-2.0 decision (see item 210); lives in a private control-plane service | — | — |
+| 213 | Reversed with the Apache-2.0 decision (see item 210); never built | — | 199, 212 |
+| 214 | Cancelled with the Apache-2.0 decision (see item 210) | — | — |
+| 215 | One-command install and first-boot self-configuration — no operator-authored file needed to reach activation; safe-by-default starter policy; first connection added through the UI | M | 213 |
+| 216 | Reversed with the Apache-2.0 decision (see item 210); not part of this distribution | — | 211 |
+| 217 | Reversed with the Apache-2.0 decision (see item 210); never built | — | 212 |
+| 218 | Superseded by the Apache-2.0 open-core decision (see item 210) | — | 215 |
+| 219 | Pre-launch codebase cleanup pass — `repo-audit`, `dep-audit`, `test-gap`, `claim-verify`, `security-invariant-check`; delete BSL dead code; close open defects 192 and 194; full CI matrix green | L | 210 |
+| 220 | Deny-by-default at table and column granularity: a `Policy` allow-list with no allow-all fallback, so an empty `allowed_tables` denies instead of allowing. Opt-in (default off) so no existing deployment changes behaviour; the starter policy turns it on | M | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -3680,3 +3691,309 @@ A narrow, fail-closed input-handling gap: a handful of comparisons over caller-s
 ### 203. A narrow tamper-detection edge case in resumed audit-chain verification
 
 A specific combination of conditions on a *resumed* page of the audit ledger's chain-verification walk can under-report a chain break instead of counting it, for a caller who already has write access to the underlying storage. A full, non-resumed verification pass is unaffected, and a weaker secondary signal still remains. Being hardened.
+---
+
+## Reversed: proprietary SaaS subscription plan (items 210-219)
+
+A 2026-08-23 decision to ship QueryGate as a paid closed-source subscription was reversed on 2026-08-28. Apache-2.0 replaced the proprietary licence, and the subscription/entitlement/control-plane work below was removed from the open-source core. Retained here only so the item numbers stay permanent and the history is not silently erased.
+
+
+### 210. Proprietary licence transition — retire the BSL apparatus
+
+**Effort: M.** Blocks everything else that touches licensing text.
+
+**Why it matters:** the repo is wired end-to-end for a BSL flip that will now
+never happen — two CI jobs, three Make targets, a script, a test, and roughly
+thirty documents assert a source-available future and unlimited free production
+use. Shipping a paid product while `LICENSING_FAQ.md` promises *"no licence key
+to obtain"* and *"no check that can refuse to start or block a query"* is not a
+doc bug; it is a written promise that is the exact inverse of what the product
+will do.
+
+**What it is:**
+- **Replace `LICENSE`'s BSL body with the proprietary notice. Do not delete the
+  file** — `pyproject.toml`'s `license-files`, `check_release_artifacts.py`'s
+  wheel/sdist/image assertions, and the Dockerfile's `COPY LICENSE` all require
+  it to exist.
+- **`docs/legal/EULA.{en,he}.md` becomes the licence of record.** Add, for
+  counsel, in both languages: term/renewal/fees/invoicing; **no-refund on
+  cancellation with access to end of the paid period**; effect of non-payment;
+  **suspension distinct from termination**; a cure period consistent with the
+  grace window; **anti-circumvention** (disabling or patching the entitlement
+  check is a material breach — this clause does not exist today and the whole
+  enforcement argument assumes it); notice that the Software enforces the term
+  technically; **licence-data transmission disclosure** (what leaves, how often,
+  retention); licence-service availability; and a **post-termination
+  audit-retrieval carve-out** so exporting one's own records is not a breach.
+- **Delete the Change-Date apparatus**: `make stamp-change-date`,
+  `change-date-check`, `change-date-check-release`, its `release-check` wiring,
+  `scripts/check_change_date.py`, `tests/unit/test_change_date.py`, the
+  `RELEASING.md` sections — **and both CI call sites**, `ci.yml`'s
+  `make change-date-check` and `release.yml`'s direct
+  `python3 scripts/check_change_date.py --check --release`. Removing only the
+  Make targets breaks the tagged-release job.
+- **Preserve two assertions from the deleted test**: the pyproject↔dated-CHANGELOG
+  binding (nothing else asserts it) and the placeholder-refusal release gate,
+  **retargeted at the EULA**, which carries unfilled placeholders and today has
+  no test, script, or CI job referencing it anywhere. The gate must match **any
+  `[…]` span in either language file, not an ASCII-uppercase pattern** —
+  `EULA.he.md`'s placeholders are Hebrew, so the obvious `\[[A-Z_ ]+\]` regex
+  gives a green build on an entirely unfilled Hebrew licence of record.
+- **⚠️ Retarget `tests/security/test_no_phone_home.py` — this must land before
+  item 211's first commit.** It is `pytestmark = [security, unit]`, so it runs in
+  `pytest -m unit`, in `make release-check`, in CI, and in the project pre-commit
+  hook; and its patterns match `licen[cs]e_server|entitlement_(url|endpoint|
+  server)|activation_*|heartbeat_url` plus any vendor hostname in `src/`. Item
+  211's client cannot be written without turning the suite red **mid-item**,
+  where it reads as a mystery failure and the cheapest reaction is to delete the
+  file — taking with it two assertions that become *more* valuable under this
+  model, one of which is the mechanism `GTM_SAAS.md` §8 sells. Narrow it instead:
+  keep both assertions, add the subscription source module to the `allowed` set
+  with its endpoint named, scope the vendor-host and vocabulary rules to "outside
+  `subscription/`", and add the positive payload assertion. Note it also shifts
+  the adversarial-suite count pinned across eight documents.
+- **Rewrite `docs/LICENSING_FAQ.md` end to end** — roughly thirteen claims go
+  false. Highest exposure: the "no kill switch, no time bomb, no check that can
+  refuse to start or block a query" promise.
+- **✅ The `licensing` class is added to `scripts/claim_drift_sites.py` and the
+  sweep is measured: 209 live sites across 25 files** (2026-08-24), against the
+  ~20 documents the hand list below named. Exactly the understatement the tool's
+  own docstring predicts. Run `python3 scripts/claim_drift_sites.py licensing`,
+  fix, re-run to empty; **treat the list below as a checklist, not the scope.**
+  Two scoping facts the measurement gives us:
+  - **126 of the 209 are in five BSL-*execution* artifacts** —
+    `GTM_EXECUTION_PLAN.md` (56, already banner-marked superseded),
+    `LICENSE_NOTES.md` (29), `PRE_BSL_CLEANUP_PLAN.md` (21),
+    `BSL_EXECUTION_PROMPT.md` (11), `GTM_EXECUTION_PROMPT.md` (9). These are
+    plans *for the flip that was cancelled*, not live claims about the product.
+    Banner-mark or archive them **as whole documents**; line-editing them is
+    wasted work and would destroy the historical record of why the decision
+    changed.
+  - **That leaves 83 sites of genuine editing** across `LICENSING_FAQ.md` (23),
+    `CONTRIBUTING.md` + `.github/cla/` (13 — the CLA exists for outside
+    contributors to a public repo, of which there are now none),
+    `CONTAINER_IMAGE_LICENCES.md` (5), `PRODUCT_GUIDE.md` (4), `docs/README.md`
+    (3), `README.md` (2), `sales/index.html` (1), and the executable BSL
+    rationale in `scripts/check_licenses.py`,
+    `scripts/check_release_artifacts.py`, `security/copyleft-license-allowlist.json`
+    and `tests/unit/test_third_party_licenses.py`. Two files whose BSL text is executable rather than prose and that
+  a prose sweep misses: `pyproject.toml`'s `license-files` comment block (which
+  also defers the SPDX expression and classifier that now become truthful) and
+  `scripts/check_release_artifacts.py`'s three BSL-specific rationale strings and
+  error messages, which would otherwise instruct a future maintainer to satisfy a
+  licence that no longer applies.
+- **Sweep the rest**: `NORTH_STAR.md` (Reach pillar narrowing **and** the
+  non-goal list — add "no hosted query execution" as a recorded decision, and
+  reconcile `GTM_SAAS.md` §2 to carry all seven; the two lists currently disagree
+  in both directions),
+  `PRODUCT_GUIDE.md` Decision Log, a superseded-by banner on
+  `GTM_EXECUTION_PLAN.md`, `LICENSE_ENFORCEMENT.md`, `LICENSE_NOTES.md`,
+  `DISTRIBUTION_STRATEGY.md`, `PRE_BSL_CLEANUP_PLAN.md`,
+  `BSL_EXECUTION_PROMPT.md`, `GTM_EXECUTION_PROMPT.md`,
+  `CONTAINER_IMAGE_LICENCES.md`, `docs/README.md`, `CONTRIBUTING.md` +
+  `.github/cla/` (the CLA exists for outside contributors to a public repo —
+  there are none), `README.md`, `CUSTOMER_README.md`, `landing/`,
+  `sales/index.html`. Rewrite items 197/198's bodies.
+- **Regenerate the gated artifacts in the same commits**: `make
+  product-guide-html`, `make trust-page`, and the adversarial-suite count that
+  `test_security_suite_count_claims.py` pins across eight documents.
+
+**Definition of done:** `make release-check` green; no `BSL`/`Change Date`/
+`Additional Use Grant`/"free forever"/"no outbound calls" claim survives outside
+a superseded-by banner; `claim-verify` clean.
+
+### 211. Subscription layer — the entitlement gate — REMOVED
+
+Built, then removed from the open-source core when item 210 reversed the subscription model. The code lived in src/querygate/subscription/, which is not part of this distribution.
+
+
+### 212. Control plane — accounts, entitlement issuance — MOVED
+
+Backend for the (reversed) paid-tier model referenced by item 211. Lives in a separate, private control-plane service; not part of this distribution.
+
+
+### 213. Activation — bind a deployment to a subscription — NOT BUILT
+
+Specced as part of the (reversed) subscription model in items 211/212. Never built; not part of this distribution.
+
+
+### 214. Single obfuscated compiled binary — CANCELLED
+
+Specced as part of the (reversed) proprietary-subscription plan. The product ships as open source under Apache-2.0, so a compiled/obfuscated distribution no longer applies. See item 210.
+
+
+### 215. One-command install and first-boot self-configuration
+
+**Effort: M.**
+
+**Why it matters:** "single command or action and it's automatically set up" is
+the promise. Today a deployment needs two YAML files (connections, policy) plus
+env configuration before it does anything.
+
+**What it is:**
+- **One copy-pasteable `docker run`** (plus an equivalent compose file and a
+  Helm values snippet) shown on the checkout success page and in the portal.
+- **⚠️ The image must not ship the anonymous-auth bypass. This is the single
+  highest-severity item in the phase.** `api/auth.py` appends
+  `AnonymousAuthenticator` whenever `cfg.is_local` and no `api_keys` and no JWT
+  — and `is_local` is true for the default environment, the Dockerfile sets no
+  `ENVIRONMENT`, and `_validate_production_auth` only fires on
+  `environment == "production"`. So `docker run <registry>/querygate:latest`, the
+  exact command this item promises, currently yields a deployment where every
+  request resolves to an anonymous principal, FastAPI `debug` is on, and the
+  OpenAPI schema is public — and the first connection added below is then
+  queryable by anyone who can reach the port. Fix: `ENV ENVIRONMENT=production`
+  in the Dockerfile, satisfied by the generated admin credential below, with
+  `debug`/`openapi_url`/`docs_url` off in the shipped image regardless of
+  environment.
+- **First-boot self-configuration**, with the mechanics named rather than
+  implied: secrets generated with `secrets.token_urlsafe`/`os.urandom` (never
+  `random`, never derived from a hostname); written **once, atomically,
+  create-if-absent (`O_EXCL`)** so concurrent workers and replicas cannot race
+  and so a restart never regenerates; to a documented path and file mode on a
+  volume the non-root `querygate` user can actually write; **never regenerated
+  if present**, because silently rotating on a rebuilt image turns an upgrade
+  into an unplanned re-activation and breaks item 213's re-activation guarantee.
+- **Seed-once, then one writer.** First boot seeds `connections.yaml`,
+  `policy.yaml` and an empty `catalog.yaml` **only when absent**, before any
+  store is constructed, and never mutates an existing file. Every subsequent
+  write — including "add the first connection" — goes through the existing
+  `admin/service.py` stage/apply path, which works for a single operator at
+  `require_config_approvals=0`. **Do not add a second connections writer**, and
+  never route catalog content through `ConfigVersionStore`; catalog mutations go
+  through `CatalogFileRepository`'s lock.
+- **Safe-by-default starter policy — decided 2026-08-23: build the real
+  guarantee (item 220).** `Policy.table_allowed` returns `True` when
+  `allowed_tables` is empty — **an empty allow-list means allow-all** — and
+  `denied_tables` has no wildcard, so today the only deny-all lever is
+  `default: {enabled: false}`, which is all-or-nothing. Item 220 adds the
+  no-allow-all-fallback `Policy` field so "enabled, zero tables" becomes
+  expressible; **215 depends on it** and ships the starter policy on top of it.
+  Do not ship the `enabled: false` stopgap as the final answer.
+- **⚠️ "The credential goes straight to the configured secret backend" has no
+  implementation today** and must not be written as if it does. On a fresh
+  install the only registered backend is `env:` (Vault is off by default), which
+  is not writable from a request, and `ConnectionRegistry` has no runtime
+  mutation API. The only otherwise-reachable path writes the literal DSN into
+  `var/config_versions/.../connections.yaml` in plaintext and returns it verbatim
+  from `GET /admin/config/versions/{id}` under **read** scope — laundering a
+  credential through an untyped `str` that `test_credential_redaction.py` cannot
+  see, which engages non-negotiable 2. Therefore: this item ships the **write
+  side** of a secret resolver as a prerequisite; the UI stores only a `${...}`
+  reference in `connections_yaml`; and a literal connection string is **rejected
+  at the boundary**, never persisted.
+- **`querygate-quickstart` is not the bootstrap.** It is a read-only,
+  authenticated HTTP client against an already-running, already-configured
+  gateway that "never writes anything". It stays that way and the setup guide
+  links to it as the last step; first-boot self-configuration is new server-side
+  code.
+
+**Definition of done:** a clean machine goes from the command to a governed
+query in under ten minutes with no file editing; the flow works identically on
+Docker Desktop, a cloud VM, and Kubernetes; `build_authenticator` under the
+shipped image's own defaults contains **no** `AnonymousAuthenticator`; the
+starter policy denies by the recorded mechanism; a literal (non-`${...}`)
+connection string is rejected by the first-connection flow and never appears in
+any config-version response; first boot never overwrites an existing config;
+and a source-level test asserts `admin/service.py` is the only module that
+writes `connections.yaml`.
+
+### 216. Renewal countdown and lapse UX — REMOVED
+
+Built as part of the (reversed) subscription model (see item 210). Not part of this distribution.
+
+
+### 217. Customer portal — signup, checkout, downloads, docs — NOT BUILT
+
+Specced as part of the (reversed) subscription model (see item 210). Never built; not part of this distribution.
+
+
+### 218. Setup guides and quickstart docs — SUPERSEDED
+
+Superseded by the Apache-2.0 open-core decision (item 210); the public quickstart and setup docs ship as part of the README and the release notes instead.
+
+
+### 219. Pre-launch codebase cleanup pass
+
+**Effort: L, and it is a real item, not a tidy-up afterthought.**
+
+**Why it matters:** the codebase is about to stop being a prototype with a
+public future and start being a product people pay for. Everything a customer
+cannot see still has to be right, because nobody outside can review it any more.
+
+**What it is:** run the repo's own audit skills and fix what they find, rather
+than improvising a definition of clean —
+- **`repo-audit`** — whole-repo invariant drift.
+- **`dep-audit`** — CVEs, lockfile drift, the deny-by-default allowlist.
+- **`test-gap`** — untested code and missing coverage classes.
+- **`claim-verify`** — every doc and marketing claim backed by code and a test.
+- **`security-invariant-check`** over the subscription and activation surfaces.
+- Delete dead code left by the BSL removal; reconcile `ROADMAP.md` to `TODO.md`;
+  archive fully-shipped items per the `ship-item` rules; make
+  `make release-check` and the full CI matrix green.
+- **Resolve the two open defects already logged**: item 192 (a Redis Cluster compatibility defect in the disclosure budget's script) and item 194 (three crafted-or-corrupt WORM lines escape
+  `search_worm_archive` as an unhandled exception the route masks as a 500).
+- **Three defects surfaced by the 2026-08-23 review of items 210–219**, logged
+  here rather than lost:
+  - `classify_rejection` returns `"templates_only"` but `_DENIAL_GUIDANCE` has no
+    such key, so a principal narrowed to templates who submits an ad-hoc query
+    gets "the specific reason wasn't recorded" — the least actionable message for
+    the most actionable rejection, and exactly what item 195's dedicated category
+    existed to prevent. Green today because the lookup has a `.get` fallback.
+  - **No shared type binds the rejection vocabulary.** `classify_rejection`,
+    `AuditEvent.error_category`, the `policy_decision` 4-tuple, and
+    `_DENIAL_GUIDANCE` are four parallel free-string maps; any new category
+    silently diverges in three places. The bullet above is one instance and item
+    211 will add the next. A `RejectionCategory(StrEnum)` in `core/` consumed by
+    all four — worth doing **before** 211 lands its value.
+  - `GET /admin/config/versions` and `/versions/{id}` return full
+    `connections_yaml` (which may hold a literal credential) under **read**
+    scope, while `GET /drafts/{id}` requires **write** scope for identical
+    content and encrypts at rest. Raise the versions endpoints to write scope, or
+    project the YAML out of the read-scoped model — the exclusion mechanism
+    already exists in `admin/store.py`. Item 215 makes this materially worse by
+    making literal credentials routine.
+
+**Definition of done:** all five skills report clean or with every finding
+triaged to a decision; `make release-check` and `make release-smoke` green; no
+`✅ DONE` item left unarchived.
+
+### 220. Deny-by-default at table and column granularity: a `Policy` allow-list with no allow-all fallback
+
+**Effort: M. Blocks item 215.** Owner decision, 2026-08-23.
+
+**Why it matters:** `Policy.table_allowed` returns `True` when `allowed_tables`
+is empty, and `column_allowed` follows the same convention — **an empty
+allow-list means allow-everything**. `denied_tables` has no wildcard. So the
+only deny-all lever in the model today is `Policy.enabled = False`, which is
+all-or-nothing: the moment an operator enables a connection to run their first
+query, every table and column on it is readable up to the numeric caps. That is
+the opposite of what a new install should do, and it makes the "safe-by-default
+starter policy" item 215 promises literally inexpressible. It is also a poor
+default for a product whose entire pitch is that it governs *what a query is
+allowed to be*.
+
+**What it is:**
+- A `Policy` field with **no allow-all fallback** — working name
+  `require_explicit_table_allowlist: bool = False` — under which an empty
+  `allowed_tables` means *deny every table* rather than *allow every table*. The
+  same treatment for `allowed_columns`.
+- **Default `False`, so no existing deployment changes behaviour.** This is a
+  new opt-in guarantee, not a silent tightening of everyone's policy — a
+  behaviour flip on an existing security control is exactly the change that
+  breaks a customer at 3am.
+- The shipped starter policy (item 215) sets it `True`, so a fresh install
+  denies until the operator names tables deliberately.
+- **Both branches mutation-verified.** Per CLAUDE.md's working agreement:
+  break the empty-allow-list branch in each direction and confirm a test fails
+  *for that reason*. A swapped boolean here silently opens every table on every
+  connection that opted in, with a green suite — the same class as items 101 and
+  114.
+- Documented in `examples/policy.example.yaml` (whose comments currently
+  concede the shipped default is permissive) and in the policy section of
+  `docs/PRODUCT_GUIDE.md`.
+
+**Definition of done:** `security-invariant-check` clean; a test that an
+existing policy with an empty allow-list and the flag unset still allows (no
+behaviour change), and one that the same policy with the flag set denies; both
+mutation-verified; `examples/policy.example.yaml` and the product guide updated.
