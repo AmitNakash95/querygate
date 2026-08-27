@@ -45,15 +45,17 @@ def main() -> None:
     if invalid:
         raise SystemExit("release artifact check failed: forbidden members: " + ", ".join(invalid))
 
-    # BSL 1.1 requires the licence to be displayed conspicuously on each copy of
-    # the Licensed Work, so every artifact that carries the code must carry it.
+    # Every artifact that carries the code carries the licence notice. Under the
+    # cancelled BSL plan this was a licence *requirement*; under the proprietary
+    # EULA (item 210) it is what puts the terms in front of whoever installs the
+    # package, and `pyproject.toml`'s `license-files` depends on the file existing.
     # The wheel gets it from `License-File` metadata and the sdist from its own
     # root; the container image needs an explicit `COPY LICENSE` in `Dockerfile`,
     # which is asserted here rather than left to a reader noticing its absence.
     if not any(name.endswith("licenses/LICENSE") for name in wheel_members):
         raise SystemExit(
-            "release artifact check failed: the wheel carries no LICENSE. BSL 1.1 requires "
-            "the licence on each copy of the Licensed Work — add `license-files` to "
+            "release artifact check failed: the wheel carries no LICENSE. QueryGate ships "
+            "proprietary and every artifact must carry the notice — add `license-files` to "
             "pyproject.toml's [project] table."
         )
     if not any(name.endswith("/LICENSE") for name in sdist_members):
@@ -71,8 +73,8 @@ def main() -> None:
     if not re.search(r"^COPY\s+LICENSE\b", dockerfile, re.M):
         raise SystemExit(
             "release artifact check failed: Dockerfile does not COPY LICENSE into the image. "
-            "The image is how QueryGate is distributed, and BSL 1.1 requires the licence on "
-            "each copy."
+            "The image is how QueryGate is distributed, so it must carry the proprietary "
+            "notice and the pointer to docs/legal/EULA.en.md."
         )
 
     required_wheel = {

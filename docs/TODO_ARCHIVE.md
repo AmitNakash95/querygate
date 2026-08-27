@@ -14710,3 +14710,212 @@ ceasing to thread the config value through.
 
 **Effort:** S. **Depends on:** 134 (shipped), 184/194/185 (shipped first).
 
+### 210. Proprietary licence transition — retire the BSL apparatus ✅ DONE
+
+**Effort: M.** Blocks everything else that touches licensing text.
+
+**Why it matters:** the repo is wired end-to-end for a BSL flip that will now
+never happen — two CI jobs, three Make targets, a script, a test, and roughly
+thirty documents assert a source-available future and unlimited free production
+use. Shipping a paid product while `LICENSING_FAQ.md` promises *"no licence key
+to obtain"* and *"no check that can refuse to start or block a query"* is not a
+doc bug; it is a written promise that is the exact inverse of what the product
+will do.
+
+**What it is:**
+- **Replace `LICENSE`'s BSL body with the proprietary notice. Do not delete the
+  file** — `pyproject.toml`'s `license-files`, `check_release_artifacts.py`'s
+  wheel/sdist/image assertions, and the Dockerfile's `COPY LICENSE` all require
+  it to exist.
+- **`docs/legal/EULA.{en,he}.md` becomes the licence of record.** Add, for
+  counsel, in both languages: term/renewal/fees/invoicing; **no-refund on
+  cancellation with access to end of the paid period**; effect of non-payment;
+  **suspension distinct from termination**; a cure period consistent with the
+  grace window; **anti-circumvention** (disabling or patching the entitlement
+  check is a material breach — this clause does not exist today and the whole
+  enforcement argument assumes it); notice that the Software enforces the term
+  technically; **licence-data transmission disclosure** (what leaves, how often,
+  retention); licence-service availability; and a **post-termination
+  audit-retrieval carve-out** so exporting one's own records is not a breach.
+- **Delete the Change-Date apparatus**: `make stamp-change-date`,
+  `change-date-check`, `change-date-check-release`, its `release-check` wiring,
+  `scripts/check_change_date.py`, `tests/unit/test_change_date.py`, the
+  `RELEASING.md` sections — **and both CI call sites**, `ci.yml`'s
+  `make change-date-check` and `release.yml`'s direct
+  `python3 scripts/check_change_date.py --check --release`. Removing only the
+  Make targets breaks the tagged-release job.
+- **Preserve two assertions from the deleted test**: the pyproject↔dated-CHANGELOG
+  binding (nothing else asserts it) and the placeholder-refusal release gate,
+  **retargeted at the EULA**, which carries unfilled placeholders and today has
+  no test, script, or CI job referencing it anywhere. The gate must match **any
+  `[…]` span in either language file, not an ASCII-uppercase pattern** —
+  `EULA.he.md`'s placeholders are Hebrew, so the obvious `\[[A-Z_ ]+\]` regex
+  gives a green build on an entirely unfilled Hebrew licence of record.
+- **⚠️ Retarget `tests/security/test_no_phone_home.py` — this must land before
+  item 211's first commit.** It is `pytestmark = [security, unit]`, so it runs in
+  `pytest -m unit`, in `make release-check`, in CI, and in the project pre-commit
+  hook; and its patterns match `licen[cs]e_server|entitlement_(url|endpoint|
+  server)|activation_*|heartbeat_url` plus any vendor hostname in `src/`. Item
+  211's client cannot be written without turning the suite red **mid-item**,
+  where it reads as a mystery failure and the cheapest reaction is to delete the
+  file — taking with it two assertions that become *more* valuable under this
+  model, one of which is the mechanism `GTM_SAAS.md` §8 sells. Narrow it instead:
+  keep both assertions, add the subscription source module to the `allowed` set
+  with its endpoint named, scope the vendor-host and vocabulary rules to "outside
+  `subscription/`", and add the positive payload assertion. Note it also shifts
+  the adversarial-suite count pinned across eight documents.
+- **Rewrite `docs/LICENSING_FAQ.md` end to end** — roughly thirteen claims go
+  false. Highest exposure: the "no kill switch, no time bomb, no check that can
+  refuse to start or block a query" promise.
+- **✅ The `licensing` class is added to `scripts/claim_drift_sites.py` and the
+  sweep is measured: 209 live sites across 31 files** when first counted
+  (2026-08-24); **225 today**, because later commits in this very branch added
+  more. The number goes stale fast — **re-run the command rather than trusting
+  it.** Measured against the
+  ~20 documents the hand list below named. Exactly the understatement the tool's
+  own docstring predicts. Run `python3 scripts/claim_drift_sites.py licensing`,
+  fix, re-run to empty; **treat the list below as a checklist, not the scope.**
+  Two scoping facts the measurement gives us:
+  - **126 of the 209 are in five BSL-*execution* artifacts** —
+    `GTM_EXECUTION_PLAN.md` (56, already banner-marked superseded),
+    `LICENSE_NOTES.md` (29), `PRE_BSL_CLEANUP_PLAN.md` (21),
+    `BSL_EXECUTION_PROMPT.md` (11), `GTM_EXECUTION_PROMPT.md` (9). These are
+    plans *for the flip that was cancelled*, not live claims about the product.
+    Banner-mark or archive them **as whole documents**; line-editing them is
+    wasted work and would destroy the historical record of why the decision
+    changed.
+  - **That leaves 83 sites of genuine editing.** The named files below account
+    for 62 of them; the remaining ~21 sit across a further dozen files —
+    including `GTM_SAAS.md` itself (4), `RELEASING.md` (3) and
+    `test_no_phone_home.py` (3) — so run the command for the live list rather
+    than treating this as the decomposition. Named:  `LICENSING_FAQ.md` (23),
+    `CONTRIBUTING.md` + `.github/cla/` (13 — the CLA exists for outside
+    contributors to a public repo, of which there are now none),
+    `CONTAINER_IMAGE_LICENCES.md` (5), `PRODUCT_GUIDE.md` (4), `docs/README.md`
+    (3), `README.md` (2), `sales/index.html` (1), and the executable BSL
+    rationale in `scripts/check_licenses.py`,
+    `scripts/check_release_artifacts.py`, `security/copyleft-license-allowlist.json`
+    and `tests/unit/test_third_party_licenses.py`. Two files whose BSL text is executable rather than prose and that
+  a prose sweep misses: `pyproject.toml`'s `license-files` comment block (which
+  also defers the SPDX expression and classifier that now become truthful) and
+  `scripts/check_release_artifacts.py`'s three BSL-specific rationale strings and
+  error messages, which would otherwise instruct a future maintainer to satisfy a
+  licence that no longer applies.
+- **Sweep the rest**: `NORTH_STAR.md` (Reach pillar narrowing **and** the
+  non-goal list — add "no hosted query execution" as a recorded decision, and
+  reconcile `GTM_SAAS.md` §2 to carry all seven; the two lists currently disagree
+  in both directions),
+  `PRODUCT_GUIDE.md` Decision Log, a superseded-by banner on
+  `GTM_EXECUTION_PLAN.md`, `LICENSE_ENFORCEMENT.md`, `LICENSE_NOTES.md`,
+  `DISTRIBUTION_STRATEGY.md`, `PRE_BSL_CLEANUP_PLAN.md`,
+  `BSL_EXECUTION_PROMPT.md`, `GTM_EXECUTION_PROMPT.md`,
+  `CONTAINER_IMAGE_LICENCES.md`, `docs/README.md`, `CONTRIBUTING.md` +
+  `.github/cla/` (the CLA exists for outside contributors to a public repo —
+  there are none), `README.md`, `CUSTOMER_README.md`, `landing/`,
+  `sales/index.html`. Rewrite items 197/198's bodies.
+- **Regenerate the gated artifacts in the same commits**: `make
+  product-guide-html`, `make trust-page`, and the adversarial-suite count that
+  `test_security_suite_count_claims.py` pins across eight documents.
+
+**Definition of done:** `make release-check` green; no `BSL`/`Change Date`/
+`Additional Use Grant`/"free forever"/"no outbound calls" claim survives outside
+a superseded-by banner; `claim-verify` clean.
+
+**Shipped 2026-08-27.** `LICENSE` is a proprietary notice reserving all rights
+and naming `docs/legal/EULA.en.md` as the licence of record; the EULA gained, in
+**both** languages, the ten commercial clauses this item named — term/renewal/
+fees/invoicing/tax (§14), no-refund with access to the end of the paid period
+(§14.3), non-payment with its own notice and cure period (§14.4), suspension
+distinct from termination (§7.4), a general cure period (§7.2),
+anti-circumvention as a material breach (§3(h), §15.5), notice of technical
+enforcement (§15.1-15.4), licence-data transmission disclosure naming all four
+fields with retention (§16), licence-service availability with a replacement-
+entitlement remedy (§17), and the post-termination audit-retrieval carve-out
+(§18) — plus a third-party pass-through clause in §2 that was not on the original
+list and that **partly satisfies** Microsoft ODBC requirement §2(b)(ii)
+(`docs/CONTAINER_IMAGE_LICENCES.md`).
+
+`tests/security/test_no_phone_home.py` was **narrowed, not deleted**: the vendor
+hostname and licence-vocabulary bans now exempt exactly `src/querygate/
+subscription/`, the exemption's width is bounded, and the package's outbound
+**declared** payload constant is pinned to the four disclosed fields — a
+declaration, not the wire, and item 211's DoD owns the request-body assertion.
+`docs/LICENSING_FAQ.md` was
+rewritten end to end. Five cancelled-plan documents plus `.github/cla/` carry
+whole-document superseded/retired banners, recorded as whole-file exemptions in
+`scripts/claim_drift_sites.py` and kept honest by
+`tests/unit/test_claim_drift_exemptions.py` — an exemption is valid only while
+the banner is present. `NORTH_STAR.md` gained the seventh non-goal (**no hosted
+query execution**) and the narrowed Reach pillar; `GTM_SAAS.md` §2's
+"only an org id and a deployment id" contradiction with its own §3 was fixed.
+Items 197 and 198 were rewritten. `pyproject.toml` declares
+`License :: Other/Proprietary License` — true for the first time.
+
+**Measured — and the honest version is less flattering than the first two
+drafts.** `python3 scripts/claim_drift_sites.py licensing` reports **35 candidate
+sites**, and every one is a negation, a superseded-marker, or a deliberate
+historical reference: the scanner's own documented acceptable end state.
+
+**That 35 is not comparable to the 235 measured before this item, and the
+difference is almost entirely exemptions rather than edits.** On an
+exemption-free basis the licensing patterns match **269 lines in this tree
+against 268 at the previous commit** — net +1, because the retired claims now
+get quoted in the guards and documents that retire them. What closed the gap is
+the 234 recorded exemptions: five cancelled-plan documents plus `.github/cla/`
+under whole-document superseded banners, and the licensing guards' own docstrings
+naming the claim each one replaced.
+
+Real editing did happen and is visible per file — `LICENSING_FAQ.md` went 23 → 7
+raw — but it was offset by new text elsewhere. **Two earlier drafts of this
+paragraph got the number wrong**: the first published 35 when the command printed
+48 (before `docs/TODO_ARCHIVE.md` was exempted), and the second claimed ~200
+exemptions *and* ~20 genuine edits out of a 200-line drop, which does not add up.
+Re-run the command rather than trusting any number here. `make release-check`
+green; `make test-security` 656 collected (655 run, 1 skipped pending item 211).
+
+**What the audit caught, because it is the more useful record.** Four reviewers
+ran over this item across two rounds; the expensive findings were all the same
+shape — the EULA had become a *security specification* and was
+allowed to disagree with the design:
+
+- **§15.2 promised blanket administrative and configuration access survives
+  suspension.** `GTM_SAAS.md` §5 deliberately **blocks**
+  `/admin/config/blast-radius`, `/simulate`, `/versions/{id}/apply` and
+  `/admin/connections/{id}/test` during a lapse, because they are live-schema and
+  secret-reference oracles. Item 216's implementer would have built against the
+  signed licence. Now narrowed to health, metrics, licence status and audit
+  retrieval, with the enumerated set deferred to the Documentation — and, after
+  the re-review caught that the EULA alone had been fixed, in
+  `LICENSING_FAQ.md`, `PRODUCT_GUIDE.md` and `LICENSE_ENFORCEMENT.md` too.
+- **§16 asserted a *complete* transmission disclosure and omitted transport
+  metadata** that `GTM_SAAS.md` §8 says is sent — and §8 claimed the EULA named
+  it. §16.1(b) now discloses egress IP, product version and liveness, with a
+  retention period.
+- **`LICENSE` cited "Section 16 (Technical enforcement…)" when that is §15** — a
+  wrong operative-clause pointer in the one file that ships in the wheel, the
+  sdist and the image. `test_every_eula_section_the_licence_notice_cites_exists_with_that_title`
+  now resolves every outbound reference — both the titled form and the bare
+  "Sections 8 and 9" plural, which the first version of that guard could not
+  see.
+- **The clause-parity guard was satisfiable by a cross-reference.** `7.4`, `7.5`,
+  `14.4` and `(h)` each appear twice per language, so deleting the
+  anti-circumvention restriction left the suite green. Markers are now anchored
+  to their heading.
+- **`test_the_subscription_exemption_is_narrow` contained a tautology** —
+  `all(_is_subscription_module(p) for p in exempt)` over a set built by that
+  predicate, true for `lambda p: True`. It survived a mutation test because the
+  *neighbouring* assertion fired.
+- **The whole-file claim-drift exemptions were not class-scoped**, so exempting
+  `docs/CONTROL_PLANE_PLAN.md` for licensing also blinded it to the
+  `cost-estimation`, `worm-resumable`, `four-eyes`, `admin-ui` and
+  `disclosure-budget` sweeps. `KNOWN_OK` entries now name their class.
+- **`sales/index.html` was given a claim its own governing doc forbids** —
+  "signed and provenance-attested images" when cosign and SLSA have never run —
+  contradicting the adjacent objection block in the same file.
+
+**Left open, deliberately:** the EULA and `LICENSE` still carry placeholders
+because the Licensor legal entity does not exist — `make eula-check-release`
+refuses a tag while any remain, in either language. `docs/CONTAINER_IMAGE_LICENCES.md` requirement §2(b)(iii) (indemnity
+to Microsoft) is still not met and needs an owner decision, and the in-image
+`THIRD_PARTY_NOTICES` file it asks for is not written.
+

@@ -3,15 +3,25 @@
 *A plain-language reference to re-read while deciding how you want to ship
 QueryGate. It captures the delivery options and their honest trade-offs.*
 
-> **Read this first — the framing below is superseded, and kept for reference
-> only.** This document was written to answer *"how do I keep the source from
-> being exposed?"*. Under the intended Business Source License 1.1 that
-> question is closed: the source is **published on purpose**. The whole first
-> half — the three delivery models compared on "source exposure", and the
-> obfuscation survey — survives only as a record of why source-hiding was
-> abandoned, not as a live decision.
+> **Read this first — the un-supersede notice, 2026-08-23.** A previous banner
+> here declared this document's framing dead: under the intended Business Source
+> Licence the source was to be **published on purpose**, so "how do I keep the
+> source from being exposed?" was a closed question and the obfuscation survey
+> was only a record of why source-hiding had been abandoned.
 >
-> The questions that actually matter now are different ones:
+> **That reversed.** QueryGate is proprietary and closed-source
+> ([`business/GTM_SAAS.md`](business/GTM_SAAS.md), 2026-08-23), the repository
+> stays private, and the container image is the only distribution channel
+> (signing and SLSA provenance are wired in `release.yml` but have not yet run
+> on a tag).
+> **The first half of this document is live again**: source exposure is once more
+> the thing the delivery model has to control, and the obfuscation survey is the
+> background reading for TODO.md item 214 (single compiled binary), whose
+> measured findings are in
+> [`COMPILED_BINARY_SPIKE.md`](COMPILED_BINARY_SPIKE.md) — read that for what was
+> actually tried, and this for the option space it was chosen from.
+>
+> The table below still holds: these questions matter *in addition*, not instead.
 >
 > | Old question | The question that replaced it |
 > |---|---|

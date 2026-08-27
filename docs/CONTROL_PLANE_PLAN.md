@@ -63,6 +63,16 @@ are reserved … The repository is private."* So the product is proprietary
 
 **EULA clauses the subscription needs** (all to counsel, both languages):
 
+> ✅ **All of the below landed in both languages with item 210 (2026-08-27),
+> plus a third-party pass-through clause in §2 that was not on this list.** The
+> table is now the record of *what was asked for and why*, not open work — read
+> the "Why" column, ignore the present-tense "currently"/"does not exist"
+> phrasing in it. The text is still a draft pending counsel. Section map:
+> fees/renewal/tax §14 · non-payment §14.4 · no-refund §14.3 · suspension vs
+> termination §7.4 · cure period §7.2 · anti-circumvention §3(h) and §15.5 ·
+> technical-enforcement notice §15.1-15.4 · transmission disclosure §16 ·
+> service availability §17 · post-termination audit retrieval §18.
+
 | Clause | Why |
 |---|---|
 | Term, renewal, fees, invoicing, tax | §13 currently defers fees entirely to "the Order" |
@@ -150,7 +160,7 @@ specified, **a lapsed deployment would still commit INSERT/UPDATE/DELETE.**
 
 | Funnel | Covers |
 |---|---|
-| `StructuredQueryService._validate_and_compile` (`execution/service.py:517`) | `execute`, `explain`, `verdict`, and batch — its own comment already names this as *"the four ways an ad-hoc AST reaches a database"* |
+| `StructuredQueryService._validate_and_compile` (`execution/service.py:406`) | `execute`, `explain`, `verdict`, and batch — its own comment already names this as *"the four ways an ad-hoc AST reaches a database"* |
 | `validation/write_policy_validation.validate_write_policy` | the only function all three write entry points call |
 
 **Not `connections/engine.session_scope`** — the true single seam, but it would
@@ -165,7 +175,7 @@ also stop `CatalogRefreshMonitor` and all schema reflection, and push a
 | Write execute / execute_many / `_execute_many_atomically` / preview | **Blocked** |
 | `verdict`, `verdict_many` | **Blocked** — but must report a reason *distinct from* `"not-available-to-you"`, or a 45-day-late invoice presents as a policy denial |
 | `list_tables`, `describe_table`, `search_catalog` | **Blocked.** They are product. |
-| `CatalogRefreshMonitor` (`catalog/refresh.py:242`) | **Stops.** A background timer re-reflecting the live schema unpaid is product. |
+| `CatalogRefreshMonitor` (`catalog/refresh.py:249`) | **Stops.** A background timer re-reflecting the live schema unpaid is product. |
 | In-flight async executions admitted before the lapse | **Complete.** Bounded, minutes-wide, stated rather than unexamined. |
 | Health ping (`health.py`), connection-test probe, query cancellation | **Exempt** — `SELECT 1`-class diagnostics and stopping work already running |
 | Startup | **Exempt.** Boots, serves 402s, says exactly what is wrong. Refusing to start leaves an operator with no diagnostics at 3am. |
@@ -407,7 +417,7 @@ Closed source raises the bar; it does not make the gate unbypassable.
 **What decision 6 buys:** a private repo, unpublished enforcement logic, bypass
 requiring reverse engineering rather than reading a diff, and — most
 importantly — circumvention as an unambiguous wilful breach of a signed EULA
-*(once §2's anti-circumvention clause exists; today it does not)*.
+*(EULA §15.5, which landed with item 210)*.
 
 **What it does not buy:** Python in an image is readable by anyone who can
 `docker pull`.

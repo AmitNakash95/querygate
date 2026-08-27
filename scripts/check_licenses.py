@@ -2,11 +2,15 @@
 """Generate and gate ``docs/THIRD_PARTY_LICENSES.md`` — the licence of every
 Python package in ``poetry.lock``, split by whether QueryGate redistributes it.
 
-Why this exists: QueryGate is being prepared for a source-available (BSL 1.1)
-licence flip, and a copyleft licence in the *redistributed* set would be a
-blocking legal problem for that. A spot-check of the direct dependencies is not
-a pass — this walks all locked packages and fails closed on anything that is not
-a reviewed, permissive licence.
+Why this exists: QueryGate is **proprietary and closed-source** (item 210,
+``docs/business/GTM_SAAS.md``), and a copyleft licence in the *redistributed*
+set would be a blocking legal problem — a reciprocal licence whose conditions
+attach to a distributed larger work is precisely what a closed-source product
+cannot satisfy. The premise changed with the licence decision; the gate did not,
+and if anything it matters more now than under the cancelled source-available
+plan. A spot-check of the direct dependencies is not a pass — this walks all
+locked packages and fails closed on anything that is not a reviewed, permissive
+licence.
 
 **What "redistributed" means here, precisely.** A Python wheel and sdist
 contain none of their dependencies, and QueryGate's wheel *declares* only its

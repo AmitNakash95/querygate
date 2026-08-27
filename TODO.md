@@ -234,7 +234,7 @@ order-of-magnitude, not commitments.
 | 201 | ✅ The WORM archive tier is reachable only against AWS S3 (`endpoint_url` is never set), so on-prem/air-gapped deployments cannot have the immutable copy at all | S | 134 |
 | 202 | The `digests_equal` non-ASCII hazard is unfixed at six `hmac.compare_digest` sites outside `audit/ledger.py` (TOTP code, OIDC state/nonce, CSRF token, PKCE challenge), turning a clean 401/403/422 into a masked 500 | S | 194, 199 |
 | 203 | An unparseable predecessor exempts one chain link on a resumed page (accept-as-given), while the blank-run walk fails closed for the same threat shape | S | 172, 194 |
-| 210 | Proprietary licence transition: retire the BSL apparatus (LICENSE body, EULA becomes the licence of record with subscription clauses, Change-Date targets + script + test + both CI call sites, and ~30 documents asserting a source-available future) | M | — |
+| 210 | ✅ Proprietary licence transition: retire the BSL apparatus (LICENSE body, EULA becomes the licence of record with subscription clauses, Change-Date targets + script + test + both CI call sites, and ~30 documents asserting a source-available future) | M | — |
 | 211 | Subscription layer — the entitlement gate: two enforcement funnels (reads via `_validate_and_compile`, writes at the three write *service* entry points), 402 registered in seven registries, observe/enforce as a signed field, wall-clock high-water mark and serial floor | L | 210, 212 |
 | 212 | Control plane — accounts, Stripe subscriptions, KMS-signed entitlement issuance, enrolment, append-only issuance ledger, in `control-plane/` with its own lockfile and mirror CI gates | XL | — |
 | 213 | Activation — bind a deployment to a subscription via OAuth2 (Google/Microsoft) + MFA, browser and device flows, control-plane-assigned `deployment_id`, unactivated deployments inert | L | 199, 212 |
@@ -244,6 +244,7 @@ order-of-magnitude, not commitments.
 | 217 | Customer portal — OAuth2 signup, Stripe Checkout, subscription and deployment management, cancellation flow stating the no-refund terms before confirming, downloads and docs | XL | 212 |
 | 218 | Setup guides and quickstart docs for the SaaS motion — one-screen quickstart, per-target deploy guides, air-gapped guide, troubleshooting, rewritten `CUSTOMER_README.md` and landing/sales copy | M | 215 |
 | 219 | Pre-launch codebase cleanup pass — `repo-audit`, `dep-audit`, `test-gap`, `claim-verify`, `security-invariant-check`; delete BSL dead code; close open defects 192 and 194; full CI matrix green | L | 210 |
+| 222 | The product-guide HTML generator emits a document fragment — no doctype, `lang`, `charset` or viewport meta, so the generated customer-facing page fails WCAG 3.1.1 and its own mobile breakpoint never fires; plus a missing skip link, a split Decision Log list, and the phone-home scan not covering the two shipped `.js` files (load-bearing at item 216) | S | — |
 | 221 | Move validator bodies out of the model classes into compilable sibling modules — 30 validators / 602 lines of enforcement logic (join form, window scope, CTE names, set ops, credential shape) currently ship readable because a module defining `BaseModel` cannot be Cython-compiled | M | 214 |
 | 220 | Deny-by-default at table and column granularity: a `Policy` allow-list with no allow-all fallback, so an empty `allowed_tables` denies instead of allowing. Opt-in (default off) so no existing deployment changes behaviour; the starter policy turns it on | M | — |
 
@@ -3428,56 +3429,52 @@ layer as the fallback. Fold the indemnity question into the existing
 indemnification/insurance conversation (`GTM_EXECUTION_PLAN.md` §3 Layer 3)
 rather than running a separate one.
 
-### 197. Offline entitlement token for the paid tier — not-before-customers
+### 197. Offline entitlement token for the paid tier — ⛔ SUPERSEDED by items 210-213
 
-**Effort: S. NOT BEFORE CUSTOMERS — do not claim or implement. Logged per
-`docs/business/GTM_EXECUTION_PLAN.md` §3 Layer 2 (owner decision, 2026-08-21);
-build it when a paying customer needs it, alongside item 198 (QueryGate
-Notary), not before.**
+**Do not implement this item. It is retained for history only; every design
+decision in it was reversed.**
 
-**Why it matters:** Shape A (the BSL Additional Use Grant — unlimited internal
-production use, no database ceiling) removed the reason this used to be
-pre-launch work: there is no production threshold left for a customer to
-self-check, so a licence key stops being a compliance tool and becomes an
-**entitlement token for the paid tier** (support, indemnification, Notary
-access) instead. `docs/LICENSE_ENFORCEMENT.md`'s enforcement-model survey
-already covers the mechanism in depth; this item is the pointer from the
-worklist to that design, not a new design.
+Its premise was Shape A — the BSL Additional Use Grant's unlimited free internal
+production use — which left no production threshold for a licence to self-check,
+so the token was to be an *entitlement marker for the paid tier*, never a gate.
+That grant was cancelled on 2026-08-23 (`docs/business/GTM_SAAS.md`). QueryGate
+is a paid subscription, and the entitlement now **blocks**: after the paid term
+plus a grace window has fully elapsed, every governed query and write is refused
+with HTTP 402.
 
-**What it is, when built:**
-- **Ed25519-signed, offline-verifiable token** encoding customer, tier, and
-  expiry. The public key ships in the distribution; verification is local,
-  with **zero network calls** — no phone-home, ever, for licensing or
-  analytics, matching the "credentials and data never leave your network"
-  claim the product pitch is built on.
-- **Soft enforcement only.** An absent, expired, or unverifiable token
-  produces a startup `WARN` log line, a field on the health endpoint, and a
-  redaction-safe audit event. It must **never** refuse to start and must
-  **never** block or degrade a query. QueryGate sits in the request path of a
-  production system; a licence check able to interrupt data access is itself
-  an availability risk a security review can find and fail — the opposite of
-  the product's own north-star metric.
-- **No kill switch, no time-bomb, no hard fail, no obfuscation.** The source
-  is public under BSL; hiding the check would be theatre, and any of the above
-  would contradict `docs/business/GTM_EXECUTION_PLAN.md` §3's explicit
-  anti-patterns.
-- **`querygate license status`** prints the current tier and expiry; renewal
-  is re-issuance from an offline-held signing key with a plain issuance
-  record (customer, entitlement, expiry, date, key id).
+Three specific commitments in the original body are now the opposite of the
+product, which is why this item is superseded rather than merely re-scoped:
 
-**Definition of done, when this is picked up:** a narrow `LicenseValidator`
-Protocol (the repo's composable-interface convention — `SecretResolver`/
-`DialectAdapter`/`Authenticator`/`AuditSink` precedent) with a
-`SignedTokenLicenseValidator` concrete variant; one non-blocking check point at
-startup and on a timer; the health-endpoint field and audit event; a
-`security-invariant-check` pass confirming the token never carries or exposes
-a credential and opens no second path to the database.
+- *"Soft enforcement only … must never refuse to start and must never block or
+  degrade a query"* — item 211's gate does exactly that, deliberately and
+  disclosed (`docs/legal/EULA.en.md` §15).
+- *"Zero network calls — no phone-home, ever"* — item 212's control plane is
+  contacted on start-up and roughly daily, carrying the four fields §16.1 of the
+  EULA discloses.
+- *"The source is public under BSL; hiding the check would be theatre"* — the
+  source is not public, and item 214 compiles the enforcement call sites into
+  the shipped artifact.
+
+**What survived**, and where it went: the Ed25519-signed, offline-verifiable,
+locally-checked token shape is the design items 211-213 build on
+(`docs/CONTROL_PLANE_PLAN.md` §3), and the availability objection this item
+raised was answered rather than dropped — a *failed refresh* is never
+fail-closed, cold start fails open, and administration, health and audit
+retrieval survive a lapse. `docs/LICENSE_ENFORCEMENT.md` carries the reversal
+notice and the enforcement-model survey both items rest on.
 
 ### 198. QueryGate Notary — append-only transparency log for the audit ledger's chain head — not-before-customers
 
-**Effort: M. NOT BEFORE CUSTOMERS — do not claim or implement. Logged per
-`docs/business/GTM_EXECUTION_PLAN.md` §4 (owner decision, 2026-08-21); pitch it
-now, build it when a customer asks, not before.**
+**Effort: M. NOT BEFORE CUSTOMERS — do not claim or implement. Originally
+logged per `docs/business/GTM_EXECUTION_PLAN.md` §4 (owner decision,
+2026-08-21); pitch it now, build it when a customer asks, not before.**
+
+**Scope unchanged by the 2026-08-23 licence decision** (`docs/business/GTM_SAAS.md`,
+which supersedes that plan), unlike its sibling item 197. Two things did move
+around it: `GTM_SAAS.md` §7 lists Notary among the trust-rebuilding measures that
+matter *more* under closed source, and `docs/LICENSING_FAQ.md` names it as a
+forward statement a prospect must not be allowed to mistake for a shipping
+service.
 
 **Why it matters:** the shipped hash-chained audit ledger (item 91) is
 tamper-evident, but `docs/business/NORTH_STAR.md` and `docs/PRODUCT_GUIDE.md`
@@ -3499,9 +3496,13 @@ construction rather than by policy.
   isolation. This does not touch the data plane and does not weaken the
   Reach pillar.
 - **Asynchronous, never in the request path.** Audit must never depend on
-  Notary's uptime, for the same reason item 197's entitlement check must never
-  block a query: an availability dependency on a third-party service is a
-  security-review finding.
+  Notary's uptime. **The comparison this bullet used to draw at item 197 no
+  longer holds** — the subscription entitlement (items 211-213) *can* block a
+  query, by design and by disclosed contract. Notary is different in kind: it
+  attests to records the customer already holds, so a Notary outage must
+  degrade to "not yet anchored", never to "audit unavailable". An availability
+  dependency on a third-party service, for a control that buys the customer
+  nothing at request time, is a security-review finding.
 - **An append-only transparency log from day one, with published keys.** A
   notary able to forge or retro-edit an attestation is a security-review
   finding *about the vendor* — the one failure mode this product cannot
@@ -3796,116 +3797,15 @@ soft-warn, not-before-customers) is replaced by items 210–213 — the token is
 longer a receipt that warns, it is a subscription that blocks. 198 (Notary) keeps
 its scope and stays deferred. Both bodies need rewriting as part of item 210.
 
-### 210. Proprietary licence transition — retire the BSL apparatus
+### 210. Proprietary licence transition — retire the BSL apparatus ✅ DONE
 
-**Effort: M.** Blocks everything else that touches licensing text.
+`LICENSE` is now a proprietary notice pointing at `docs/legal/EULA.en.md` as the
+licence of record; the EULA carries the subscription's commercial clauses in both
+languages; the phone-home guard was narrowed rather than deleted; and the
+licensing claim sweep went from 235 sites to 35 deliberate lookalikes (part
+rewritten, part recorded as whole-document exemptions — see the write-up).
 
-**Why it matters:** the repo is wired end-to-end for a BSL flip that will now
-never happen — two CI jobs, three Make targets, a script, a test, and roughly
-thirty documents assert a source-available future and unlimited free production
-use. Shipping a paid product while `LICENSING_FAQ.md` promises *"no licence key
-to obtain"* and *"no check that can refuse to start or block a query"* is not a
-doc bug; it is a written promise that is the exact inverse of what the product
-will do.
-
-**What it is:**
-- **Replace `LICENSE`'s BSL body with the proprietary notice. Do not delete the
-  file** — `pyproject.toml`'s `license-files`, `check_release_artifacts.py`'s
-  wheel/sdist/image assertions, and the Dockerfile's `COPY LICENSE` all require
-  it to exist.
-- **`docs/legal/EULA.{en,he}.md` becomes the licence of record.** Add, for
-  counsel, in both languages: term/renewal/fees/invoicing; **no-refund on
-  cancellation with access to end of the paid period**; effect of non-payment;
-  **suspension distinct from termination**; a cure period consistent with the
-  grace window; **anti-circumvention** (disabling or patching the entitlement
-  check is a material breach — this clause does not exist today and the whole
-  enforcement argument assumes it); notice that the Software enforces the term
-  technically; **licence-data transmission disclosure** (what leaves, how often,
-  retention); licence-service availability; and a **post-termination
-  audit-retrieval carve-out** so exporting one's own records is not a breach.
-- **Delete the Change-Date apparatus**: `make stamp-change-date`,
-  `change-date-check`, `change-date-check-release`, its `release-check` wiring,
-  `scripts/check_change_date.py`, `tests/unit/test_change_date.py`, the
-  `RELEASING.md` sections — **and both CI call sites**, `ci.yml`'s
-  `make change-date-check` and `release.yml`'s direct
-  `python3 scripts/check_change_date.py --check --release`. Removing only the
-  Make targets breaks the tagged-release job.
-- **Preserve two assertions from the deleted test**: the pyproject↔dated-CHANGELOG
-  binding (nothing else asserts it) and the placeholder-refusal release gate,
-  **retargeted at the EULA**, which carries unfilled placeholders and today has
-  no test, script, or CI job referencing it anywhere. The gate must match **any
-  `[…]` span in either language file, not an ASCII-uppercase pattern** —
-  `EULA.he.md`'s placeholders are Hebrew, so the obvious `\[[A-Z_ ]+\]` regex
-  gives a green build on an entirely unfilled Hebrew licence of record.
-- **⚠️ Retarget `tests/security/test_no_phone_home.py` — this must land before
-  item 211's first commit.** It is `pytestmark = [security, unit]`, so it runs in
-  `pytest -m unit`, in `make release-check`, in CI, and in the project pre-commit
-  hook; and its patterns match `licen[cs]e_server|entitlement_(url|endpoint|
-  server)|activation_*|heartbeat_url` plus any vendor hostname in `src/`. Item
-  211's client cannot be written without turning the suite red **mid-item**,
-  where it reads as a mystery failure and the cheapest reaction is to delete the
-  file — taking with it two assertions that become *more* valuable under this
-  model, one of which is the mechanism `GTM_SAAS.md` §8 sells. Narrow it instead:
-  keep both assertions, add the subscription source module to the `allowed` set
-  with its endpoint named, scope the vendor-host and vocabulary rules to "outside
-  `subscription/`", and add the positive payload assertion. Note it also shifts
-  the adversarial-suite count pinned across eight documents.
-- **Rewrite `docs/LICENSING_FAQ.md` end to end** — roughly thirteen claims go
-  false. Highest exposure: the "no kill switch, no time bomb, no check that can
-  refuse to start or block a query" promise.
-- **✅ The `licensing` class is added to `scripts/claim_drift_sites.py` and the
-  sweep is measured: 209 live sites across 31 files** when first counted
-  (2026-08-24); **225 today**, because later commits in this very branch added
-  more. The number goes stale fast — **re-run the command rather than trusting
-  it.** Measured against the
-  ~20 documents the hand list below named. Exactly the understatement the tool's
-  own docstring predicts. Run `python3 scripts/claim_drift_sites.py licensing`,
-  fix, re-run to empty; **treat the list below as a checklist, not the scope.**
-  Two scoping facts the measurement gives us:
-  - **126 of the 209 are in five BSL-*execution* artifacts** —
-    `GTM_EXECUTION_PLAN.md` (56, already banner-marked superseded),
-    `LICENSE_NOTES.md` (29), `PRE_BSL_CLEANUP_PLAN.md` (21),
-    `BSL_EXECUTION_PROMPT.md` (11), `GTM_EXECUTION_PROMPT.md` (9). These are
-    plans *for the flip that was cancelled*, not live claims about the product.
-    Banner-mark or archive them **as whole documents**; line-editing them is
-    wasted work and would destroy the historical record of why the decision
-    changed.
-  - **That leaves 83 sites of genuine editing.** The named files below account
-    for 62 of them; the remaining ~21 sit across a further dozen files —
-    including `GTM_SAAS.md` itself (4), `RELEASING.md` (3) and
-    `test_no_phone_home.py` (3) — so run the command for the live list rather
-    than treating this as the decomposition. Named:  `LICENSING_FAQ.md` (23),
-    `CONTRIBUTING.md` + `.github/cla/` (13 — the CLA exists for outside
-    contributors to a public repo, of which there are now none),
-    `CONTAINER_IMAGE_LICENCES.md` (5), `PRODUCT_GUIDE.md` (4), `docs/README.md`
-    (3), `README.md` (2), `sales/index.html` (1), and the executable BSL
-    rationale in `scripts/check_licenses.py`,
-    `scripts/check_release_artifacts.py`, `security/copyleft-license-allowlist.json`
-    and `tests/unit/test_third_party_licenses.py`. Two files whose BSL text is executable rather than prose and that
-  a prose sweep misses: `pyproject.toml`'s `license-files` comment block (which
-  also defers the SPDX expression and classifier that now become truthful) and
-  `scripts/check_release_artifacts.py`'s three BSL-specific rationale strings and
-  error messages, which would otherwise instruct a future maintainer to satisfy a
-  licence that no longer applies.
-- **Sweep the rest**: `NORTH_STAR.md` (Reach pillar narrowing **and** the
-  non-goal list — add "no hosted query execution" as a recorded decision, and
-  reconcile `GTM_SAAS.md` §2 to carry all seven; the two lists currently disagree
-  in both directions),
-  `PRODUCT_GUIDE.md` Decision Log, a superseded-by banner on
-  `GTM_EXECUTION_PLAN.md`, `LICENSE_ENFORCEMENT.md`, `LICENSE_NOTES.md`,
-  `DISTRIBUTION_STRATEGY.md`, `PRE_BSL_CLEANUP_PLAN.md`,
-  `BSL_EXECUTION_PROMPT.md`, `GTM_EXECUTION_PROMPT.md`,
-  `CONTAINER_IMAGE_LICENCES.md`, `docs/README.md`, `CONTRIBUTING.md` +
-  `.github/cla/` (the CLA exists for outside contributors to a public repo —
-  there are none), `README.md`, `CUSTOMER_README.md`, `landing/`,
-  `sales/index.html`. Rewrite items 197/198's bodies.
-- **Regenerate the gated artifacts in the same commits**: `make
-  product-guide-html`, `make trust-page`, and the adversarial-suite count that
-  `test_security_suite_count_claims.py` pins across eight documents.
-
-**Definition of done:** `make release-check` green; no `BSL`/`Change Date`/
-`Additional Use Grant`/"free forever"/"no outbound calls" claim survives outside
-a superseded-by banner; `claim-verify` clean.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 210).
 
 ### 211. Subscription layer — the entitlement gate
 
@@ -3916,6 +3816,31 @@ It must stop the product when unpaid without ever becoming an availability risk
 when *we* fail, and without lying in the customer's audit ledger.
 
 **What it is:**
+- **⚠️ Two constraints item 210 already landed as tests. Read these before the
+  first commit, because both fail loudly and neither is negotiable.**
+  1. `tests/security/test_no_phone_home.py` exempts **exactly the package path
+     `src/querygate/subscription/`** from the vendor-hostname and
+     licence-server-vocabulary bans. Anywhere else in `src/querygate/` still
+     fails the build, so the client cannot be started in
+     `execution/` or `core/` "temporarily". The exemption is also **bounded at
+     10 modules** (`_MAX_EXEMPT_MODULES`). The package list below is eight names
+     **plus `__init__.py`, which `rglob("*.py")` counts** — nine, with one slot
+     of head-room. That bound was 8 in the guard's first draft, which would have
+     tripped on this item's own intended package on its first commit; a tripwire
+     that fires before any drift has occurred only teaches people to raise it.
+     If you genuinely need an eleventh module, raise it against a written module
+     list and say why — never to get a suite green.
+  2. The package must declare a module-level
+     **`PAYLOAD_FIELDS`** literal naming every field it transmits, and it must
+     equal `{"org_id", "deployment_id", "connection_count", "seat_count"}` —
+     **that guard checks the declaration, not the wire**, so this item's own DoD
+     still owes the behavioural half: a schema-level test asserting the refresh
+     request body's key set, built in the shape of
+     `test_credential_redaction.py`, not as a mock-call assertion —
+     the four fields `docs/legal/EULA.en.md` §16.1 discloses and
+     `docs/business/GTM_SAAS.md` §3 publishes. A fifth field is a **disclosure
+     change before it is a code change**: amend the EULA (both languages), the
+     FAQ, and `NORTH_STAR.md`'s Reach pillar first.
 - **`src/querygate/subscription/`** — a peer package to `audit/` and `secrets/`:
   `models.py`, `verify.py` (pure, no I/O), `state.py` (module singleton),
   `gate.py`, `sources.py` (the registry above; the only modules doing outbound
@@ -4536,3 +4461,63 @@ than a delegation; `security-invariant-check` clean.
 **Do not start without the owner's go-ahead** — 30 call sites on the enforcement
 core is not a cleanup, and if item 214 lands on a packaging approach that does
 not need it, the whole item is unnecessary.
+
+### 222. The product-guide HTML generator emits a document fragment, not a page
+
+**Effort: S.** Found by the `ui-a11y-reviewer` during item 210's audit; filed
+rather than fixed there because it is a generator change, unrelated to
+licensing, and it invalidates `docs/product-guide.html` until regenerated.
+
+**Why it matters:** `docs/product-guide.html` is the browsable customer-facing
+copy of `docs/PRODUCT_GUIDE.md` and part of what a prospect is handed.
+`scripts/generate_product_guide_html.py`'s `PAGE_TEMPLATE` begins at `<title>`
+and goes straight into `<style>` — **no doctype, no `<html lang>`, no
+`<meta charset>`, no viewport meta**. Both hand-written siblings
+(`landing/security.html`, `sales/index.html`) get all four right, so this is
+drift in the generator, not a house style.
+
+Three measured consequences:
+
+- **No `lang`** — a WCAG 3.1.1 (Level A) failure; a screen reader announces the
+  page in the user's default voice.
+- **No viewport meta** — the generator's own `@media (max-width: 900px)` block
+  is the only thing that unpins the 288px fixed sidebar and restores
+  `margin-left: 0`. Without the meta tag it never fires on a phone: the page
+  loads at the ~980px fallback viewport, zoomed out, sidebar overlaying content.
+- **No `meta charset`** — the file carries raw UTF-8 em dashes and ellipses. Over
+  `file://` there is no HTTP charset header, so the browser falls back to its
+  locale default.
+
+**Also in scope** (same reviewer, same surface, all pre-existing and none
+caused by item 210):
+
+- **No skip link** in the generated page, so a keyboard user tabs through all
+  eight sidebar nav links before reaching `<main>`. Both hand-written siblings
+  ship one.
+- **The Decision Log renders as two sibling `<ul>` elements**, so a screen
+  reader announces "list, 40 items" then "list, 96 items" for one chronological
+  list. Root cause is `render_blocks`, which terminates a list run on any line
+  that is neither a bullet nor a two-space continuation.
+- **`sales/index.html`'s `summary::after` `+`/`−`** may fold into the
+  disclosure's accessible name in Chrome and Firefox, duplicating the native
+  expanded/collapsed announcement. `content: "+" / ""` suppresses it where
+  supported.
+- **`sales/index.html`'s clipboard write has no `.catch`**, so a
+  permission-denied or insecure-context rejection leaves the button label
+  unchanged and the `role="status"` live region silent.
+- **`generate_product_guide_html.py`'s `inline()` interpolates a link href
+  without quote-escaping** (`html.escape(text, quote=False)` leaves `"`
+  intact). Not exploitable — the sole input is a trusted repo file and no
+  operator- or database-supplied string reaches the generator — but it is a
+  latent break-out in attribute context.
+- **`tests/security/test_no_phone_home.py` scans only `*.py`.**
+  `src/querygate/admin_ui/app.js` and `access_ui/app.js` ship in the package and
+  are outside all three rules. **This becomes load-bearing at item 216**, which
+  puts a renewal URL into those UIs — extend the scan to `.js` before then, or
+  216 will place a vendor URL in shipped source that no guard sees.
+
+**Definition of done:** the generated page has a doctype, `lang`, `charset` and
+viewport; `make product-guide-html` regenerated and
+`test_product_guide_html_freshness.py` green; a skip link; the Decision Log a
+single list; the phone-home scan covering `.js`; the four smaller items above
+either fixed or explicitly declined in this item's body with a reason.

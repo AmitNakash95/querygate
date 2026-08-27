@@ -61,6 +61,15 @@ Customer database (read-only account recommended)
         +-----> structured result caps
         +-----> stdout logs / persisted audit JSONL
 
+Subscription entitlement refresh  [VENDOR TRUST BOUNDARY — items 211-213]
+        |
+        | outbound HTTPS, start-up + ~daily, four fields:
+        |   {org_id, deployment_id, connection_count, seat_count}
+        v
+   Vendor entitlement service
+        |
+        +-----> signed entitlement the deployment obeys
+
 Config load/reload (operator-triggered via /admin/reload-config, or
 proactively via config_reload.CredentialLeaseMonitor — item 135)
         |
@@ -455,12 +464,50 @@ defaults.
 - **Supply chain and independent review:** signed artifacts/SBOM are TODO item
   30. No independent penetration test or formal certification has been
   performed.
+- **The vendor entitlement channel (items 211-213, not yet built).** The
+  proprietary subscription (item 210, `docs/business/GTM_SAAS.md`) adds the first
+  outbound path from a deployment to a vendor-controlled endpoint. Four residual
+  risks, recorded now so the implementation is reviewed against them rather than
+  measured after:
+  1. **A new egress destination.** The deployment must be permitted to reach the
+     vendor's entitlement host. This is the first thing a network reviewer asks
+     about and the first thing an air-gapped customer cannot grant — hence the
+     out-of-band offline entitlement (`docs/legal/EULA.en.md` §16.5).
+  2. **The vendor becomes a trust boundary.** The control plane signs
+     entitlements the deployment obeys, so a vendor compromise or a stolen
+     signing key can suspend a customer's governed operation. It cannot read or
+     write customer data — the control plane holds no database credential and
+     receives no row (`NORTH_STAR.md`, non-goal "no hosted query execution") —
+     but availability is now partly ours to lose.
+  3. **Fail-open windows are deliberate and are an enforcement gap.** A failed
+     refresh never blocks (~30 days of entitlement validity), and a cold start
+     with no cached entitlement and no network fails **open** in grace. Both are
+     chosen so our outage is not the customer's outage; both are also the window
+     in which an unpaid deployment keeps working.
+  4. **Estate metadata leaves the boundary.** `connection_count` and
+     `seat_count` are operational facts about the customer's environment. They
+     are disclosed in EULA §16.1, bounded by
+     `tests/security/test_no_phone_home.py`, and are the only non-identifier
+     fields transmitted. The transport additionally discloses egress IP, product
+     version and liveness (§16.1(b)).
+
+  **What is not on that list, and how far the backing actually goes:** no
+  database credential, query text, result row, schema, catalog entry, audit
+  record or policy file has a transmission path to the vendor. Today that is
+  **structural** — `src/querygate/subscription/` does not exist, and the hostname
+  and vocabulary bans in `tests/security/test_no_phone_home.py` cover every other
+  module. Once items 211-213 land, those two bans do **not** apply inside that
+  package: what remains there is a check on the client's *declared* payload
+  constant, and item 211's Definition of Done owns the behavioural assertion that
+  the request body's key set is exactly the four disclosed fields. Until that
+  exists, this is a design commitment, not a tested one.
 
 ## 9. Review triggers
 
 Review and version this threat model whenever QueryGate adds a write path, a
 new database dialect, stored procedures, a new authentication mechanism,
-browser-facing UI, external secret/audit backend, query-cost engine, a new
+browser-facing UI, external secret/audit backend, query-cost engine, **a new
+outbound network destination or dependency on a vendor-operated service**, a new
 admin/config mutation surface, or a change to the schema-catalog data model
 (e.g. model-generated catalog content, item 32), product-guide retrieval, or
 deployment-diagnostic context assembly. A release should also rerun
