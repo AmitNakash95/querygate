@@ -107,3 +107,57 @@ def test_default_example_config_paths_work_outside_repository_cwd(tmp_path, monk
     assert Path(config.policy_file).is_file()
     assert Path(config.connections_file).name == "connections.example.yaml"
     assert Path(config.policy_file).name == "policy.example.yaml"
+
+
+# --- the licence classifier (item 210) ----------------------------------------
+#
+# `pyproject.toml`'s own comment calls the classifier the load-bearing signal:
+# "what every scanner, index and SBOM consumer actually reads". It shipped with
+# no test at all, so deleting the line left the suite green and the package
+# publishing with no licence signal on a product whose entire positioning is
+# proprietary. That is the "guard that cannot fail" shape this file exists for.
+
+
+def _pyproject() -> dict:
+    import tomllib
+
+    return tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+
+def test_the_package_declares_itself_proprietary():
+    classifiers = _pyproject()["project"]["classifiers"]
+    assert "License :: Other/Proprietary License" in classifiers, (
+        "pyproject.toml no longer declares a proprietary licence classifier; a "
+        "scanner or index would read the package as unlicensed (TODO.md item 210)"
+    )
+
+
+def test_the_package_never_declares_an_open_source_licence():
+    """The unrecoverable direction: publishing a closed-source product under a
+    permissive licence signal is a grant a scanner will propagate.
+
+    Two signals, because checking only the OSI classifier left the stronger one
+    open. Under PEP 639 the `license` SPDX expression takes precedence over the
+    classifier, so `license = "Apache-2.0"` would give the product away while
+    every OSI-classifier assertion stayed green — and `pyproject.toml`'s own
+    comment says omitting that key is deliberate.
+    """
+    project = _pyproject()["project"]
+    assert "license" not in project, (
+        "pyproject.toml declares an SPDX `license` expression. Its absence is "
+        "deliberate (see the comment there): no SPDX identifier means 'proprietary, "
+        f"governed by a separate EULA'. Found: {project.get('license')!r}"
+    )
+    permissive = [
+        c
+        for c in project["classifiers"]
+        if c.startswith("License ::") and c != "License :: Other/Proprietary License"
+    ]
+    assert not permissive, f"pyproject.toml claims a non-proprietary licence: {permissive}"
+
+
+def test_the_licence_notice_ships_in_the_distribution():
+    """`LICENSE` is the notice pointing at the EULA, and
+    `scripts/check_release_artifacts.py` asserts it reaches the wheel, the sdist
+    and the image. That chain starts here."""
+    assert _pyproject()["project"]["license-files"] == ["LICENSE"]

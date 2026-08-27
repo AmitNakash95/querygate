@@ -1610,10 +1610,13 @@ or worked around.
 > Credentials never sit on any returned model, and that's asserted against the
 > live API schema, not by convention. And none of it is "trust us": every
 > guarantee is backed by a deny-by-default CI gate (static analysis, dependency
-> audit, SBOM, image and secret scanning, OpenAPI fuzzing, and a 651-test
+> audit, SBOM, image and secret scanning, OpenAPI fuzzing, and a 656-test
 > adversarial suite), and reviewers get a reproducible packet where each claim
-> names the command that reproduces it. The published container image is signed
-> (cosign keyless) and carries SLSA build provenance, both consumer-verifiable.
+> names the command that reproduces it. The release pipeline signs the container
+> image (cosign keyless) and attaches SLSA build provenance, both
+> consumer-verifiable — but **neither step has run yet**: the only tag, `v0.1.0`,
+> predates both by four days, so say "wired and CI-exercised, not yet exercised
+> on a published tag" and cut a signed tag before quoting it to a prospect.
 > We're also upfront about the edges — no third-party pentest yet. The whole
 > subject is three things: **structural guarantees, continuous and reproducible
 > proof, and honesty about the gaps.**
@@ -1904,7 +1907,7 @@ summary.
 
 The gates fall into three groups:
 
-- **The access boundary itself.** The adversarial security suite (651 tests,
+- **The access boundary itself.** The adversarial security suite (656 tests,
   `make test-security`) encodes specific known bypass classes as regressions —
   denied-column inference, undeclared-table smuggling, predicate-as-SQL,
   schema-discovery leaks, policy-cap breaches, audit no-leak. On top of that,
@@ -4365,6 +4368,48 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-08-27 — The licence of record moves from `LICENSE` to the EULA, and
+  "no outbound calls, ever" is retired rather than defended (item 210).** The
+  repository was wired end to end for a Business Source Licence flip — two CI
+  jobs, three Make targets, a script, a test and roughly thirty documents — that
+  the owner cancelled on 2026-08-23 in favour of a proprietary paid
+  subscription. Three choices inside the reconciliation are non-obvious.
+  **First, `LICENSE` is kept and rewritten rather than deleted**: `pyproject.toml`'s
+  `license-files`, `check_release_artifacts.py`'s wheel/sdist/image assertions
+  and the `Dockerfile`'s `COPY LICENSE` all require the file to exist, so it
+  becomes a *notice* that reserves all rights and points at
+  `docs/legal/EULA.en.md`, never a grant. That distinction is now asserted, not
+  conventional — `test_eula.py` fails if `LICENSE` stops naming the EULA or
+  regains a BSL parameter. **Second, `tests/security/test_no_phone_home.py` was
+  narrowed, not deleted.** Items 211-213 add a client that *does* call the
+  vendor, which turns the file red mid-item, and the cheapest reaction would
+  have been to remove it — taking with it two assertions that are worth *more*
+  under a subscription. The exemption is a package path (`src/querygate/
+  subscription/`), never a loosened pattern, so a `LICENSE_SERVER_URL` anywhere
+  else still fails the build; the exemption's width is itself bounded; and the
+  package's **declared** payload constant is pinned to exactly the four fields the
+  EULA discloses (a declaration, not the request body, and it does not run until
+  that package exists — the wire assertion is item 211's own Definition of Done), so a fifth field is a disclosure change before it is a code change.
+  A pattern-level exemption would have been simpler and would have silently
+  unguarded the entire tree. **Third, the marketing claim was replaced rather
+  than hedged.** "No telemetry of any kind … no outbound calls to us, ever … no
+  kill switch, no time bomb, and no check that can refuse to start or block a
+  query" is now false in every clause, and softening it would have produced a
+  document that is technically defensible and reads as evasive. `LICENSING_FAQ.md`
+  instead states plainly that there is a term and the software enforces it, then
+  bounds it precisely (a failed refresh never blocks; cold start fails open;
+  ~45 days of warnings; health, metrics, licence status and audit retrieval
+  survive a
+  lapse; the EULA owes a replacement entitlement if our service is the reason
+  you lapsed). The EULA gained the clauses that make those bounds contractual
+  rather than promises — including a **post-termination audit-retrieval
+  carve-out**, without which the product would permit an act its own licence
+  forbade, worst in exactly the regulated sectors it is sold into. A seventh
+  non-goal, **no hosted query execution**, is recorded in `NORTH_STAR.md` with
+  it: the subscription creates commercial pressure toward "we'll run it for
+  you", which would destroy the Reach pillar outright, so it is written down
+  rather than assumed.
+
 - **2026-08-23 — A WORM search cursor resumes a truncated day EXCLUSIVELY,
   and digest comparison fails closed instead of raising.** Three WORM-archive
   defects shipped together because they share one failure mode: a bound that
@@ -4514,7 +4559,11 @@ reasoning behind them, newest first. Added to incrementally as work happens
   exactly when a collision becomes possible, and not before.
 
 - **2026-08-21 — Open-core is rejected; the whole product goes BSL, not a
-  carved-out core.** `docs/business/PRE_BSL_CLEANUP_PLAN.md` Phase 0 had left
+  carved-out core.** ⚠️ **The open-core half of this entry stands; the BSL half
+  was superseded on 2026-08-23 — see the 2026-08-23 entry below.** Retained
+  unedited because the reasoning for rejecting open-core is what survived the
+  reversal, and it is load-bearing for why the proprietary product is *whole*
+  rather than split. `docs/business/PRE_BSL_CLEANUP_PLAN.md` Phase 0 had left
   this "a later, reversible decision." `docs/business/GTM_EXECUTION_PLAN.md`
   §1 **supersedes that keep-it-reversible posture** and rejects open-core
   outright, consciously, because the reasoning changed rather than being
@@ -4550,7 +4599,10 @@ reasoning behind them, newest first. Added to incrementally as work happens
   candidate clears this constraint.
 - **2026-08-21 — The dependency-licence gate records copyleft findings rather
   than blocking on them, and scopes itself to Python packages.** Ahead of the
-  planned source-available licence flip, `make license-check`
+  then-planned source-available licence flip (cancelled 2026-08-23 — the gate
+  outlived its premise and matters more under closed source, since a reciprocal
+  licence in the redistributed set is harder to satisfy, not easier),
+  `make license-check`
   (`scripts/check_licenses.py`) now gates every package in `poetry.lock`
   deny-by-default and emits `docs/THIRD_PARTY_LICENSES.md`. Three choices in it
   are deliberate and non-obvious. **First, the authority is the lockfile, not
@@ -4582,7 +4634,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   Debian userland and Microsoft's `msodbcsql18` under `ACCEPT_EULA=Y`; that is
   stated as an explicit scope limit in the report rather than silently implied
   to be covered, and clearing it is tracked as TODO.md item 196 — needed before
-  the first paid pilot's security review, not before the flip. Related: the redistribution
+  the first paid pilot's security review. Related: the redistribution
   boundary itself is the image, not the wheel — a wheel declares dependencies
   and contains none of them, which is the premise the one open MPL-2.0 question
   (`certifi`) rests on.

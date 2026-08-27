@@ -14710,3 +14710,7 @@ ceasing to thread the config value through.
 
 **Effort:** S. **Depends on:** 134 (shipped), 184/194/185 (shipped first).
 
+### 210. Proprietary licence transition — retire the BSL apparatus ✅ DONE
+
+Retired the proprietary/BSL licensing draft in favor of Apache-2.0. See LICENSE and CLAUDE.md's North Star section.
+

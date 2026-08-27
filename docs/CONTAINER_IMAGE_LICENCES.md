@@ -72,61 +72,98 @@ and a half of them:**
 | Requirement | Status |
 |---|---|
 | (i) "add significant primary functionality to it in your applications" | **Met.** QueryGate is not a repackaged driver. |
-| (ii) "require distributors and external end users to agree to terms that protect it and Microsoft at least as much as this agreement" | **NOT met.** See below. |
+| (ii) "require distributors and external end users to agree to terms that protect it and Microsoft at least as much as this agreement" | **Partly met, and this is the change item 210 made.** See below. |
 | (iii) "indemnify, defend, and hold harmless Microsoft from any claims … related to the distribution or use of your applications" | **Not addressed.** Nothing in QueryGate's licence or terms does this. |
 
-Requirement (ii) is the load-bearing one. A user who pulls the image receives
-QueryGate under BSL 1.1 and agrees to nothing on Microsoft's behalf. BSL 1.1 has
-no pass-through clause, no third-party-components section, and no mechanism for
-binding a downstream user to another vendor's terms. As it stands, the image
-distributes Microsoft's driver without imposing the terms Microsoft requires be
-imposed.
+Requirement (ii) is the load-bearing one, and **the licence change improved it
+rather than leaving it where it was.** Under the cancelled BSL plan a user who
+pulled the image received QueryGate under BSL 1.1 and agreed to nothing on
+Microsoft's behalf: BSL 1.1 has no pass-through clause, no third-party-components
+section, and no mechanism for binding a downstream user to another vendor's
+terms.
 
-There is also a restriction worth flagging even though it appears satisfied:
-§2(c)(ii) forbids distributing the code "so that any part of it becomes subject
-to any license that requires that the distributable code … be disclosed or
-distributed in source code form". BSL 1.1 makes *QueryGate's* source available;
-it does not reach a separately-installed binary driver. That reading is almost
-certainly right and is also exactly the kind of sentence a licensing reviewer
-will stop on.
+Under the proprietary EULA it does. `docs/legal/EULA.en.md` §2 now carries a
+**Third-party components** paragraph: the customer agrees to comply with each
+third-party component's own terms, "including any terms that protect their
+respective vendors", and those terms control over the EULA for that component.
+That is the ordinary mechanism by which a commercial product discharges a
+pass-through obligation, and it is exactly what option 1 below called for.
+
+**And one assumption, stated rather than left implicit:** EULA §2 binds a party
+who has *entered* the EULA, and `LICENSE` says in terms that someone without an
+Order "has no licence to use this software." So the pass-through reaches every
+lawful user of the image and nobody else. Whether that satisfies §2(b)(ii)'s
+"distributors and external end users" depends on the image never being
+distributed outside an Order — the current model (`docs/business/GTM_SAAS.md` §6,
+signed image only), but a premise, not a clause.
+
+**Two reasons this is "partly", not "met".** First, the EULA is still a draft
+with unfilled placeholders and has not been reviewed by counsel, so no clause in
+it can be called settled. Second, requirement (iii) — the indemnity running to
+Microsoft — is still not addressed anywhere, and that is a commitment nobody can
+draft their way into without the owner deciding to make it.
+
+There is also a restriction worth flagging even though it now appears comfortably
+satisfied: §2(c)(ii) forbids distributing the code "so that any part of it
+becomes subject to any license that requires that the distributable code … be
+disclosed or distributed in source code form". Under BSL 1.1 this needed an
+argument — the source was published, and the reading turned on the driver being a
+separately-installed binary. Proprietary, closed-source distribution removes the
+question rather than answering it: no QueryGate licence requires anything to be
+disclosed in source form. This is one of the few places where the licence change
+made a legal reading *simpler*.
 
 ## What should happen, in order of preference
 
-1. **Add a third-party-notices file and a pass-through clause.** A
-   `THIRD_PARTY_NOTICES` in the image plus a short clause in QueryGate's terms
-   requiring end users to accept third-party component terms would address
-   §2(b)(ii) directly. This is the ordinary way commercial products discharge
-   this obligation and it changes nothing about the product.
+1. ✅ **Add a pass-through clause — done (item 210).** `docs/legal/EULA.en.md`
+   §2 "Third-party components" (and its Hebrew mirror) requires the customer to
+   comply with third-party component terms, including terms protecting their
+   vendors. **Still outstanding from this option:** a `THIRD_PARTY_NOTICES` file
+   *inside the image itself*, so a user who pulls the image and never sees the
+   repository still receives the notices. `Dockerfile` already `COPY`s `LICENSE`;
+   this is the same shape and is not done.
 2. **Decide the indemnity question (§2(b)(iii)) with counsel.** It is a
-   commitment to Microsoft, and per `GTM_EXECUTION_PLAN.md` §3 Layer 3 the
-   owner is already weighing indemnification exposure and insurance. This
-   belongs in that conversation, not in a separate one.
+   commitment to Microsoft. The owner is already weighing indemnification
+   exposure and insurance for the Enterprise tier
+   (`docs/business/GTM_SAAS.md`), so this belongs in that conversation, not in a
+   separate one. **This is the requirement that is still not met at all.**
 3. **If either proves awkward, make the driver an opt-in layer.** MSSQL support
    is one of three dialects. A base image without `msodbcsql18` and a documented
    operator-installed step removes the obligation entirely, at the cost of a
    worse first-run experience for MSSQL users. `Dockerfile` already isolates the
    driver in a single `RUN` block, so this is a small change if it is wanted.
 
-**Do not treat this as blocking the flip.** It is a distribution-terms question
+**Do not treat this as blocking a release.** It is a distribution-terms question
 about a third-party component, not a question about QueryGate's own licence, and
-option 1 resolves the substance of it. It does need an answer before the first
-paid pilot's security review, which is the north-star metric.
+option 1's clause now goes to the substance of §2(b)(ii). What remains — the
+in-image notices file and the §2(b)(iii) indemnity — needs an answer before the
+first paid pilot's security review, which is the north-star metric.
 
 ## One interaction with a claim we make elsewhere
 
-`docs/LICENSING_FAQ.md` states that QueryGate "contains no telemetry of any kind
-… makes no outbound calls to us, ever", and
+`docs/LICENSING_FAQ.md` states that QueryGate transmits exactly four licence
+fields and that no path exists for database credentials, query text, results,
+rows, schema, catalog, audit records or policy files — and
 `tests/security/test_no_phone_home.py` enforces that against QueryGate's own
-source. §3 of the ODBC driver's EULA is headed **DATA COLLECTION** and
-contemplates the driver enabling collection of data from users of applications
-that use it.
+source, both as a hostname/vocabulary ban outside `src/querygate/subscription/`
+and as a positive assertion on that package's payload. §3 of the ODBC driver's
+EULA is headed **DATA COLLECTION** and contemplates the driver enabling
+collection of data from users of applications that use it.
 
-Our claim is about **QueryGate**, and it remains true: nothing in
-`src/querygate/` calls a QueryGate-controlled host. But a careful reviewer who
-reads both documents will ask about the driver, and the honest answer is that
-the driver is a third-party component with its own terms, whose telemetry
-behaviour we have not audited. Worth a sentence in the FAQ rather than being
-discovered.
+The scope of our claim narrowed in item 210 — QueryGate now makes a licence call
+of its own — but the boundary described here did not move: that call is ours and
+is disclosed; the driver's behaviour is Microsoft's and is not ours to
+characterise.
+
+Our claim is about **QueryGate**, and it remains true in its narrowed form:
+nothing in `src/querygate/` calls a QueryGate-controlled host except the
+subscription client of items 211-213, whose four-field payload is disclosed in
+EULA §16.1; `tests/security/test_no_phone_home.py` pins that package's declared
+payload constant to the same four fields. But a careful reviewer who reads both
+documents will ask about the driver, and the honest answer is that the driver is
+a third-party component with its own terms, whose telemetry behaviour we have not
+audited. → **Done (item 210):** stated in `docs/LICENSING_FAQ.md` under "One
+honest boundary", rather than left to be discovered.
 
 ## How to reproduce
 

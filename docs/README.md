@@ -45,17 +45,19 @@ rather than believed.
 
 ## Licensing
 
-**None of the licensing documents are legal advice, and the licence is a draft
-that is not yet in force.** See the banner at the top of
-[`LICENSE`](../LICENSE).
+**None of the licensing documents are legal advice.** The licence of record is
+[`legal/EULA.en.md`](legal/EULA.en.md) — it is in force, but its text is a draft
+pending counsel review and still carries unfilled placeholders.
+[`LICENSE`](../LICENSE) is a notice that reserves all rights and points here; it
+is not a grant.
 
 | Document | What it is |
 |---|---|
-| [`LICENSING_FAQ.md`](LICENSING_FAQ.md) | What the intended BSL 1.1 terms mean in practice, in plain language. Where this and `LICENSE` disagree, `LICENSE` governs. |
-| [`LICENSE_NOTES.md`](LICENSE_NOTES.md) | Drafting notes prepared for counsel, so the one-off legal review does not start from a blank page. |
-| [`DISTRIBUTION_STRATEGY.md`](DISTRIBUTION_STRATEGY.md) | How QueryGate is delivered to a customer under a source-available licence, and the trade-offs of each option. |
+| [`LICENSING_FAQ.md`](LICENSING_FAQ.md) | What the subscription terms mean in practice, in plain language: lapse behaviour, the four-field licence call, refunds, escrow. Where this and the EULA disagree, the **EULA** governs. |
+| [`LICENSE_NOTES.md`](LICENSE_NOTES.md) | ⚠️ **Superseded.** Drafting notes for the cancelled BSL text; retained as history only. |
+| [`DISTRIBUTION_STRATEGY.md`](DISTRIBUTION_STRATEGY.md) | How QueryGate is delivered to a customer, and the trade-offs of each option. |
 | [`LICENSE_ENFORCEMENT.md`](LICENSE_ENFORCEMENT.md) | What a self-hosted licence can and cannot enforce technically — deliberately honest about the ceiling. |
-| [`legal/`](legal/) | The commercial EULA texts (English and Hebrew). These are for a negotiated commercial agreement, not the open licence. |
+| [`legal/`](legal/) | **The licence of record** — the EULA, in English (governing) and Hebrew. Every right to install and run QueryGate comes from here plus your order. |
 
 ## Design and planning documents (internal working notes)
 
