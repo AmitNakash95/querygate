@@ -97,38 +97,34 @@ reconciliation rules between `TODO.md`, `ROADMAP.md`, and
 `docs/TODO_ARCHIVE.md`, and it runs in the unit suite and in the pre-commit
 hook, so drift fails fast.
 
-## Licence and the Contributor Licence Agreement
+## Licence, and why there is no CLA
 
-QueryGate **will be** licensed under the **Business Source License 1.1** —
-`LICENSE` is a draft **not yet in force**, and QueryGate is proprietary today. See
-[`LICENSE`](LICENSE) and the plain-language
-[licensing FAQ](docs/LICENSING_FAQ.md). Source-available, not open source; each
-version converts to Apache-2.0 four years after it ships.
+QueryGate is **proprietary and closed-source**, sold as a paid subscription
+(owner decision 2026-08-23, [`docs/business/GTM_SAAS.md`](docs/business/GTM_SAAS.md)).
+The licence of record is [`docs/legal/EULA.en.md`](docs/legal/EULA.en.md);
+[`LICENSE`](LICENSE) is a notice, not a grant. See the plain-language
+[licensing FAQ](docs/LICENSING_FAQ.md).
 
-**Contributions will require a lightweight click-through Contributor Licence
-Agreement.** The reason is specific and worth stating plainly rather than hiding
-behind boilerplate: QueryGate is sold under commercial licences alongside BSL.
-Under a bare Developer Certificate of Origin an outside contributor licenses
-their patch under BSL only, and the project then cannot grant a paying customer
-rights above BSL over that code. A CLA keeps that possible. It does not assign
-your copyright — you keep it, and you grant a licence broad enough to relicense.
+**The repository is private and there is no external contribution process**, so
+the Contributor Licence Agreement drafted for a public source-available
+repository has been retired along with the BSL plan. Its purpose was to let the
+project relicense outside contributions above the source-available grant; with
+no outside contributors and no source-available grant, it has nothing to do.
+`.github/cla/` is retained as history and is not in force.
 
-The draft agreement is [`.github/cla/CLA.md`](.github/cla/CLA.md). **It is a
-draft, it has not been reviewed by a lawyer, and nothing is enforcing it yet.**
+This document therefore addresses **maintainers and contracted contributors**
+working inside the private repository, not the public.
 
-## For maintainers: the first-outside-PR runbook
+## For maintainers: the fork-PR runbook — **not currently applicable**
 
-Three things must be decided *before* the first external pull request arrives,
-not while one is sitting open. None is done yet.
+> ⚠️ **The repository is private and closed-source, so there are no fork pull
+> requests.** This section is retained because the CI analysis in it is
+> independently useful and expensive to redo, and because the decision would
+> have to be made again if a contracted contributor ever works from a fork.
+> Nothing in it is pending work. The CLA step it used to open with is deleted,
+> not deferred — see "Licence, and why there is no CLA" above.
 
-### 1. Turn the CLA bot on
-
-`.github/cla/` holds the configuration and a **disabled** workflow file. Nothing
-is active. See [`.github/cla/README.md`](.github/cla/README.md) for the exact
-enabling steps, the signature-store decision, and what must be settled by
-counsel first.
-
-### 2. Decide what CI does for a fork PR
+### 1. Decide what CI does for a fork PR
 
 An internal planning note raised this as "secrets-dependent jobs (live
 MSSQL/MySQL/Snowflake) will fail for an outside contributor". **Checked against
@@ -159,7 +155,7 @@ re-run them from a branch in the base repo — **and document whichever you pick
 in this file**, so a first-time contributor whose PR shows red checks knows
 whether that is their fault.
 
-### 3. Decide who reviews, and say so
+### 2. Decide who reviews, and say so
 
 Today there is one maintainer. A PR that sits unacknowledged for two weeks costs
 more credibility than a PR that is politely declined on day one. Publish a

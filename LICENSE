@@ -1,140 +1,78 @@
-=============================================================================
- DRAFT — FOR LAWYER REVIEW. NOT LEGAL ADVICE. NOT YET IN FORCE.
-=============================================================================
- This file is a working draft of QueryGate's intended Business Source License
- 1.1 terms. It has NOT been reviewed or settled by a lawyer, the Licensor
- legal entity named below does not exist yet, and the Change Date has not been
- stamped. Nothing in this file is legal advice, and no one should rely on it
- as QueryGate's licence until this banner is removed.
-
- WHAT GOVERNS IN THE MEANTIME: this draft grants nothing. Until the banner is
- removed, QueryGate remains proprietary and all rights are reserved — the terms
- previously carried by this file, and the EULA in docs/legal/EULA.en.md /
- docs/legal/EULA.he.md, continue to govern. The repository is private; no
- public licence is granted by the presence of this draft.
-
- Four values are unknown and are left as literal placeholders below. The
- Licensor placeholder appears twice (the parameter and the copyright line) and
- both must be filled together; the alternative-licensing line needs a real
- channel, not a company name, so it is its own placeholder:
-   * <LICENSOR — legal entity, to be supplied>          (x2)
-   * <LICENSING_CONTACT — email address or URL>
-   * <VERSION — stamped per release>
-   * <CHANGE_DATE — stamped per release>
- This draft is superseded: QueryGate ships proprietary under docs/legal/EULA.en.md
- (decision 2026-08-23, docs/business/GTM_SAAS.md). Replacing this file is TODO item 210.
-
- Drafting notes for counsel: docs/LICENSE_NOTES.md
- Plain-language explanation for users: docs/LICENSING_FAQ.md
-
- On this banner itself: the "Covenants of Licensor" below (covenant 4) require
- the Licensor not to modify the License text in any other way. This banner sits
- outside the License text and modifies none of it, but it must be deleted
- before the licence goes into force regardless — see docs/LICENSE_NOTES.md.
+QueryGate — Proprietary Software Licence Notice
 =============================================================================
 
-License text copyright (c) 2017 MariaDB Corporation Ab, All Rights Reserved.
-"Business Source License" is a trademark of MariaDB Corporation Ab.
+Copyright (c) 2026 <LICENSOR — legal entity, to be supplied>.
+All rights reserved.
 
-Parameters
-
-Licensor:             <LICENSOR — legal entity, to be supplied>
-
-Licensed Work:        QueryGate <VERSION — stamped per release>
-                      The Licensed Work is (c) 2026
-                      <LICENSOR — legal entity, to be supplied>
-
-Additional Use Grant: You may make production use of the Licensed Work,
-                      provided that you do not provide the Licensed Work to
-                      third parties on a hosted, managed, or embedded basis,
-                      whether or not for a fee — except that a third party
-                      may install, operate, or manage the Licensed Work solely
-                      on behalf of, and for the internal use of, a single
-                      licensee.
-
-                      "You" includes all entities that control, are controlled
-                      by, or are under common control with you.
-
-Change Date:          <CHANGE_DATE — stamped per release>
-
-Change License:       Apache License, Version 2.0
-
-For information about alternative licensing arrangements for the Licensed Work,
-please contact <LICENSING_CONTACT — email address or URL>.
-
-Notice
-
-The Business Source License (this document, or the “License”) is not an Open
-Source license. However, the Licensed Work will eventually be made available
-under an Open Source License, as stated in this License.
+QueryGate is proprietary, closed-source, commercial software. It is licensed,
+never sold, and it is not open source or source-available. No licence, right,
+or permission of any kind is granted by the mere possession of this software,
+this file, or any repository, archive, package, container image, or binary in
+which they are distributed.
 
 -----------------------------------------------------------------------------
+THE LICENCE OF RECORD
+-----------------------------------------------------------------------------
 
-Business Source License 1.1
+This file is a notice, not the licence. Your rights to install, run, and use
+QueryGate are granted solely by, and are subject in full to, the End User
+Licence Agreement:
 
-Terms
+    docs/legal/EULA.en.md   (English — the governing version)
+    docs/legal/EULA.he.md   (Hebrew — translation)
 
-The Licensor hereby grants you the right to copy, modify, create derivative
-works, redistribute, and make non-production use of the Licensed Work. The
-Licensor may make an Additional Use Grant, above, permitting limited
-production use.
+together with the order form, quote, or written agreement between you and the
+Licensor that sets out your term, scope, and fees (the "Order"). If you have
+not entered into that agreement, you have no licence to use this software.
 
-Effective on the Change Date, or the fourth anniversary of the first publicly
-available distribution of a specific version of the Licensed Work under this
-License, whichever comes first, the Licensor hereby grants you rights under
-the terms of the Change License, and the rights granted in the paragraph
-above terminate.
+QueryGate is sold as a paid subscription. The licence granted under the EULA
+lasts for the paid term and no longer.
 
-If your use of the Licensed Work does not comply with the requirements
-currently in effect as described in this License, you must purchase a
-commercial license from the Licensor, its affiliated entities, or authorized
-resellers, or you must refrain from using the Licensed Work.
+-----------------------------------------------------------------------------
+WHAT YOU MAY NOT DO
+-----------------------------------------------------------------------------
 
-All copies of the original and modified Licensed Work, and derivative works
-of the Licensed Work, are subject to this License. This License applies
-separately for each version of the Licensed Work and the Change Date may vary
-for each version of the Licensed Work released by Licensor.
+Without the Licensor's prior written permission, you may not copy, modify,
+create derivative works of, distribute, sublicense, sell, rent, lease, host as
+a service, publish, or otherwise make this software available to any third
+party; nor reverse-engineer, decompile, or disassemble it, except to the
+limited extent that applicable law expressly forbids that restriction.
 
-You must conspicuously display this License on each original or modified copy
-of the Licensed Work. If you receive the Licensed Work in original or
-modified form from a third party, the terms and conditions set forth in this
-License apply to your use of that work.
+**The software enforces its own subscription term technically.** Disabling,
+removing, patching, circumventing, or interfering with that enforcement — or
+with any licence check, entitlement verification, or expiry behaviour — is a
+material breach of the EULA. See EULA Section 3 (Restrictions) and Section 15
+(Technical Enforcement and Anti-Circumvention).
 
-Any use of the Licensed Work in violation of this License will automatically
-terminate your rights under this License for the current and all other
-versions of the Licensed Work.
+-----------------------------------------------------------------------------
+NO WARRANTY
+-----------------------------------------------------------------------------
 
-This License does not grant you any right in any trademark or logo of
-Licensor or its affiliates (provided that you may use a trademark or logo of
-Licensor as expressly required by this License).
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THIS SOFTWARE IS PROVIDED
+"AS IS" AND "AS AVAILABLE", WITHOUT WARRANTY OR CONDITION OF ANY KIND, EXPRESS,
+IMPLIED, OR STATUTORY, INCLUDING WITHOUT LIMITATION ANY IMPLIED WARRANTY OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, OR NON-INFRINGEMENT.
+The Licensor's warranty disclaimer and limitation of liability are set out in
+full in EULA Sections 8 and 9, which govern.
 
-TO THE EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSED WORK IS PROVIDED ON
-AN “AS IS” BASIS. LICENSOR HEREBY DISCLAIMS ALL WARRANTIES AND CONDITIONS,
-EXPRESS OR IMPLIED, INCLUDING (WITHOUT LIMITATION) WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, AND
-TITLE.
+-----------------------------------------------------------------------------
+THIRD-PARTY COMPONENTS
+-----------------------------------------------------------------------------
 
-MariaDB hereby grants you permission to use this License’s text to license
-your works, and to refer to it using the trademark “Business Source License”,
-as long as you comply with the Covenants of Licensor below.
+QueryGate incorporates and redistributes third-party open-source components,
+each licensed under its own terms, which are unaffected by this notice. The
+inventory, the licence of every redistributed component, and the reasoning
+behind the container image's non-Python layers are recorded in:
 
-Covenants of Licensor
+    docs/THIRD_PARTY_LICENSES.md
+    docs/CONTAINER_IMAGE_LICENCES.md
 
-In consideration of the right to use this License’s text and the “Business
-Source License” name and trademark, Licensor covenants to MariaDB, and to all
-other recipients of the licensed work to be provided by Licensor:
+-----------------------------------------------------------------------------
+CONTACT
+-----------------------------------------------------------------------------
 
-1. To specify as the Change License the GPL Version 2.0 or any later version,
-   or a license that is compatible with GPL Version 2.0 or a later version,
-   where “compatible” means that software provided under the Change License can
-   be included in a program with software provided under GPL Version 2.0 or a
-   later version. Licensor may specify additional Change Licenses without
-   limitation.
+Licensing, purchasing, and permission enquiries:
+    <LICENSING_CONTACT — email address or URL>
 
-2. To either: (a) specify an additional grant of rights to use that does not
-   impose any additional restriction on the right granted in this License, as
-   the Additional Use Grant; or (b) insert the text “None”.
-
-3. To specify a Change Date.
-
-4. Not to modify this License in any other way.
+Plain-language explanation of these terms, for users:
+    docs/LICENSING_FAQ.md

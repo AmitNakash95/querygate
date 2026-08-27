@@ -1,5 +1,24 @@
 # LICENSE drafting notes — for counsel
 
+> ## ⚠️ SUPERSEDED — 2026-08-23. Retained for history only.
+>
+> **These are drafting notes for the Business Source Licence 1.1 text that
+> QueryGate will never ship under.** Owner decision, 2026-08-23
+> ([`business/GTM_SAAS.md`](business/GTM_SAAS.md)): QueryGate is proprietary,
+> closed-source, and sold as a paid monthly subscription. `LICENSE` no longer
+> contains a BSL draft — it is a proprietary notice — and the licence of record
+> is [`legal/EULA.en.md`](legal/EULA.en.md).
+>
+> **The questions counsel is actually being asked are now the EULA clauses added
+> by item 210**: term/renewal/fees, no-refund, non-payment, suspension distinct
+> from termination, cure period, anti-circumvention, technical-enforcement
+> notice, licence-data transmission disclosure, licence-service availability, and
+> the post-termination audit-retrieval carve-out. Every BSL-specific question
+> below — the Additional Use Grant wording, the MSP carve-out, the Change Date,
+> the Apache-2.0 conversion — is moot. Do not action anything in this file, and
+> do not send it to counsel. Retained because it records why the grant shape was
+> considered and rejected.
+
 > **DRAFT — FOR LAWYER REVIEW. NOT LEGAL ADVICE.**
 > This file, and the `LICENSE` it accompanies, are a working draft prepared
 > in-house. Nothing here is a legal opinion and nothing here is settled. It

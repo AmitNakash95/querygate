@@ -125,9 +125,22 @@ human-SSO/identity stream; these start at 210.
   compile list; verify the suite against a mixed `.so`/`.py` tree; then
   PyInstaller-bundle. Still open: Linux/Docker, the ODBC path, and a
   support-debugging procedure.
-- [ ] **210** — Proprietary licence transition; retire the BSL apparatus.
-  *Unblocks every other item that touches licensing text, and removes two CI
-  gates that would otherwise fail once `LICENSE` changes.*
+  **⚠️ Sequencing correction (2026-08-27): 214 cannot COMPLETE before 211.** Its
+  own phase 2 requires "the subscription layer and the app compiled together so
+  enforcement call sites are inside the artifact", which does not exist yet. The
+  spike — the part this phase's rules said must run first — is done, so 214 stays
+  listed here for continuity but is **not the next eligible item**; work the
+  remaining owner-ungated packaging tasks opportunistically and finish it after
+  211 lands.
+- [x] **210** — Proprietary licence transition; retire the BSL apparatus.
+  ✅ **Shipped 2026-08-27.** *Unblocked every other item that touches licensing
+  text.* Two things it landed that later items must not undo: the phone-home
+  guard is **narrowed to `src/querygate/subscription/`, not deleted** (with the
+  package's declared payload constant pinned to the four disclosed fields; the
+  request-body assertion is item 211's own DoD), and five cancelled-plan
+  documents plus `.github/cla/` are exempt from the claim-drift sweep **only
+  while their superseded banners are present** — asserted by
+  `tests/unit/test_claim_drift_exemptions.py`.
 - [ ] **212** — Control plane: accounts, Stripe subscriptions, entitlement
   issuance. *The vendor side; without it 211 has nothing to verify. Ordered
   before 211 because 211's own dependency column names it.*

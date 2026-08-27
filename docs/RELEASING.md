@@ -237,31 +237,40 @@ gh attestation verify oci://ghcr.io/agitmit/querygate:0.1.0 --repo AGitmit/Query
 signed+attested release is only produced when a maintainer actually pushes a version tag —
 publishing is never automatic on a `main` commit.
 
-**Python package index: public PyPI.** The index question is closed (see the go-to-market
-plan's distribution decision): the Python wheel and sdist publish to **public PyPI**, and
-the container image to **GHCR** as already described above. A private index was rejected —
-distribution friction is adoption friction, and a source-available licence whose package
-cannot be `pip install`ed defeats its own purpose.
+**Python package index: ⚠️ the public-PyPI decision is superseded.** It was made under
+the cancelled source-available plan, where "a package that cannot be `pip install`ed
+defeats its own purpose" was the deciding argument. Under the proprietary subscription
+(`docs/business/GTM_SAAS.md` §6) **the container image is the only distribution channel**
+(signing and provenance are wired in `release.yml` but have not yet run on a
+tag), and publishing an installable wheel of a closed-source product to a public
+index would hand out the very artifact the packaging plan (item 214) exists to compile
+and obfuscate.
 
-The *decision* is made; the *mechanism* is not built. `.github/workflows/release.yml`
-today builds, scans, pushes, signs, and attests the container image only — it contains no
-PyPI upload step, and no index credential or trusted-publisher configuration exists yet.
-Until that step lands, the wheel and sdist are distributed as release artifacts and
-verified by `SHA256SUMS` / `make verify-release`. When it does land it must inherit the
-same tag gate as the image: publishing is never automatic on a `main` commit.
+Nothing was built either way, so nothing has to be undone: `.github/workflows/release.yml`
+builds, scans, pushes, signs, and attests the container image only, and contains no PyPI
+upload step, credential, or trusted-publisher configuration. **The wheel and sdist remain
+build artifacts** — produced by `release-check`, gated by `check_release_artifacts.py`,
+verified by `SHA256SUMS` / `make verify-release` — and are not published. If a publishing
+step is ever wanted, it needs a fresh decision under the current licence, and it must
+inherit the same tag gate as the image: publishing is never automatic on a `main` commit.
 
 ## The EULA is the licence of record
 
-QueryGate **will ship** proprietary and closed-source under a paid monthly
-subscription — decision recorded in `docs/business/GTM_SAAS.md`, transition
-tracked as **open** item 210. There is no BSL flip and no Change Date.
+QueryGate ships proprietary and closed-source under a paid monthly subscription
+— decision recorded in `docs/business/GTM_SAAS.md`, licence transition landed as
+item 210. There is no BSL flip and no Change Date.
 
-⚠️ **None of that has landed yet, which is exactly why these gates exist.**
-`LICENSE` is still an unstamped BSL draft carrying
-`DRAFT — FOR LAWYER REVIEW … NOT YET IN FORCE` and four `<…>` placeholders, and
-`docs/legal/EULA.{en,he}.md` still carry 19 unfilled blanks. When the transition
-completes, `EULA.en.md` (with the Hebrew `EULA.he.md`) becomes the document a
-customer accepts and `LICENSE` carries the proprietary notice.
+`docs/legal/EULA.en.md` (with the Hebrew `EULA.he.md`; English governs) **is the
+licence of record** — the document a customer accepts. `LICENSE` now carries the
+proprietary notice: it reserves all rights, grants nothing, and points at the
+EULA. It is not a grant and must not be edited as though it were one.
+
+⚠️ **The text is not settled, which is exactly why these gates exist.** The
+Licensor legal entity does not exist yet, so `LICENSE` carries two `<…>`
+placeholders and `docs/legal/EULA.{en,he}.md` carry the commercial blanks counsel
+must fill (effective date, entity, address, cure and notice periods, retention
+window, liability cap). `make eula-check-release` refuses a tag while any of them
+remain, in **either** language.
 
 ```bash
 make eula-check            # tolerant: reports outstanding placeholders, exit 0

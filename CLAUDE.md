@@ -261,7 +261,11 @@ your live operational DB, self-hosted, data never leaves), **Proof**
 The **non-goals are product identity, not gaps** — they are why followers can't
 copy us; adding any needs an explicit recorded decision: no `execute_sql`/raw-SQL
 mode, no execution of model-generated code, no stored-procedure path, no
-mandatory semantic/entity-modeling step, no warehouse of our own. When a
+mandatory semantic/entity-modeling step, no warehouse of our own, no GraphQL (or
+any second) query interface, and — added 2026-08-23 with the subscription
+decision — **no hosted query execution**: the vendor control plane may issue
+entitlements and must never execute a query, hold a database credential, or
+receive a row. When a
 feature, roadmap re-order, or pitch is unclear, check it against NORTH_STAR.md
 (definition → pillars → non-goals → success metric). Success is measured by one
 thing: a paid design partner passing a security review no competitor's passes at

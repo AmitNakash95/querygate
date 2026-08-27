@@ -1,206 +1,223 @@
 # QueryGate licensing FAQ
 
 > **DRAFT — FOR LAWYER REVIEW. NOT LEGAL ADVICE.**
-> This FAQ explains the intent of QueryGate's `LICENSE` in plain language. The
-> licence itself has not yet been settled by a lawyer, and where this page and
-> `LICENSE` ever disagree, `LICENSE` governs. Drafting notes for counsel are in
-> [`LICENSE_NOTES.md`](LICENSE_NOTES.md).
+> This FAQ explains QueryGate's licensing in plain language. The licence of
+> record is [`legal/EULA.en.md`](legal/EULA.en.md) (Hebrew:
+> [`legal/EULA.he.md`](legal/EULA.he.md)), which has not yet been settled by a
+> lawyer and still carries unfilled placeholders. Where this page and the EULA
+> ever disagree, **the EULA governs**.
 
-## Internal production use is free, forever, for every version released under this
-licence, with no limit.
-
-That is the headline and it has no asterisk. Run QueryGate in production, inside
-your organisation, against as many databases, with as many users, at whatever
-scale you like, for as long as you like. Pay nothing. There is no user cap, no
-database cap, no core cap, no seat count, no trial period, and no licence key to
-obtain.
-
-QueryGate **will be** licensed under the **Business Source License 1.1** (BSL 1.1)
-— `LICENSE` is a draft not yet in force. BSL
-is a source-available licence, not an open-source licence — the difference is
-that one specific commercial use is restricted, and that after a fixed date each
-version becomes fully open source under Apache-2.0.
-
----
-
-## What exactly is prohibited?
-
-One thing: **providing QueryGate itself to third parties** — hosted, managed,
-or embedded, whether or not you charge for it.
-
-The grant permits production use "provided that you do not provide the Licensed
-Work to third parties on a hosted, managed, or embedded basis, whether or not
-for a fee."
-
-So this is not allowed:
-
-- Running QueryGate as a multi-tenant hosted service that other organisations
-  sign up for.
-- Offering "managed QueryGate" as a product to a general customer base.
-- Embedding QueryGate inside a product you sell, such that your customers get
-  QueryGate's functionality as part of what they bought.
-
-And this **is** allowed, without asking anyone:
-
-- Running it in production for your own organisation, at any scale.
-- Running it for your subsidiaries, your parent, and your sister companies. The
-  licence's definition of "You" covers everything under common control with you;
-  note that clause is drafted to stop a group structure being used to *fragment*
-  the grant, and affiliate use follows from it as a consequence.
-- Running it for your internal customers: other teams, other departments, other
-  business units.
-- Reading, modifying, forking, and rebuilding the source for your own use.
-- Evaluating it, benchmarking it, and publishing what you find.
-- Running it behind a product you sell, as part of your own internal
-  infrastructure, where your customers are not being given access to QueryGate.
-  **⚠️ This last one is our reading, not something the grant text settles.** The
-  grant prohibits providing the Licensed Work on an "embedded" basis and does not
-  define that word; HashiCorp's equivalent grant needs roughly twenty lines of
-  definitions to draw the same line. If your product's value depends on
-  QueryGate being in it, **ask us in writing before relying on this.**
-
-The line is not scale. The line is whether QueryGate itself is the thing being
-supplied to a third party.
-
-## Can our MSP / consultancy / systems integrator run it for us?
-
-**Yes — that is what the carve-out is for**, with one caveat we would rather
-state than have you discover.
-
-The grant says: "except that a third party may install, operate, or manage the
-Licensed Work solely on behalf of, and for the internal use of, a single
-licensee."
-
-So a managed service provider, a consultancy, or a contractor can deploy,
-operate, upgrade, and administer QueryGate for you. They are working on your
-behalf, for your internal use, and that is a permitted deployment.
-
-**⚠️ The caveat:** the open question counsel is being asked (see
-[`LICENSE_NOTES.md`](LICENSE_NOTES.md)) is whether this wording achieves the
-carve-out *without* also permitting a multi-tenant hosted offering dressed up as
-an MSP arrangement. A single MSP running a single instance for a single licensee
-is squarely what it is for. If your arrangement is less clear-cut than that, ask
-us in writing rather than relying on this page.
-
-What that same MSP may **not** do is stand up one QueryGate estate and resell
-access to it across their client base. Per client, on that client's behalf: fine.
-As a shared service they sell: not fine.
-
-## What counts as "production"?
-
-Under this licence, mostly it does not matter — which is deliberate.
-
-BSL 1.1 itself grants non-production use and lets the licensor grant production
-use on top. Many BSL projects then attach conditions to production use, so the
-boundary gets argued about. QueryGate's grant does not: **all internal use is
-permitted, production or not.** There is no threshold to be on the wrong side
-of, so there is nothing to measure, self-assess, or report.
-
-The only place the word does any work is the one restriction above, and that
-restriction does not turn on production-ness either — offering QueryGate to
-third parties as a hosted, managed, or embedded service is restricted whether or
-not you would call it production, and whether or not you charge for it.
-
-If you are unsure whether something you want to do is permitted, the useful
-question is not "is this production?" — it is "am I giving other organisations
-access to QueryGate itself?"
-
-## What happens at the Change Date?
-
-**Each version of QueryGate becomes Apache-2.0 four years after it is
-published.** Permanently, automatically, with no action required by anyone.
-
-Some detail worth having:
-
-- The Change Date is **per version**, not per project. Every release stamps its
-  own concrete Change Date into its own `LICENSE` file. Version 1.0 converts
-  four years after version 1.0 shipped; version 1.4 converts four years after
-  version 1.4 shipped.
-- The conversion is written into the licence you already have. It is not a
-  promise to relicense later — it is a grant that takes effect on a date. Nobody
-  can withdraw it, including us.
-- Apache-2.0 is a permissive open-source licence. Once a version converts, every
-  restriction on this page is gone for that version, including the hosted-service
-  restriction.
-- BSL 1.1 also has a backstop: the conversion happens on the Change Date **or**
-  the fourth anniversary of that version's first public distribution, whichever
-  comes first.
-
-This is the part of BSL that a legal team usually cares about most: the
-restriction has a fixed, non-negotiable expiry.
+> **⚠️ What is shipping, and what is decided but not yet built.** QueryGate the
+> gateway ships today. **The subscription mechanics described on this page — the
+> entitlement, the renewal countdown, the refusal after lapse, the four-field
+> licence call — are specified and decided, but not yet implemented** (TODO.md
+> items 211–213). This page describes the terms you will be buying under. It is
+> written ahead of the code deliberately, because the previous version of this
+> page promised the exact opposite and that promise was the thing that had to go
+> first. Nothing here is a description of code that exists today.
 
 ## Is QueryGate open source?
 
-No, and we do not call it that. BSL 1.1 is **source-available**: the entire
-source is public, readable, buildable, forkable, and modifiable, but one
-commercial use is restricted, so it does not meet the Open Source Definition.
-Each version becomes genuinely open source (Apache-2.0) at its Change Date.
+**No.** QueryGate is **proprietary, closed-source, commercial software**, sold as
+a paid subscription. The source is not published, there is no free tier for
+production use, and no version of it converts to an open-source licence on any
+date.
 
-We chose this deliberately over the alternative — an "open core" split where the
-interesting parts are held back. QueryGate's differentiators are its policy
-enforcement, its per-human attribution, and its tamper-evident audit ledger.
-Holding any of those back would make the free product not worth evaluating. BSL
-restricts *resale*, never *capability*: everything is in the box.
+If you have read an older document in this repository promising a Business
+Source Licence flip, unlimited free production use, or a four-year conversion to
+Apache-2.0: **that plan was cancelled on 2026-08-23** and those documents are
+banner-marked as superseded. See [`business/GTM_SAAS.md`](business/GTM_SAAS.md)
+for the decision.
 
-## Do we need to tell you we are using it? Does it phone home?
+## What am I buying?
 
-No, and no.
+A subscription licence to install and run QueryGate **in your own environment**,
+for the term you have paid for, at the scope set out in your order.
 
-There is nothing to register, no licence key to install, no activation, and no
-usage report. QueryGate contains **no telemetry of any kind** — not for
-licensing, not for analytics. It makes no outbound calls to us, ever. That is a
-product commitment as much as a licensing one: QueryGate sits in the request path
-between an agent and your operational database, and a beacon originating inside
-a customer's network would contradict the entire premise.
+- **Monthly, billed one month in advance.** An annual term is available at a
+  discount, billed annually in advance.
+- **Auto-renews** unless you turn that off.
+- **Priced on governed database connections and human seats** — the two things
+  that track the value you get. Your tier's limits are in your order and are
+  enforced in software.
+- **Self-hosted, always.** We do not host your gateway, we do not run queries,
+  and there is no QueryGate cloud that your data passes through. See "Does my
+  data reach you?" below.
 
-You do not have to take that on trust, and you should not: `tests/security/test_no_phone_home.py` fails the build if a QueryGate-controlled hostname, a licence-server or activation endpoint, or a telemetry URL ever appears in shipped source. One honest boundary on that: the claim is about **QueryGate**. The container image also carries Microsoft's ODBC driver for SQL Server, whose own licence terms contemplate data collection; we have not audited that third-party component's behaviour and do not speak for it. See `docs/CONTAINER_IMAGE_LICENCES.md`. Run `grep -rniE 'querygate\.(com|io|dev|net)' src/` yourself — it is a one-line check and it is meant to be run.
+## What happens if I cancel?
 
-There is also no kill switch, no time bomb, and no check that can refuse to start
-or block a query. If a licensing feature is ever added for the paid tier, it will
-be a locally-verified entitlement token that at most logs a warning — it will
-never interrupt data access.
+**You keep full access until the end of the period you have already paid for**,
+and the subscription then expires. Nothing is cut off mid-term.
 
-## What does the paid tier add, if the software is free?
+**Fees already paid are not refunded and are not pro-rated** (EULA §14.3). If you
+cancel an hour after a monthly charge, that month is yours to use and the money
+is not coming back. We would rather you read that here than discover it.
 
-Not software features. Everything QueryGate does technically is in the free,
-source-available product. What the paid tier adds is a counterparty who is
-contractually on the hook:
+## What happens when a subscription lapses?
 
-- **Indemnification** — contractual liability the free user does not get.
-- **A support SLA** — scoped honestly to what we can actually sign, which today
-  means business-hours response and best-effort severity-1.
-- **The security packet** — penetration test report, completed vendor security
-  questionnaires, SBOM, third-party licence inventory, and the composed trust
-  evidence page.
-- **Private CVE pre-notification**, ahead of public disclosure.
-- **Upgrade assistance and policy-design consulting.**
-- **QueryGate Notary** — third-party anchoring of the audit ledger's chain head
-  hashes, which turns "tamper-evident if you trust the operator" into
-  "tamper-evident *against* the operator".
+This is the part to read carefully, because the honest answer is "the product
+stops doing its main job".
 
-**Two of those are honest forward statements, not things you can buy today.**
-QueryGate Notary is a planned service that does not exist yet, and no external
-penetration test has been performed yet. They are listed because they are the
-plan, not because they are shipping. Ask us where each one actually stands
-before you rely on it.
+| State | What happens |
+|---|---|
+| Paid and renewing | Nothing. |
+| Auto-renew off, under 30 days left | A persistent countdown banner in the admin and access UIs, an email, a field on the health endpoint, and a metric — naming the exact date and exactly what will happen. |
+| Term expired, inside the grace window | **Everything keeps working.** Warnings escalate; health reports `degraded`. |
+| Past the term *and* the grace window | **Every governed query, every governed write, and every live schema reflection is refused** with HTTP 402 and a message naming the renewal route. |
 
-## We are a cloud provider / database vendor / platform. Can we offer QueryGate?
+**What keeps working even then**, because you may need it precisely when you are
+in a billing dispute (EULA §15.2): the health and metrics endpoints, the licence
+status view, and **retrieval and integrity verification of your own audit
+records**. Administrative and configuration functions that read live database
+schema, test a database connection, or change enforcement scope are suspended
+along with everything else — a lapsed deployment is not a place to widen a
+policy. Your audit records are yours — the EULA grants a
+**perpetual, irrevocable licence** to export and verify them that survives
+termination even for breach (§18). A product that held your compliance records
+hostage would be indefensible in the regulated sectors that need this most.
 
-Not under this licence — that is precisely the restriction. Talk to us about a
-commercial licence instead; BSL 1.1 explicitly contemplates one ("you must
-purchase a commercial license from the Licensor... or you must refrain from
-using the Licensed Work"), and the alternative-arrangements contact is in
-`LICENSE`.
+**Nothing is deleted.** Lapsing suspends governed operation; it does not
+uninstall anything, touch your databases, or drop your configuration. Paying
+resumes full operation without reinstalling (EULA §7.4).
+
+## So there *is* a kill switch?
+
+There is a **term**, and the software enforces it. We are not going to euphemise
+that. What we will do is bound it precisely:
+
+- **A failed licence check never blocks anything.** Only a confirmed,
+  server-side non-renewal does, and only after the full paid term *plus* a grace
+  window has elapsed. If our licence service is down for a week, nothing happens
+  to you.
+- **It cannot be a surprise.** Roughly 45 days of escalating, visible warnings
+  precede any refusal.
+- **A first boot with no network fails open**, in grace. A fresh install, a DR
+  failover into an isolated network, or a scaled-out replica has nothing to be
+  "valid" from, and our outage must never become your outage on day one.
+- **If our service is unavailable long enough that your entitlement would
+  otherwise lapse, we owe you a replacement entitlement covering that period**
+  and the lapse is not treated as expiry (EULA §17.3). Your operation is not
+  supposed to depend on our uptime, and the contract says so.
+- **Air-gapped and offline deployments** are supported on the Enterprise tier
+  with an entitlement issued out of band — no network involved at all.
+
+Disabling or patching the check is a material breach of the EULA (§15.5), and
+that clause — not the code — is the layer that actually holds. Compilation raises
+the bar; it does not make the gate unbypassable, and we are not going to pretend
+otherwise.
+
+## Does it phone home? Does my data reach you?
+
+**A licence call: yes. Your data: no, and there is no code path for it.**
+
+**What is transmitted**, on start-up and roughly once a day (EULA §16.1) — four
+fields, and that is the whole list:
+
+```
+{ org_id, deployment_id, connection_count, seat_count }
+```
+
+Two of those are operational facts about your estate. They are transmitted so
+your tier's connection and seat limits can be applied, and so an upgrade happens
+automatically instead of by invoice surprise. We are naming them rather than
+describing this as "just an org id".
+
+**What is never transmitted** (EULA §16.2): database credentials or connection
+strings, query text, query results, row values, schema or catalog content, audit
+records, policy files, personal data of your users, or anything else derived from
+your databases. **There is no transmission path for any of it in the software.**
+
+**You do not have to take that on trust.**
+[`tests/security/test_no_phone_home.py`](../tests/security/test_no_phone_home.py)
+fails the build if a QueryGate-controlled hostname or a licence-server,
+activation, or telemetry endpoint appears anywhere in shipped source **outside
+the single `src/querygate/subscription/` package** — and it separately pins that
+package's **declared** payload constant to exactly the four fields above, so
+adding a fifth is a disclosure change before it is a code change. Two honest
+limits on that second half: it checks the declaration, not the request body (the
+wire assertion belongs to the subscription work itself), and it does not run at
+all until that package exists, which it does not yet. Run
+`grep -rniE '\bquerygate\.(com|io|dev|net|org|ai|sh|app|cloud)\b' src/` yourself — it is a
+one-line check and it is meant to be run. (The word boundaries matter: without
+them the pattern also matches `querygate.compiler`, and you would get eight
+false hits.)
+
+**One honest boundary:** that claim is about **QueryGate**. The container image
+also carries Microsoft's ODBC driver for SQL Server, whose own licence terms
+contemplate data collection. We have not audited that third-party component's
+behaviour and do not speak for it — see
+[`CONTAINER_IMAGE_LICENCES.md`](CONTAINER_IMAGE_LICENCES.md).
+
+## Can our MSP, consultancy, or systems integrator run it for us?
+
+Yes, if your order says so. A third party operating the software **solely on your
+behalf and for your internal use** is an ordinary arrangement and we will write it
+into the Order. What is not permitted under any order is standing up one QueryGate
+estate and reselling access to it across a client base — that is offering
+QueryGate as a service, which is a different product and a different conversation.
+
+## Can we run it for our subsidiaries and affiliates?
+
+That is a scope question, so it is answered by your Order (EULA §13), not by a
+blanket grant. Tell us the group structure and we will price and scope it. There
+is no longer a licence clause defining "You" to include entities under common
+control — that construct belonged to the cancelled BSL grant.
+
+## Can we read or modify the source?
+
+No. The EULA prohibits reverse engineering, decompiling, and creating derivative
+works (§3(c), §3(d)), except where applicable law forbids that restriction.
+Enterprise customers can negotiate **source escrow** in the Order — the mechanism
+that answers "what if you disappear" without publishing the source. ⚠️ **Not
+available yet:** no escrow agent is engaged, and no auditor-access-under-NDA
+process exists. Both are intended; ask us where each stands rather than planning
+around them.
 
 ## Can we contribute?
 
-Yes — see [`../CONTRIBUTING.md`](../CONTRIBUTING.md). Contributions **will require** a
-lightweight click-through Contributor Licence Agreement — nothing enforces it yet
-(see `.github/cla/`) — for the ordinary reason:
-QueryGate is sold under commercial licences alongside BSL, and that is not
-possible over code the project does not hold the rights to relicense.
+There is no external contribution process. QueryGate is closed-source and the
+repository is private, so the Contributor Licence Agreement that existed for a
+public source-available repository has been retired along with the BSL plan.
+
+## What does a paid subscription include beyond the software?
+
+- **A support SLA**, scoped honestly to what we can sign: business-hours response
+  and best-effort severity-1.
+- **The security packet** — completed vendor security questionnaires, SBOM,
+  third-party licence inventory, and the composed
+  [trust evidence page](TRUST_EVIDENCE.md).
+- **Private CVE pre-notification**, ahead of public disclosure.
+- **Upgrade assistance and policy-design consulting.**
+- **Enterprise tier only:** indemnification, air-gapped/offline entitlement,
+  source escrow, unlimited connections.
+
+**Five things named on this page are forward statements, not things you can buy
+today:** no external penetration test has been performed; **QueryGate Notary** —
+third-party anchoring of the audit ledger's chain-head hashes — is a planned
+service that does not exist; **source escrow** has no engaged agent; **auditor
+access under NDA** has no defined process; and the signed, provenance-attested
+image pipeline is wired and CI-exercised but **has never run on a published
+tag**, so there is no signature to verify yet. All five are named because they
+are the plan. Ask us where each one stands before relying on it.
+
+## What licence documents govern, exactly?
+
+1. **[`legal/EULA.en.md`](legal/EULA.en.md)** — the licence of record. English
+   governs; [`legal/EULA.he.md`](legal/EULA.he.md) is the Hebrew version (EULA
+   §12).
+2. **Your Order** — the order form, quote, or signed agreement setting your
+   scope, seats, connections, term, and fees. Where the Order and the EULA
+   conflict, the **Order** controls (EULA §13).
+3. **[`../LICENSE`](../LICENSE)** — a notice, not a grant. It reserves all rights
+   and points at the EULA. It exists in the repository, the wheel, the sdist, and
+   the container image because packaging requires a licence file to be present.
+
+Third-party open-source components we redistribute keep their own licences,
+unaffected by any of the above:
+[`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) and
+[`CONTAINER_IMAGE_LICENCES.md`](CONTAINER_IMAGE_LICENCES.md).
 
 ## Where do I ask a question this page does not answer?
 
-Open a discussion or an issue in the repository. If the answer turns out to be
-interesting to more than one person, it belongs on this page and we will add it.
+Ask us directly. If the answer turns out to be interesting to more than one
+customer, it belongs on this page and we will add it.

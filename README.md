@@ -40,11 +40,15 @@ below is verifiable from this repository; none of it is buried further down.
   querygate`. See [`docs/RELEASING.md`](docs/RELEASING.md).
 - **No SLA and no commercial support.** See [`SUPPORT.md`](SUPPORT.md) for
   what that means in practice.
-- **Self-hosted only.** There is no hosted QueryGate, and running one on
-  someone else's behalf is the one thing the intended licence will not permit.
-- **The licence is a draft that is not in force.** Until the banner at the top
-  of [`LICENSE`](LICENSE) is removed, QueryGate is proprietary and all rights
-  are reserved. See [Licence](#licence).
+- **Self-hosted only.** There is no hosted QueryGate, we never execute your
+  queries, and offering QueryGate itself to third parties as a service is not
+  something any order permits.
+- **Proprietary, sold as a paid subscription — and the subscription machinery
+  is not built yet.** The licence of record is
+  [`docs/legal/EULA.en.md`](docs/legal/EULA.en.md) and it still carries unfilled
+  placeholders pending counsel; the entitlement gate, control plane, and
+  activation flow are specified but unimplemented (`TODO.md` items 211-213).
+  See [Licence](#licence).
 - **Three dialects are live-verified; two are not.** Postgres, MSSQL and MySQL
   run against real servers in CI. Snowflake and BigQuery are
   compiler/rendering-level only — QueryGate deliberately **refuses to open a
@@ -53,7 +57,7 @@ below is verifiable from this repository; none of it is buried further down.
 What *is* real: the structural guarantee below; live Postgres/MSSQL/MySQL tiers
 in CI; a maintained threat model; and a reconciliation between what the docs
 claim and what the code does that is itself gated in CI. The adversarial
-security suite is 651 tests (`make test-security`); the unit and integration
+security suite is 656 tests (`make test-security`); the unit and integration
 suites are 3,326 and 428. Every number there is reproducible — `poetry run
 pytest -m unit -q`, `-m "integration and not real_db"`, `make test-security` —
 and the adversarial count is itself CI-gated against the documents that quote
@@ -297,19 +301,21 @@ Historical extraction notes are kept outside the product surface under
 
 ## Licence
 
-QueryGate **will be** licensed under the **Business Source License 1.1**,
-converting to Apache-2.0 four years after each release. `LICENSE` currently holds
-that text as a **draft that is not yet in force** — until its banner is removed,
-QueryGate remains proprietary and all rights are reserved.
+QueryGate is **proprietary, closed-source, commercial software**, sold as a
+**paid monthly subscription** and run in your own environment. It is not open
+source and not source-available, and no version converts to an open licence on
+any date.
 
-The headline of the intended grant: **internal production use is free, forever,
-for every version released under it, with no limit** — no user cap, no database
-cap, no seat count. The only restriction is providing QueryGate itself to third
-parties on a hosted, managed, or embedded basis, with a carve-out for an MSP
-running it on a single licensee's behalf.
+Your rights come from the End User Licence Agreement plus your order, never from
+possession of the code. [`LICENSE`](LICENSE) is a notice that reserves all rights
+and points at the EULA — it is not itself a grant.
 
-- [`LICENSE`](LICENSE) — the draft terms
-- [`docs/LICENSING_FAQ.md`](docs/LICENSING_FAQ.md) — what it means in practice
+- [`docs/legal/EULA.en.md`](docs/legal/EULA.en.md) — the licence of record
+  (Hebrew: [`EULA.he.md`](docs/legal/EULA.he.md); English governs)
+- [`docs/LICENSING_FAQ.md`](docs/LICENSING_FAQ.md) — what it means in practice,
+  including what happens when a subscription lapses and exactly what the
+  software transmits to us
 - [`docs/THIRD_PARTY_LICENSES.md`](docs/THIRD_PARTY_LICENSES.md) — every dependency's licence
 
-None of this is legal advice, and the terms are not settled until reviewed.
+None of this is legal advice, and the EULA is not settled until reviewed by
+counsel.

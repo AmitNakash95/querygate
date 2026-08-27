@@ -13,6 +13,8 @@ nobody can prove works.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from scripts import check_eula
@@ -107,16 +109,18 @@ def test_the_problem_message_names_the_file_and_the_count():
 # coverage.
 
 
-def test_live_license_still_carries_the_draft_banner():
-    """Documents the real state. Flips to the negative when the notice lands."""
+def test_live_license_cannot_be_released_as_it_stands():
+    """Documents the real state: the proprietary notice has landed (item 210),
+    but the Licensor entity does not exist, so two placeholders remain. Flips to
+    `== []` when counsel supplies them."""
     text = (check_eula.ROOT / check_eula.LICENCE_FILE).read_text("utf-8")
     assert check_eula.check_licence_file(text), (
-        "LICENSE no longer looks like a draft — update this test and "
+        "LICENSE is now fully settled — update this test and "
         "test_live_release_mode_currently_refuses together"
     )
 
 
-def test_release_mode_refuses_the_draft_license_via_the_top_level_check():
+def test_release_mode_refuses_the_unsettled_license_via_the_top_level_check():
     """`check(release=True)` must reach LICENSE, not only the EULA files."""
     problems = check_eula.check(release=True)
     assert any(check_eula.LICENCE_FILE in p for p in problems), problems
@@ -283,10 +287,48 @@ def test_live_release_mode_refuses_specifically_because_of_the_eula():
     ), f"no EULA-attributed problem; the gate is only firing on LICENSE: {problems}"
 
 
-def test_live_license_specifically_carries_the_draft_banner():
-    text = (check_eula.ROOT / check_eula.LICENCE_FILE).read_text("utf-8")
-    problems = check_eula.check_licence_file(text)
-    assert any("draft banner" in p for p in problems), problems
+# Item 210 replaced `LICENSE`'s BSL draft with the proprietary notice, so the
+# draft banner this used to assert is gone by design. Its PURPOSE — a positive
+# assertion about the live file, not a synthetic one — is what the three below
+# keep: the banner test would now pass trivially against an empty file, and the
+# release-mode test above deliberately ignores LICENSE-attributed problems.
+
+
+def _live_licence() -> str:
+    return (check_eula.ROOT / check_eula.LICENCE_FILE).read_text("utf-8")
+
+
+def test_live_license_carries_no_bsl_apparatus():
+    """The flip is cancelled (`docs/business/GTM_SAAS.md`). A BSL parameter left
+    in `LICENSE` grants production use of a paid product — the inverse of the
+    EULA it now points at, in the one file that ships in the wheel and image."""
+    text = _live_licence()
+    for token in (
+        "Business Source License",
+        "Change Date",
+        "Change License",
+        "Additional Use Grant",
+        "DRAFT — FOR LAWYER REVIEW",
+    ):
+        assert token not in text, f"{token!r} survives in LICENSE"
+
+
+def test_live_license_reserves_rights_and_names_the_eula_as_the_licence_of_record():
+    """`LICENSE` is a notice; `docs/legal/EULA.en.md` is the grant. A LICENSE
+    that does not say so reads as the whole of the terms."""
+    text = _live_licence()
+    assert "All rights reserved" in text
+    assert "docs/legal/EULA.en.md" in text
+    assert "proprietary" in text.lower()
+
+
+def test_live_license_still_fails_release_mode_on_its_placeholders():
+    """The Licensor entity does not exist yet, so `LICENSE` must not be able to
+    ship. Attributed to placeholders specifically: a test asserting only that
+    *some* problem exists would stay green once they are filled."""
+    problems = check_eula.check_licence_file(_live_licence())
+    assert any("placeholder" in p for p in problems), problems
+    assert check_eula.check_licence_file(_live_licence(), release=False) == []
 
 
 # --- the _ALLOWED exclusions --------------------------------------------------
@@ -367,3 +409,110 @@ def test_html_tags_and_emails_are_not_placeholders():
         assert not check_eula._is_angle_placeholder(body), body
     for body in ("LICENSOR LEGAL NAME", "licensor legal entity", "LICENSOR_NAME", "XX"):
         assert check_eula._is_angle_placeholder(body), body
+
+
+# --- the two languages must stay parallel -------------------------------------
+#
+# Item 210 added the commercial clauses the subscription needs (fees/renewal,
+# no-refund, non-payment, suspension-vs-termination, cure period,
+# anti-circumvention, technical-enforcement notice, licence-data disclosure,
+# service availability, post-termination audit retrieval) to BOTH languages.
+#
+# Nothing kept them parallel. That asymmetry is the expensive kind: `EULA.he.md`
+# is what an Israeli customer reads and signs, so a clause present only in
+# English is unenforceable against exactly the customers §12 was drafted for —
+# and the placeholder gate above would stay green throughout, because a missing
+# section has no placeholders in it.
+
+_SECTION_RE = re.compile(r"^## (\d+)\. ", re.M)
+
+
+def _sections(name: str) -> list[str]:
+    return _SECTION_RE.findall((check_eula.ROOT / name).read_text("utf-8"))
+
+
+def test_both_languages_carry_the_same_numbered_sections():
+    en, he = (_sections(n) for n in ("docs/legal/EULA.en.md", "docs/legal/EULA.he.md"))
+    assert en == he, f"section numbering diverged: en={en} he={he}"
+    assert en == [str(n) for n in range(1, 20)], en
+
+
+#: Sub-clause markers that must exist as a **heading**, not merely as a
+#: cross-reference. The distinction is the whole point: `7.4`, `7.5`, `14.4` and
+#: `(h)` each appear twice in each language — once as the clause, once inside a
+#: sentence pointing at it — so a bare `marker in text` substring check stayed
+#: green with the clause itself deleted. Anti-circumvention (§3(h)) is the one
+#: the entire technical-enforcement argument rests on.
+_REQUIRED_CLAUSES = (
+    "7.4",  # suspension is not termination
+    "16.1",  # what IS transmitted — the disclosure the Reach pillar now rests on
+    "7.5",  # survival, with the audit carve-out excepted
+    "14.3",  # no refunds
+    "14.4",  # non-payment
+    "15.5",  # anti-circumvention
+    "16.2",  # what is never transmitted
+    "16.4",  # retention
+    "17.3",  # licence-service remedy
+)
+
+#: The restriction letter, per language. Both documents enumerate §3 with
+#: line-initial `(x)`, so the marker is anchored to the line start.
+_RESTRICTION_MARKER = {"docs/legal/EULA.en.md": "(h)", "docs/legal/EULA.he.md": "(ח)"}
+
+
+def test_both_languages_carry_every_clause_the_subscription_depends_on():
+    """Markers anchored to their **heading**, not found anywhere in the document.
+
+    Both languages write a sub-clause as `**7.4 Title.**` / `**7.4 כותרת.**`, so
+    the heading form is what is asserted. A cross-reference elsewhere — "governed
+    by Section 14.4", "Sections 7.4 and 15" — must not be able to satisfy it.
+    """
+    for name in check_eula.EULA_FILES:
+        text = (check_eula.ROOT / name).read_text("utf-8")
+        for marker in _REQUIRED_CLAUSES:
+            pattern = re.compile(rf"^\*\*{re.escape(marker)}[ .]", re.M)
+            assert pattern.search(text), f"{name} has no **{marker}** clause heading"
+        letter = _RESTRICTION_MARKER[name]
+        assert re.search(rf"^{re.escape(letter)} ", text, re.M), (
+            f"{name} has no line-initial restriction {letter} — the "
+            "anti-circumvention prohibition the enforcement argument rests on"
+        )
+
+
+def test_every_eula_section_the_licence_notice_cites_exists_with_that_title():
+    """`LICENSE` points a customer at EULA sections by number.
+
+    It shipped citing "Section 16 (Technical enforcement and anti-circumvention)"
+    when §16 is the transmission disclosure and §15 is the enforcement clause —
+    a wrong operative-clause pointer in the one file that goes into the wheel,
+    the sdist and the container image. Nothing resolved outbound references, so
+    the whole suite stayed green.
+    """
+    licence = (check_eula.ROOT / check_eula.LICENCE_FILE).read_text("utf-8")
+    eula = (check_eula.ROOT / "docs/legal/EULA.en.md").read_text("utf-8")
+    headings = {
+        int(n): " ".join(title.split()).lower()
+        for n, title in re.findall(r"^## (\d+)\. (.+)$", eula, re.M)
+    }
+    # Whitespace collapsed on both sides: `LICENSE` is hand-wrapped at 78
+    # columns, so a title that reflowed across a line break would otherwise fail
+    # a test about meaning with a change that had none.
+    cited = [
+        (int(n), " ".join(t.split()).lower())
+        for n, t in re.findall(r"Section (\d+)\s*\(([^)]+)\)", licence)
+    ]
+    assert cited, "LICENSE no longer cites any EULA section — did the pointer get dropped?"
+    for number, title in cited:
+        actual = headings.get(number)
+        assert actual is not None, f"LICENSE cites EULA Section {number}, which does not exist"
+        assert (
+            actual == title
+        ), f"LICENSE cites Section {number} as {title!r} but the EULA titles it {actual!r}"
+
+    # The untitled plural form — "EULA Sections 8 and 9" — is invisible to the
+    # pattern above, and it points at the warranty disclaimer and the liability
+    # cap, the two clauses a disputing customer reaches first.
+    bare = re.findall(r"Sections? ((?:\d+)(?:(?:,| and) \d+)*)\b(?!\s*\()", licence)
+    referenced = {int(n) for group in bare for n in re.findall(r"\d+", group)}
+    missing = sorted(n for n in referenced if n not in headings)
+    assert not missing, f"LICENSE cites EULA section(s) that do not exist: {missing}"

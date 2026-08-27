@@ -1,8 +1,13 @@
 """Dependency-licence gate — `scripts/check_licenses.py` / `docs/THIRD_PARTY_LICENSES.md`.
 
-QueryGate is being prepared for a source-available (BSL 1.1) licence flip, and a
-copyleft licence in the *redistributed* dependency set would block that. A
-one-off spot-check rots the moment `poetry.lock` changes, so the pass runs here,
+QueryGate ships **proprietary and closed-source** (item 210,
+`docs/business/GTM_SAAS.md`), and a copyleft licence in the *redistributed*
+dependency set is a blocking legal problem — a reciprocal licence whose
+conditions attach to the distributed larger work is exactly what a closed-source
+product cannot satisfy. The premise changed with the licence decision (it was
+originally written for a source-available flip) and the gate got *more* load
+bearing, not less. A one-off spot-check rots the moment `poetry.lock` changes,
+so the pass runs here,
 in the default unit suite, exactly the way `test_worklist_consistency.py` keeps
 the worklist rules enforceable.
 
@@ -236,7 +241,7 @@ def test_live_report_discloses_its_scope_limits():
 
 
 def test_no_strongly_copyleft_licence_appears_in_the_lock_at_all():
-    """The claim the BSL flip actually rests on, asserted against the real lock.
+    """The claim the closed-source distribution rests on, asserted against the real lock.
 
     Not filtered to the redistributed set: a GPL/AGPL dependency in *either*
     group is the finding this pass exists to catch.
@@ -512,7 +517,7 @@ def test_unreviewed_weak_copyleft_dependency_fails():
     problems = _policy(packages)
     assert len(problems) == 1
     assert "no reviewed entry" in problems[0]
-    # The label is what tells a reviewer whether the finding blocks the flip.
+    # The label is what tells a reviewer whether the finding blocks distribution.
     assert "REDISTRIBUTED" in problems[0]
 
 

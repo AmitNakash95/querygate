@@ -5,23 +5,30 @@ actually expire when the product runs on the **customer's** infrastructure —
 where you don't control the machine, the clock, or the network. Companion to
 [docs/DISTRIBUTION_STRATEGY.md](DISTRIBUTION_STRATEGY.md).*
 
-> **Decided (2026-08-21, `docs/business/GTM_EXECUTION_PLAN.md` §3 Layer 2):**
-> the fail mode below is **soft enforcement, always — no fail-closed mode
-> exists, on any trigger, ever.** Shape A (the BSL Additional Use Grant) is
-> unlimited internal production use with no database ceiling, so there is no
-> production threshold left for a licence to self-check; the token becomes an
-> **entitlement token for the paid tier** (support, indemnification, Notary
-> access), not a compliance gate. QueryGate sits in the request path of a
-> production system — a licence check able to interrupt data access is itself
-> an availability risk a security review can find and fail, which is the
-> opposite of the product's own north-star metric. This supersedes the
-> grace-period-then-fail-closed recommendation this document originally made;
-> the general enforcement-model survey below is kept for reference, but read
-> the [Fail-open vs. fail-closed](#fail-open-vs-fail-closed-an-important-product-call)
-> and [What fits QueryGate specifically](#what-fits-querygate-specifically)
-> sections for the posture actually adopted. Logged as TODO.md item 197 —
-> not-before-customers, build it alongside item 198 (QueryGate Notary) when a
-> paying customer needs it, not before.
+> ## ⚠️ The 2026-08-21 decision recorded here was REVERSED on 2026-08-23.
+>
+> **A previous banner said: "soft enforcement, always — no fail-closed mode
+> exists, on any trigger, ever." That is now the opposite of the product.**
+> It rested on the BSL Additional Use Grant giving unlimited free internal
+> production use, which left no threshold for a licence to self-check. That
+> grant was cancelled. QueryGate is a paid subscription
+> ([`business/GTM_SAAS.md`](business/GTM_SAAS.md)), and after the paid term
+> **plus** a grace window has fully elapsed, every governed query and write is
+> refused with HTTP 402.
+>
+> **This document's original grace-period-then-fail-closed recommendation is
+> therefore reinstated**, and its availability objection was answered rather
+> than ignored — the design in
+> [`CONTROL_PLANE_PLAN.md`](CONTROL_PLANE_PLAN.md) makes a *failed refresh*
+> never fail-closed (only a server-confirmed non-renewal is, after ~45 days of
+> visible warnings), fails open on a cold start with no network, and keeps
+> health, metrics, licence status and audit retrieval working through a lapse
+> (administrative and configuration functions that read live schema, test a
+> connection, or change enforcement scope are suspended with the rest). Read
+> that document for the posture actually adopted; read the survey below for the
+> option space it was chosen from. Item 197 (the soft-warn entitlement token) is
+> **superseded in premise** by items 210-213: the token now blocks rather than
+> warns, and it is gating pre-launch work, not a not-before-customers nicety.
 
 ---
 
