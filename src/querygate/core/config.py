@@ -131,6 +131,14 @@ class AppConfig(BaseSettings):
     environment: Literal["production", "staging", "development", "localhost"] = pyd.Field(
         default="localhost"
     )
+    #: Set to 1 by the Dockerfile (`HARDENED_IMAGE=1`). See
+    #: `AppConfig.is_hardened_image`. Never set it by hand to "fix" a local dev
+    #: problem — it exists to make the shipped image safe irrespective of every
+    #: other setting.
+    hardened_image: bool = pyd.Field(default=False)
+    #: Writable volume for first-boot state: the generated admin key, the
+    #: entitlement cache, the clock mark. `/app/var` in the image.
+    var_dir: str = pyd.Field(default="var")
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = pyd.Field(default="INFO")
     # nosec B104: binds all interfaces *inside* the container by design;
     # network exposure is controlled at the deployment boundary.
@@ -850,6 +858,20 @@ class AppConfig(BaseSettings):
     @property
     def is_local(self) -> bool:
         return self.environment in ("localhost", "development")
+
+    @property
+    def is_hardened_image(self) -> bool:
+        """True in the shipped container image (TODO.md item 215).
+
+        The image sets `QUERYGATE_HARDENED_IMAGE=1` in its Dockerfile. It is a
+        *separate* switch from `environment` on purpose: an operator debugging a
+        containerised deployment may legitimately set
+        `ENVIRONMENT=development` to get readable logs, and that must not also
+        hand them a public OpenAPI schema, FastAPI's debug traceback page, or —
+        the severe one — an anonymous-auth bypass. The image's own posture is a
+        property of the image, not of the log level someone chose.
+        """
+        return self.hardened_image
 
     class Config:
         case_sensitive = False
