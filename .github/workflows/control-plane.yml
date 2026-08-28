@@ -1,0 +1,42 @@
+# The control plane's OWN CI. A separate workflow, not extra steps in `ci.yml`.
+#
+# Two repo facts make that mandatory rather than stylistic (TODO.md item 212):
+#   * `tests/unit/test_security_posture_commands.py` asserts EXACTLY ONE semgrep
+#     invocation in `ci.yml`. Adding a mirror step there fails it with a drift
+#     message that reads as unrelated to whatever you were doing.
+#   * The root Makefile's `bandit -r src/` scope means a widened scope would put
+#     control-plane findings in the PRODUCT's SAST job — failing a customer's
+#     gate on a CVE in software they never receive.
+name: control-plane
+
+on:
+  push:
+    paths: ["control-plane/**", ".github/workflows/control-plane.yml"]
+  pull_request:
+    paths: ["control-plane/**", ".github/workflows/control-plane.yml"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: control-plane
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Poetry
+        run: pipx install poetry
+      - name: Install (control-plane venv only)
+        run: poetry install --no-root
+      - name: Lock is current
+        run: poetry check --lock
+      - name: Format check
+        run: poetry run black --check src/ tests/
+      - name: SAST (this directory only)
+        run: poetry run bandit -r src/ -q
+      - name: Tests
+        # `../src` so the cross-repo contract test can import the product's
+        # verifier — the only place the two codebases meet.
+        run: PYTHONPATH=src:../src poetry run pytest tests/ -q
