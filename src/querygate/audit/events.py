@@ -36,7 +36,18 @@ from querygate.query_ast.models import (
 )
 from querygate.validation.schema_validation import select_item_column_refs
 
-AuditDecision = Literal["allowed", "denied", "unknown"]
+#: `subscription_expired` was added with TODO.md item 211 and is deliberately a
+#: peer of `denied`, not a flavour of it. Recording a lapsed subscription as
+#: `denied` would tell the customer — permanently, in a tamper-evident ledger —
+#: that their own policy refused a query it actually permits; recording it as
+#: `unknown` turns every refused query during a lapse into a support ticket.
+#:
+#: Additive at `schema_version: "1"` on purpose: the field already carries an
+#: `unknown` escape hatch, so a consumer that has not seen this value degrades
+#: exactly as it would for an unrecognised one, and no existing line changes
+#: meaning. A version bump would invalidate every archived chain for a widening
+#: that removes nothing.
+AuditDecision = Literal["allowed", "denied", "unknown", "subscription_expired"]
 AuditSurface = Literal["rest", "mcp", "internal"]
 ConfigChangeAction = Literal[
     "validate",

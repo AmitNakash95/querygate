@@ -64,6 +64,10 @@ scope-catalog: ## Regenerate docs/SCOPE_CATALOG.md from core/scopes.py (drift-te
 worklist-check: ## Verify TODO.md / ROADMAP.md / TODO_ARCHIVE.md reconcile (drift-tested by test_worklist_consistency.py)
 	python3 scripts/check_worklist.py
 
+.PHONY: suite-count-sync
+suite-count-sync: ## Rewrite every published adversarial-suite count to what `pytest -m security` collects (gate: test_security_suite_count_claims.py)
+	poetry run python scripts/sync_suite_count.py
+
 .PHONY: worklist-sync
 worklist-sync: ## Regenerate the derived Quick-scan ✅ column + bare ROADMAP checkboxes from the TODO.md headings
 	python3 scripts/check_worklist.py --fix

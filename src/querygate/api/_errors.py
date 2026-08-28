@@ -52,6 +52,7 @@ from querygate.core.exceptions import (
     QueryValidationError,
     QuotaExceededError,
     ServiceDisabledError,
+    SubscriptionExpiredError,
     public_error_message,
 )
 from querygate.core.logging import get_logger
@@ -98,6 +99,9 @@ def admission_headers(
 _ACTIONABLE = (
     NotFoundError,
     PolicyViolationError,
+    # A billing state, not a fault: without this the mask turns the 402 into a
+    # generic 500 and the caller learns nothing actionable.
+    SubscriptionExpiredError,
     ConcurrencyLimitError,
     QueryValidationError,
     ConfigValidationError,
@@ -258,6 +262,15 @@ def install_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AuthorizationError)
     async def _authorization(_request: Request, exc: AuthorizationError) -> JSONResponse:
         return _response(exc, status.HTTP_403_FORBIDDEN)
+
+    @app.exception_handler(SubscriptionExpiredError)
+    async def _subscription_expired(
+        _request: Request, exc: SubscriptionExpiredError
+    ) -> JSONResponse:
+        # 402 Payment Required, deliberately: not 403 (the caller's credentials
+        # are fine), not 422 (the request is well-formed), not 503 (nothing is
+        # broken). The body carries the renewal URL via `public_error_message`.
+        return _response(exc, status.HTTP_402_PAYMENT_REQUIRED)
 
     # An optional subsystem isn't configured on this deployment (e.g. the
     # item 47 phase 2 draft store with no encryption key) — a deployment/

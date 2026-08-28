@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+
+import httpx
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -156,6 +158,21 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
             await credential_lease_monitor.start()
         app.state.credential_lease_monitor = credential_lease_monitor
 
+        # The subscription refresher (item 211). Started last of the monitors so
+        # a start-up failure here is unambiguous, and holding its own httpx
+        # client so the one outbound call this product makes has a single owner.
+        subscription_manager = None
+        subscription_http_client = None
+        if conf.subscription_enabled:
+            from querygate.subscription.bootstrap import build_manager
+
+            if conf.subscription_mode == "http":
+                subscription_http_client = httpx.AsyncClient()
+            subscription_manager = build_manager(conf, client=subscription_http_client)
+            await subscription_manager.start()
+        app.state.subscription_manager = subscription_manager
+        app.state.subscription_http_client = subscription_http_client
+
         redis_client = None
         if conf.concurrency_backend == ConcurrencyBackend.REDIS:
             import redis.asyncio as redis_asyncio
@@ -266,6 +283,10 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
                 await catalog_usage_learning_monitor.stop()
             if credential_lease_monitor is not None:
                 await credential_lease_monitor.stop()
+            if subscription_manager is not None:
+                await subscription_manager.stop()
+            if subscription_http_client is not None:
+                await subscription_http_client.aclose()
             await health_monitor.stop()
             reset_audit_sink()
             if worm_flush_monitor is not None:
