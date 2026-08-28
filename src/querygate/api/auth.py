@@ -64,7 +64,24 @@ def build_authenticator(cfg: AppConfig) -> Authenticator:
     # turns SSO on, even in a local/dev environment, a real credential must
     # actually be required — otherwise configuring auth in dev would silently
     # do nothing, which is exactly the bug this ordering used to have.
-    if cfg.is_local and not cfg.api_keys and jwt_auth is None and not cfg.sso_enabled:
+    # `is_hardened_image` is checked FIRST and separately from `is_local`
+    # (TODO.md item 215). Without it, `docker run <registry>/querygate:latest` —
+    # the exact one-command install this product promises — yields a deployment
+    # where every request resolves to an anonymous principal, because the
+    # Dockerfile set no ENVIRONMENT, the default is `localhost`, and
+    # `_validate_production_auth` only fires on `production`. The first
+    # connection added is then queryable by anyone who can reach the port.
+    #
+    # Kept as its own condition rather than folded into `is_local` so that an
+    # operator who sets ENVIRONMENT=development on a container to get readable
+    # logs does not thereby re-open the bypass.
+    if (
+        not cfg.is_hardened_image
+        and cfg.is_local
+        and not cfg.api_keys
+        and jwt_auth is None
+        and not cfg.sso_enabled
+    ):
         authenticators.append(AnonymousAuthenticator())
     if len(authenticators) == 1:
         return authenticators[0]
