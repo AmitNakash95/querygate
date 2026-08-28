@@ -149,8 +149,10 @@ human-SSO/identity stream; these start at 210.
   Its observe-mode shell can be built against a fixture entitlement, so it may
   start in parallel once 212's payload format is frozen.*
 - [ ] **213** — Activation: bind a deployment to a subscription via OAuth2 +
-  MFA. **Blocked on item 199 (`identity/`), which is not merged** — it is
-  uncommitted work on the identity stream, absent from this branch and from HEAD.
+  MFA. **Unblocked — the note that this was blocked is stale.** Item 199 phase 1
+  merged in `620d90d` and is on this branch: `src/querygate/identity/` carries 17
+  modules including `oidc.py`, `sessions.py`, `device.py` and `totp.py`, with six
+  test files. Verified 2026-08-28.
   *Reuses 199's mechanism, not its store: `identity/` is deployment-side and
   governs who may use the gateway; activation is vendor-side and governs whether
   it may run at all.*
