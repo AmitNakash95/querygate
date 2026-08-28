@@ -79,6 +79,8 @@ from querygate.connections.models import ConnectionProfile
 from querygate.connections.registry import ConnectionRegistry, set_registry
 from querygate.execution.async_execution import async_execution_store
 from querygate.execution.concurrency import clear_redis_limiter, in_process_limiter
+from querygate.metrics import reset_subscription_metrics
+from querygate.subscription.state import reset_state as reset_subscription_state
 from querygate.identity.config_store import IdentityConfigStore, set_identity_store
 from querygate.identity.device import clear_in_process_device_state
 from querygate.identity.discovery import clear_discovery_cache
@@ -143,7 +145,16 @@ def reset_state(tmp_path):
     clear_in_process_device_state()
     clear_login_attempt_state()
     clear_discovery_cache()
+    # Subscription state (item 211): the published verdict, the serial floor,
+    # the wall-clock high-water mark and its bound file path. Plus the
+    # observe-mode counter, which lives in the process-global Prometheus
+    # REGISTRY that nothing else here resets — without this, any absolute
+    # assertion on it is order-dependent.
+    reset_subscription_state()
+    reset_subscription_metrics()
     yield
+    reset_subscription_state()
+    reset_subscription_metrics()
     reset_audit_sink()
     reset_engines()
     in_process_limiter().clear()

@@ -30,6 +30,7 @@ from querygate.core.exceptions import (
     PolicyViolationError,
     QueueFullError,
     QuotaExceededError,
+    SubscriptionExpiredError,
 )
 
 REGISTRY = CollectorRegistry()
@@ -107,6 +108,13 @@ QUEUE_WAIT_SECONDS = Histogram(
     "running, hitting a capacity timeout, or being rejected for an "
     "already-full queue, by connection and outcome (TODO.md item 35).",
     ["connection", "outcome"],  # outcome: completed | capacity_timeout | queue_full
+    registry=REGISTRY,
+)
+
+SUBSCRIPTION_WOULD_BLOCK_TOTAL = Counter(
+    "querygate_subscription_would_block",
+    "Requests an enforcing subscription gate would have refused, by funnel " "(observe mode only).",
+    ["funnel"],
     registry=REGISTRY,
 )
 
@@ -387,7 +395,34 @@ PERSONAL_DENIALS_RATE_LIMITED_TOTAL = Counter(
 )
 
 
+def reset_subscription_metrics() -> None:
+    """Clear the observe-mode counter between tests.
+
+    The collector lives in the process-global `REGISTRY`, which `tests/conftest.py`
+    resets nothing else in — so without this, any absolute assertion on the
+    counter is order-dependent and passes or fails on which tests ran first.
+    """
+    SUBSCRIPTION_WOULD_BLOCK_TOTAL.clear()
+
+
+def record_subscription_would_block(funnel: str) -> None:
+    """Observe mode suppressed a refusal that enforce would have made.
+
+    The metric an operator watches for the whole cutover: it is the difference
+    between "enforcement is safe to turn on" and "turning it on will page me".
+    Labelled by funnel because reads, writes and schema discovery are three
+    separate enforcement points and knowing which one would have refused is the
+    actionable half.
+    """
+    SUBSCRIPTION_WOULD_BLOCK_TOTAL.labels(funnel=funnel).inc()
+
+
 def classify_rejection(exc: BaseException) -> str:
+    # First: a billing state is not a policy denial. Without this branch the
+    # metric blames `policy` and the tamper-evident ledger records the
+    # customer's own policy refusing a query it actually permits.
+    if isinstance(exc, SubscriptionExpiredError):
+        return "subscription_expired"
     if isinstance(exc, QueueFullError):
         return "queue_full"
     if isinstance(exc, ConcurrencyLimitError):

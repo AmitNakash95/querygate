@@ -235,7 +235,7 @@ order-of-magnitude, not commitments.
 | 202 | The `digests_equal` non-ASCII hazard is unfixed at six `hmac.compare_digest` sites outside `audit/ledger.py` (TOTP code, OIDC state/nonce, CSRF token, PKCE challenge), turning a clean 401/403/422 into a masked 500 | S | 194, 199 |
 | 203 | An unparseable predecessor exempts one chain link on a resumed page (accept-as-given), while the blank-run walk fails closed for the same threat shape | S | 172, 194 |
 | 210 | ✅ Proprietary licence transition: retire the BSL apparatus (LICENSE body, EULA becomes the licence of record with subscription clauses, Change-Date targets + script + test + both CI call sites, and ~30 documents asserting a source-available future) | M | — |
-| 211 | Subscription layer — the entitlement gate: two enforcement funnels (reads via `_validate_and_compile`, writes at the three write *service* entry points), 402 registered in seven registries, observe/enforce as a signed field, wall-clock high-water mark and serial floor | L | 210, 212 |
+| 211 | ✅ Subscription layer — the entitlement gate: two enforcement funnels (reads via `_validate_and_compile`, writes at the three write *service* entry points), 402 registered in seven registries, observe/enforce as a signed field, wall-clock high-water mark and serial floor | L | 210, 212 |
 | 212 | Control plane — accounts, Stripe subscriptions, KMS-signed entitlement issuance, enrolment, append-only issuance ledger, in `control-plane/` with its own lockfile and mirror CI gates | XL | — |
 | 213 | Activation — bind a deployment to a subscription via OAuth2 (Google/Microsoft) + MFA, browser and device flows, control-plane-assigned `deployment_id`, unactivated deployments inert | L | 199, 212 |
 | 214 | Single obfuscated compiled binary — Nuitka feasibility spike first (pydantic-core, SQLAlchemy dispatch, MCP annotation resolution), then reproducible build preserving cosign + SLSA provenance | XL | — |
@@ -3807,7 +3807,7 @@ rewritten, part recorded as whole-document exemptions — see the write-up).
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 210).
 
-### 211. Subscription layer — the entitlement gate
+### 211. Subscription layer — the entitlement gate ✅ DONE (phase 1)
 
 **Effort: L.** Depends on 210 for the licence text, on 212 for real entitlements.
 
