@@ -34,11 +34,31 @@ RUN poetry install --no-root --only main \
     && rm -rf $POETRY_CACHE_DIR dist
 
 FROM python:3.11-slim-bookworm AS production
+# TODO.md item 215, and the single highest-severity fix in that phase.
+#
+# Without HARDENED_IMAGE, `docker run <registry>/querygate:latest` — the exact
+# one-command install this product promises — produced a deployment where EVERY
+# request resolved to an anonymous principal: the image set no ENVIRONMENT, the
+# default is `localhost`, `api/auth.py` appends AnonymousAuthenticator when
+# nothing real is configured, and `_validate_production_auth` only fires on
+# `production`. The first connection an operator added was then queryable by
+# anyone who could reach the port, with FastAPI debug on and the OpenAPI schema
+# public.
+#
+# The flag is deliberately SEPARATE from ENVIRONMENT, so an operator who sets
+# ENVIRONMENT=development on a container to get readable logs does not thereby
+# re-open the bypass. `tests/security/test_shipped_image_posture.py` pins it,
+# including that this line is present in this file.
+#
+# NOTE: comments cannot live inside a line-continued ENV instruction, which is
+# why they are all up here.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app/src \
     VIRTUAL_ENV=/app/.venv \
-    PATH="/app/.venv/bin:$PATH"
+    PATH="/app/.venv/bin:$PATH" \
+    HARDENED_IMAGE=1 \
+    VAR_DIR=/app/var
 
 # unixodbc + the Microsoft ODBC driver are only needed for MSSQL connections;
 # skip this layer if you only connect to Postgres.

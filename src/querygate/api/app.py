@@ -53,6 +53,30 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         log = get_logger()
         log.info("querygate.startup", environment=conf.environment)
+
+        # First boot, before ANY store is constructed (item 215). Seeds
+        # connections/policy/catalog only when absent and generates an admin key
+        # exactly once. Every write is create-if-absent, so a restart, a rebuild,
+        # a replica and a crash-loop all reach the same state without
+        # regenerating — silently rotating a key on a rebuilt image would turn a
+        # routine upgrade into an unplanned re-activation.
+        if conf.is_hardened_image:
+            from querygate.bootstrap import first_boot
+
+            result = first_boot(Path(conf.var_dir))
+            if result.is_first_boot:
+                log.info("querygate.first_boot", seeded=list(result.seeded))
+                if result.generated_admin_key:
+                    # Printed once, to the operator's terminal. There is no
+                    # writable secret backend on a fresh install — `env:` is the
+                    # only registered resolver and is not writable from a
+                    # request — so this is the honest delivery mechanism, and
+                    # the log line says so rather than implying a vault.
+                    log.warning(
+                        "querygate.first_boot.admin_key_generated",
+                        path=str(Path(conf.var_dir) / "admin-api-key"),
+                    )
+
         mcp_task: Optional[asyncio.Task] = None
 
         # Started before configure_audit_sink() so the WORM sink's buffer
@@ -332,10 +356,19 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
         title="QueryGate",
         summary="Agent-safe database access gateway",
         version=conf.app_version,
-        debug=conf.is_local,
+        debug=conf.is_local and not conf.is_hardened_image,
         lifespan=lifespan,
-        openapi_url=f"{conf.api_v1_prefix}/openapi.json" if conf.is_local else None,
-        docs_url=f"{conf.api_v1_prefix}/docs" if conf.is_local else None,
+        # Off in the shipped image regardless of environment (item 215): a
+        # public schema plus FastAPI's debug traceback page is a reconnaissance
+        # surface an operator did not ask for by choosing a log level.
+        openapi_url=(
+            f"{conf.api_v1_prefix}/openapi.json"
+            if conf.is_local and not conf.is_hardened_image
+            else None
+        ),
+        docs_url=(
+            f"{conf.api_v1_prefix}/docs" if conf.is_local and not conf.is_hardened_image else None
+        ),
         redoc_url=f"{conf.api_v1_prefix}/redoc" if conf.is_local else None,
     )
 
