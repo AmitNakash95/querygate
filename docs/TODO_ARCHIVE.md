@@ -14935,3 +14935,73 @@ refuses a tag while any remain, in either language. `docs/CONTAINER_IMAGE_LICENC
 to Microsoft) is still not met and needs an owner decision, and the in-image
 `THIRD_PARTY_NOTICES` file it asks for is not written.
 
+### 220. Deny-by-default at table and column granularity: a `Policy` allow-list with no allow-all fallback ✅ DONE
+
+**Effort: M. Blocks item 215.** Owner decision, 2026-08-23.
+
+**Why it matters:** `Policy.table_allowed` returns `True` when `allowed_tables`
+is empty, and `column_allowed` follows the same convention — **an empty
+allow-list means allow-everything**. `denied_tables` has no wildcard. So the
+only deny-all lever in the model today is `Policy.enabled = False`, which is
+all-or-nothing: the moment an operator enables a connection to run their first
+query, every table and column on it is readable up to the numeric caps. That is
+the opposite of what a new install should do, and it makes the "safe-by-default
+starter policy" item 215 promises literally inexpressible. It is also a poor
+default for a product whose entire pitch is that it governs *what a query is
+allowed to be*.
+
+**What it is:**
+- A `Policy` field with **no allow-all fallback** — working name
+  `require_explicit_table_allowlist: bool = False` — under which an empty
+  `allowed_tables` means *deny every table* rather than *allow every table*. The
+  same treatment for `allowed_columns`.
+- **Default `False`, so no existing deployment changes behaviour.** This is a
+  new opt-in guarantee, not a silent tightening of everyone's policy — a
+  behaviour flip on an existing security control is exactly the change that
+  breaks a customer at 3am.
+- The shipped starter policy (item 215) sets it `True`, so a fresh install
+  denies until the operator names tables deliberately.
+- **Both branches mutation-verified.** Per CLAUDE.md's working agreement:
+  break the empty-allow-list branch in each direction and confirm a test fails
+  *for that reason*. A swapped boolean here silently opens every table on every
+  connection that opted in, with a green suite — the same class as items 101 and
+  114.
+- Documented in `examples/policy.example.yaml` (whose comments currently
+  concede the shipped default is permissive) and in the policy section of
+  `docs/PRODUCT_GUIDE.md`.
+
+**Definition of done:** `security-invariant-check` clean; a test that an
+existing policy with an empty allow-list and the flag unset still allows (no
+behaviour change), and one that the same policy with the flag set denies; both
+mutation-verified; `examples/policy.example.yaml` and the product guide updated.
+
+**Shipped 2026-08-28.** `Policy.require_explicit_allowlist` (default `False`)
+flips an empty `allowed_tables` from allow-everything to deny-everything, and an
+absent `allowed_columns` entry from allow-every-column to deny-every-column.
+`denied_*` still wins over `allowed_*`, and the `"*"` column wildcard still works
+under the flag — an operator who wants deny-by-default at the table level but not
+the column level is the common case, and a flag that forbids it is one nobody
+turns on.
+
+**The default is the load-bearing half.** Flipping the meaning of a live security
+control under every existing deployment is the change that breaks a customer at
+3am, so this is a new opt-in guarantee, not a silent tightening. Ten tests split
+across both halves: that an existing policy with an empty allow-list and the flag
+unset still allows, and that the same policy with the flag set denies.
+
+**Three mutations, each verified to fail for its own reason** (a swapped boolean
+here silently opens every table on every connection that opted in, with a green
+suite — the item 101/114 class): inverting the table branch fails 2 tests,
+inverting the column branch fails 1, and flipping the default to `True` fails 3.
+
+**Caught by an existing guard, not by me:**
+`test_every_guardrail_direction_is_either_obvious_or_reviewed` refused the new
+field because its name does not say whether a higher value is looser or stricter.
+It is now in `INVERTED_GUARDRAIL_FIELDS` (`True` is the *tighter* posture) and in
+`_DIRECTION_REVIEWED_GUARDRAILS`. Without that, `admin/access_diff.py` would have
+reported a deny-by-default cutover as a **loosening** — precisely the review an
+operator would be relying on.
+
+Documented in `examples/policy.example.yaml` (which now sets it `true` on the
+demo connection) and in the `PRODUCT_GUIDE.md` Decision Log.
+

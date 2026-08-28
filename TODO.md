@@ -246,7 +246,7 @@ order-of-magnitude, not commitments.
 | 219 | Pre-launch codebase cleanup pass — `repo-audit`, `dep-audit`, `test-gap`, `claim-verify`, `security-invariant-check`; delete BSL dead code; close open defects 192 and 194; full CI matrix green | L | 210 |
 | 222 | The product-guide HTML generator emits a document fragment — no doctype, `lang`, `charset` or viewport meta, so the generated customer-facing page fails WCAG 3.1.1 and its own mobile breakpoint never fires; plus a missing skip link, a split Decision Log list, and the phone-home scan not covering the two shipped `.js` files (load-bearing at item 216) | S | — |
 | 221 | Move validator bodies out of the model classes into compilable sibling modules — 30 validators / 602 lines of enforcement logic (join form, window scope, CTE names, set ops, credential shape) currently ship readable because a module defining `BaseModel` cannot be Cython-compiled | M | 214 |
-| 220 | Deny-by-default at table and column granularity: a `Policy` allow-list with no allow-all fallback, so an empty `allowed_tables` denies instead of allowing. Opt-in (default off) so no existing deployment changes behaviour; the starter policy turns it on | M | — |
+| 220 | ✅ Deny-by-default at table and column granularity: a `Policy` allow-list with no allow-all fallback, so an empty `allowed_tables` denies instead of allowing. Opt-in (default off) so no existing deployment changes behaviour; the starter policy turns it on | M | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -4375,45 +4375,13 @@ than improvising a definition of clean —
 triaged to a decision; `make release-check` and `make release-smoke` green; no
 `✅ DONE` item left unarchived.
 
-### 220. Deny-by-default at table and column granularity: a `Policy` allow-list with no allow-all fallback
+### 220. Deny-by-default at table and column granularity: a `Policy` allow-list with no allow-all fallback ✅ DONE
 
-**Effort: M. Blocks item 215.** Owner decision, 2026-08-23.
+`Policy.require_explicit_allowlist` (default `False`, so nothing changes for an
+existing deployment) turns an empty allow-list from allow-everything into
+deny-everything, at both table and column granularity.
 
-**Why it matters:** `Policy.table_allowed` returns `True` when `allowed_tables`
-is empty, and `column_allowed` follows the same convention — **an empty
-allow-list means allow-everything**. `denied_tables` has no wildcard. So the
-only deny-all lever in the model today is `Policy.enabled = False`, which is
-all-or-nothing: the moment an operator enables a connection to run their first
-query, every table and column on it is readable up to the numeric caps. That is
-the opposite of what a new install should do, and it makes the "safe-by-default
-starter policy" item 215 promises literally inexpressible. It is also a poor
-default for a product whose entire pitch is that it governs *what a query is
-allowed to be*.
-
-**What it is:**
-- A `Policy` field with **no allow-all fallback** — working name
-  `require_explicit_table_allowlist: bool = False` — under which an empty
-  `allowed_tables` means *deny every table* rather than *allow every table*. The
-  same treatment for `allowed_columns`.
-- **Default `False`, so no existing deployment changes behaviour.** This is a
-  new opt-in guarantee, not a silent tightening of everyone's policy — a
-  behaviour flip on an existing security control is exactly the change that
-  breaks a customer at 3am.
-- The shipped starter policy (item 215) sets it `True`, so a fresh install
-  denies until the operator names tables deliberately.
-- **Both branches mutation-verified.** Per CLAUDE.md's working agreement:
-  break the empty-allow-list branch in each direction and confirm a test fails
-  *for that reason*. A swapped boolean here silently opens every table on every
-  connection that opted in, with a green suite — the same class as items 101 and
-  114.
-- Documented in `examples/policy.example.yaml` (whose comments currently
-  concede the shipped default is permissive) and in the policy section of
-  `docs/PRODUCT_GUIDE.md`.
-
-**Definition of done:** `security-invariant-check` clean; a test that an
-existing policy with an empty allow-list and the flag unset still allows (no
-behaviour change), and one that the same policy with the flag set denies; both
-mutation-verified; `examples/policy.example.yaml` and the product guide updated.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 220).
 
 ### 221. Move validator bodies out of the model classes so the enforcement logic can be compiled
 

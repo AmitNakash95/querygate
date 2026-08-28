@@ -57,7 +57,7 @@ below is verifiable from this repository; none of it is buried further down.
 What *is* real: the structural guarantee below; live Postgres/MSSQL/MySQL tiers
 in CI; a maintained threat model; and a reconciliation between what the docs
 claim and what the code does that is itself gated in CI. The adversarial
-security suite is 721 tests (`make test-security`); the unit and integration
+security suite is 731 tests (`make test-security`); the unit and integration
 suites are 3,326 and 428. Every number there is reproducible — `poetry run
 pytest -m unit -q`, `-m "integration and not real_db"`, `make test-security` —
 and the adversarial count is itself CI-gated against the documents that quote
