@@ -64,7 +64,17 @@ def main(argv: list[str] | None = None) -> int:
         if not stale:
             continue
         if name in _GENERATED:
-            changed.append(f"{name} (generated — run `make {_GENERATED[name]}`)")
+            if args.check:
+                changed.append(f"{name} (generated — needs `make {_GENERATED[name]}`)")
+                continue
+            # Regenerated here rather than left as an instruction. Leaving it to
+            # the caller means the count gate stays red until someone reads the
+            # message, and while it is red the pre-commit hook blocks every other
+            # command — including the `make` that would fix it.
+            subprocess.run(  # nosec B603 B607 - fixed target names from _GENERATED
+                ["make", _GENERATED[name]], cwd=ROOT, check=True, capture_output=True
+            )
+            changed.append(f"{name}: regenerated with `make {_GENERATED[name]}`")
             continue
         if args.check:
             changed.append(f"{name} quotes {sorted(stale)}")
@@ -81,14 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     for line in changed:
         print(("  drift: " if args.check else "  updated: ") + line)
-    if args.check:
-        return 1
-    generated = [name for name in CLAIM_FILES if name in _GENERATED]
-    if generated:
-        print("\nNow regenerate the derived artifacts:")
-        for name in generated:
-            print(f"  make {_GENERATED[name]}")
-    return 0
+    return 1 if args.check else 0
 
 
 if __name__ == "__main__":
