@@ -400,55 +400,136 @@ def _is_mapping_literal(node: ast.AST) -> bool:
     return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "dict"
 
 
-def _mapping_keys(node: ast.AST) -> tuple[list[str], bool, bool]:
-    """(literal keys, spreads another mapping, has an uncheckable key)."""
-    if isinstance(node, ast.Dict):
-        spread = any(key is None for key in node.keys)
-        literal = [
-            key.value
-            for key in node.keys
-            if isinstance(key, ast.Constant) and isinstance(key.value, str)
-        ]
-        computed = any(
-            key is not None and not (isinstance(key, ast.Constant) and isinstance(key.value, str))
-            for key in node.keys
-        )
-        return literal, spread, computed
-    # `dict(a=1, **rest)` / `dict(pairs)`
-    spread = any(kw.arg is None for kw in node.keywords)
-    literal = [kw.arg for kw in node.keywords if kw.arg is not None]
-    return literal, spread, bool(node.args)
+def _is_mapping_merge(node: ast.AST) -> bool:
+    """`{...} | extra` — the modern spelling of `{**a, **b}`.
 
-
-def _body_bound_mappings(tree: ast.Module) -> list[ast.AST]:
-    """Mapping literals that can reach the wire in this module.
-
-    Scoped deliberately. Applying the key rules to *every* dict in the package
-    would fire on `cache.py`'s entries and a Pydantic `model_config`, so item
-    211's first commit would go red for reasons that have nothing to do with
-    disclosure — and the only relief would be widening the allowlist, which is
-    how a bound becomes a rubber stamp. Two shapes reach the wire: a literal
-    passed straight to a body keyword, and a literal assigned to a name that is
-    passed to one somewhere in the same module.
+    Same operation as rule 2's `**`, so it has to be the same violation.
     """
+    return isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr)
+
+
+def _mapping_keys(node: ast.AST) -> tuple[list[str], bool, bool]:
+    """(literal keys, spreads another mapping, has an uncheckable key).
+
+    **Recurses into nested mappings.** A body of
+    `{"deployment_id": {"hostname": h}}` has only disclosed keys at the top
+    level, so a flat read called it clean while `hostname` went over the wire
+    one level down.
+    """
+    if _is_mapping_merge(node):
+        left, _, left_computed = _mapping_keys(node.left)
+        right, _, right_computed = _mapping_keys(node.right)
+        return left + right, True, left_computed or right_computed
+
+    literal: list[str] = []
+    spread = False
+    computed = False
+    values: list[ast.AST] = []
+
+    if isinstance(node, ast.Dict):
+        for key, value in zip(node.keys, node.values):
+            if key is None:  # `{**other}`
+                spread = True
+            elif isinstance(key, ast.Constant) and isinstance(key.value, str):
+                literal.append(key.value)
+            else:
+                computed = True
+            values.append(value)
+    elif isinstance(node, ast.Call):  # `dict(a=1, **rest)` / `dict(pairs)`
+        for keyword in node.keywords:
+            if keyword.arg is None:
+                spread = True
+            else:
+                literal.append(keyword.arg)
+            values.append(keyword.value)
+        computed = bool(node.args)
+    else:
+        return [], False, False
+
+    for value in values:
+        if _is_mapping_literal(value) or _is_mapping_merge(value):
+            nested, nested_spread, nested_computed = _mapping_keys(value)
+            literal.extend(nested)
+            spread = spread or nested_spread
+            computed = computed or nested_computed
+    return literal, spread, computed
+
+
+#: Methods that add a key to an existing mapping. `BODY.update({...})` and
+#: `BODY |= {...}` are rule 2's banned `**` spread with different syntax, applied
+#: to a name already bound to a request body — the same class as the `dict()`
+#: respelling, one level up. `_payload_field_declarations` already guards the
+#: equivalent on the declared constant, which is why the omission here stood out.
+_MUTATING_METHODS = frozenset({"update", "setdefault"})
+
+
+def _body_mutations(tree: ast.Module, bound: set[str]) -> list[tuple[int, str]]:
+    """Post-construction writes to a name that is sent as a request body."""
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id in bound
+                and func.attr in _MUTATING_METHODS
+            ):
+                found.append((node.lineno, f"{func.value.id}.{func.attr}(...)"))
+        elif isinstance(node, ast.AugAssign):
+            if isinstance(node.target, ast.Name) and node.target.id in bound:
+                found.append((node.lineno, f"{node.target.id} |= ..."))
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id in bound
+                ):
+                    found.append((node.lineno, f"{target.value.id}[...] = ..."))
+    return found
+
+
+def _body_bound_names(tree: ast.Module) -> set[str]:
+    """Names passed to a body keyword somewhere in this module."""
     bound: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             for keyword in node.keywords:
                 if keyword.arg in _BODY_KEYWORDS and isinstance(keyword.value, ast.Name):
                     bound.add(keyword.value.id)
+    return bound
 
+
+def _body_bound_mappings(tree: ast.Module, bound: set[str]) -> list[ast.AST]:
+    """Mapping expressions that can reach the wire in this module.
+
+    Scoped deliberately. Applying the key rules to *every* dict in the package
+    would fire on `cache.py`'s entries and a Pydantic `model_config`, so item
+    211's first commit would go red for reasons that have nothing to do with
+    disclosure — and the only relief would be widening the allowlist, which is
+    how a bound becomes a rubber stamp.
+
+    **Two shapes, and the limit is stated as a test, not only here** (see
+    `test_a_body_assembled_in_another_module_is_not_reached`): a mapping passed
+    straight to a body keyword, and one assigned to a name that is passed to a
+    body keyword *in the same module*. A body built in one module and imported
+    by another is out of reach of a per-module AST pass, as is one handed to a
+    local helper that posts it. Those are the runtime assertion's job.
+    """
     mappings: list[ast.AST] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             for keyword in node.keywords:
-                if keyword.arg in _BODY_KEYWORDS and _is_mapping_literal(keyword.value):
+                if keyword.arg in _BODY_KEYWORDS and (
+                    _is_mapping_literal(keyword.value) or _is_mapping_merge(keyword.value)
+                ):
                     mappings.append(keyword.value)
         elif isinstance(node, (ast.Assign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             if (
                 node.value is not None
-                and _is_mapping_literal(node.value)
+                and (_is_mapping_literal(node.value) or _is_mapping_merge(node.value))
                 and any(isinstance(t, ast.Name) and t.id in bound for t in targets)
             ):
                 mappings.append(node.value)
@@ -510,7 +591,15 @@ def payload_contract_violations(package: Path) -> list[str]:
         rel = str(path.relative_to(package.parent))
         tree = ast.parse(path.read_text(encoding="utf-8"))
 
-        for mapping in _body_bound_mappings(tree):
+        bound = _body_bound_names(tree)
+        for lineno, how in _body_mutations(tree, bound):
+            violations.append(
+                f"{rel}:{lineno} mutates a request body after it is built ({how}). That is "
+                "the `**` spread with different syntax: whatever the mapping literal "
+                "declares, the wire carries something else."
+            )
+
+        for mapping in _body_bound_mappings(tree, bound):
             literal, spread, computed = _mapping_keys(mapping)
             if spread:
                 violations.append(
@@ -639,6 +728,105 @@ def test_a_computed_body_key_is_caught(tmp_path):
     )
     problems = payload_contract_violations(_plant(tmp_path, source))
     assert any("not a string literal" in p for p in problems), problems
+
+
+def test_mutating_a_body_after_it_is_built_is_caught(tmp_path):
+    """`BODY.update({...})`, `BODY |= {...}` and `BODY["x"] = v` are rule 2's
+    banned `**` spread in different syntax, applied to a name already bound to a
+    request body. All three were clean while the rule that bans the operation
+    they perform was in force — a reviewer measured it."""
+    for mutation in (
+        '    BODY.update({"hostname": h})\n',
+        '    BODY |= {"hostname": h}\n',
+        '    BODY["hostname"] = h\n',
+        '    BODY.setdefault("hostname", h)\n',
+    ):
+        source = _COMPLIANT + (
+            '\n\nBODY = {"org_id": org}\n'
+            "\n\nasync def refresh(client, h):\n"
+            + mutation
+            + "    return await client.post(URL, json=BODY)\n"
+        )
+        problems = payload_contract_violations(_plant(tmp_path / mutation[:12].strip(), source))
+        assert any("mutates a request body" in p for p in problems), (mutation, problems)
+
+
+def test_a_merged_mapping_body_is_caught(tmp_path):
+    """`{...} | extra` is the modern spelling of `{**a, **b}`."""
+    source = _COMPLIANT + (
+        "\n\nasync def refresh(client, extra, org):\n"
+        '    return await client.post(URL, json={"org_id": org} | extra)\n'
+    )
+    problems = payload_contract_violations(_plant(tmp_path, source))
+    assert any("`**`" in p for p in problems), problems
+
+
+def test_a_nested_undisclosed_field_is_caught(tmp_path):
+    """Only the top level was read, so a disclosed key carrying an undisclosed
+    one inside it went over the wire clean."""
+    source = _COMPLIANT + (
+        "\n\nasync def refresh(client, org, h):\n"
+        '    return await client.post(URL, json={"org_id": org, "deployment_id": {"hostname": h}})\n'
+    )
+    problems = payload_contract_violations(_plant(tmp_path, source))
+    assert any("'hostname'" in p for p in problems), problems
+
+
+def test_an_undisclosed_field_in_a_data_body_is_caught(tmp_path):
+    """`_BODY_KEYWORDS` covers more than `json=`; nothing exercised the rest,
+    so narrowing it to `{"json"}` left every detector green."""
+    source = _COMPLIANT + (
+        "\n\nasync def refresh(client, org, h):\n"
+        '    return await client.post(URL, data={"org_id": org, "hostname": h})\n'
+    )
+    problems = payload_contract_violations(_plant(tmp_path, source))
+    assert any("'hostname'" in p for p in problems), problems
+
+
+def test_a_header_name_in_a_body_is_allowed_but_an_invented_one_is_not(tmp_path):
+    """Both directions of `_NON_PAYLOAD_KEYS`.
+
+    After the body-scoping fix, the plumbing control stopped reaching the
+    allowlist at all — emptying `_NON_PAYLOAD_KEYS` left every detector green,
+    so neither its current narrowness nor a future widening was checked.
+    """
+    allowed = _COMPLIANT + (
+        '\n\nBODY = {"authorization": token, "content-type": ct, "org_id": org}\n'
+        "\n\nasync def refresh(client):\n    return await client.post(URL, json=BODY)\n"
+    )
+    assert payload_contract_violations(_plant(tmp_path / "ok", allowed)) == []
+
+    invented = _COMPLIANT + (
+        '\n\nBODY = {"x-deployment-host": host, "org_id": org}\n'
+        "\n\nasync def refresh(client):\n    return await client.post(URL, json=BODY)\n"
+    )
+    problems = payload_contract_violations(_plant(tmp_path / "bad", invented))
+    assert any("'x-deployment-host'" in p for p in problems), problems
+
+
+def test_a_body_assembled_in_another_module_is_not_reached(tmp_path):
+    """The scope limit, asserted rather than only described.
+
+    `_body_bound_mappings` is a per-module pass, so a body built in `payloads.py`
+    and posted from `client.py` is out of its reach. Item 211's package splits
+    `models.py`/`sources.py`/`manager.py`, so this is its *intended* shape — which
+    is exactly why the limit is pinned here instead of left in a docstring, and
+    why item 211's Definition of Done owns the runtime assertion.
+    """
+    package = _plant(
+        tmp_path,
+        _COMPLIANT + '\n\nBODY = {"org_id": org, "hostname": host}\n',
+        name="payloads.py",
+    )
+    (package / "client.py").write_text(
+        "from .payloads import BODY\n\n\nasync def refresh(client):\n"
+        "    return await client.post(URL, json=BODY)\n",
+        encoding="utf-8",
+    )
+    assert payload_contract_violations(package) == [], (
+        "this test documents a known limit; if it now fails the checker got "
+        "stronger — delete the test and say so in TODO.md item 211"
+    )
 
 
 def test_a_dict_unrelated_to_the_wire_is_not_flagged(tmp_path):
