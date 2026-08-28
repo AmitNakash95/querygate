@@ -15,7 +15,20 @@ FORBIDDEN_SUFFIXES = (".db", ".sqlite", ".sqlite3", ".pyc")
 # "demo" carries the partner-demo stack, including a deliberately unsafe
 # execute_sql MCP server that exists only as the counter-example QueryGate
 # replaces (demo/baseline_mcp/). It must never reach a release artifact.
-FORBIDDEN_PARTS = {".env", ".git", ".venv", "__pycache__", "archive", "tests", "demo"}
+#: `control-plane` is here (item 212) as the cheapest possible guarantee that
+#: the vendor signing plane can never ship inside a customer artifact. The
+#: Dockerfile's COPY allowlist already makes the image safe; this covers the
+#: wheel and the sdist, and survives a Dockerfile edit.
+FORBIDDEN_PARTS = {
+    ".env",
+    ".git",
+    ".venv",
+    "__pycache__",
+    "archive",
+    "tests",
+    "demo",
+    "control-plane",
+}
 
 
 def _invalid_members(members: list[str]) -> list[str]:
