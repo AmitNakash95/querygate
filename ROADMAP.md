@@ -156,7 +156,7 @@ human-SSO/identity stream; these start at 210.
   *Reuses 199's mechanism, not its store: `identity/` is deployment-side and
   governs who may use the gateway; activation is vendor-side and governs whether
   it may run at all.*
-- [ ] **220** — Deny-by-default at table/column granularity (a `Policy`
+- [x] **220** — Deny-by-default at table/column granularity (a `Policy`
   allow-list with no allow-all fallback). **Blocks 215.** *Today an empty
   `allowed_tables` means allow-**everything**, so the "safe-by-default starter
   policy" 215 promises is inexpressible. Opt-in, default off, so no existing

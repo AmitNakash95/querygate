@@ -187,6 +187,26 @@ default:
 
 connections:
   demo:
+    # --- Deny-by-default (TODO.md item 220) ---------------------------------
+    #
+    # `require_explicit_allowlist: true` flips the meaning of an EMPTY
+    # allow-list from "allow everything" to "deny everything". Without it, the
+    # only deny-all lever in the model is `enabled: false`, which is
+    # all-or-nothing: the moment you enable a connection to run your first
+    # query, every table and column on it is readable up to the numeric caps.
+    #
+    # **Default is `false`**, so no existing deployment changes behaviour by
+    # upgrading. Turn it on deliberately, and then name every table and column a
+    # caller may reach. The starter policy a fresh install ships (item 215) sets
+    # it `true`.
+    #
+    # With it on:
+    #   * an empty `allowed_tables` denies every table;
+    #   * a table with no `allowed_columns` entry (and no `"*"` entry) denies
+    #     every column on it;
+    #   * `denied_*` still wins over `allowed_*`, unchanged.
+    require_explicit_allowlist: true
+
     # Only these tables are queryable at all — anything else is rejected
     # before compilation, even if it exists in the database. `employees` is
     # deliberately left out here: it's known to the connection (see
