@@ -311,6 +311,28 @@
     await loadAccess();
   }
 
+
+  // TODO.md item 216. **Called after the auth dialog closes, never inside
+  // `loadAccess()`.** A modal `<dialog>` makes every node outside it `inert`,
+  // and an inert subtree is not exposed to the accessibility tree — so writing
+  // the banner while the sign-in modal is still open means a screen reader
+  // never observes the live-region change, and closing the dialog afterwards is
+  // not a text change it will announce. The one path that happened to work was
+  // the SSO cookie resume, which renders before the modal is ever shown.
+  //
+  // Also deliberately not chained behind the rest of `loadAccess()`: a
+  // transient governance-load failure must not take the expiry warning with it.
+  // Never allowed to break the page it warns on, either — and a failure clears
+  // the banner rather than leaving a previous session's countdown standing,
+  // which in a role="status" region reads as current.
+  async function refreshRenewalBanner() {
+    try {
+      const body = await api("/subscription");
+      window.QueryGateRenewalBanner.render(body && body.notice);
+    } catch (error) {
+      window.QueryGateRenewalBanner.render(null);
+    }
+  }
   async function loadAccess() {
     state.access = await api("/help/my-access");
     state.connections = state.access.visible_connections || [];
@@ -329,6 +351,11 @@
   }
 
   function disconnect() {
+    // Clear the countdown with everything else. A role="status" region left
+    // asserting a previous session's expiry has no visual "stale" cue, so it
+    // reads as current — and if the next principal's fetch then fails, the
+    // stale text is what stays on screen.
+    window.QueryGateRenewalBanner.render(null);
     state.token = "";
     state.csrf = "";
     state.session = null;
@@ -370,6 +397,8 @@
       try {
         await connect($("#auth-token").value);
         $("#auth-dialog").close();
+        // After close(): until then the live region is inert and nothing is announced.
+        void refreshRenewalBanner();
         toast(`Connected as ${state.access.principal}.`);
       } catch (error) {
         errorNode.textContent = error.status === 401 ? "Token rejected by QueryGate." : error.message;
@@ -398,6 +427,8 @@
         state.token = "";
         await loadAccess();
         $("#auth-dialog").close();
+        // After close(): until then the live region is inert and nothing is announced.
+        void refreshRenewalBanner();
         toast(`Signed in as ${state.access.principal}.`);
       } catch (error) {
         errorNode.textContent = error.message;
@@ -415,6 +446,8 @@
     // someone who is already signed in.
     await loadSignInOptions();
     if (await resumeSession()) {
+      // No modal was ever shown on this path, so nothing is inert.
+      void refreshRenewalBanner();
       toast(`Signed in as ${state.access.principal}.`);
       return;
     }

@@ -47,7 +47,7 @@ that weakened any of them would fail the build.
 | **Container image** | OS + library CVEs, secrets, misconfig | **Trivy** on the shipped image | ✅ **0 HIGH/CRITICAL** (no exceptions) | `make scan-image` |
 | **Secrets** | No credential ever committed | **gitleaks** over full git history | ✅ Clean | `make scan-secrets` |
 | **DAST** | Fuzz the API for validation bypass / crashes | **Schemathesis** against the live OpenAPI schema | ✅ 0 server errors, 0 bypass | `make test-dast` |
-| **Adversarial suite** | Known bypass classes as regressions | Purpose-built pytest suite (`-m security`) | ✅ 751 tests | `make test-security` |
+| **Adversarial suite** | Known bypass classes as regressions | Purpose-built pytest suite (`-m security`) | ✅ 798 tests | `make test-security` |
 | **Reliability** | Guardrails hold under real concurrent load | Real-Postgres soak/load gates | ✅ Enforced in CI | `make test-load` / `make test-soak` |
 | **Credential isolation** | No secret on any returned model | Asserted against live OpenAPI + MCP schemas | ✅ Enforced | `pytest tests/unit/test_credential_redaction.py` |
 | **Best-practices self-assessment** | OpenSSF criteria maturity | **OpenSSF Best Practices** criteria (self-assessed) | 🟡 Self-assessed | see [below](#external-attestations) |
@@ -185,7 +185,7 @@ hand-written adversarial suite.
 ## Adversarial regression suite
 
 Beyond automated fuzzing, QueryGate carries a purpose-built adversarial suite
-(751 tests, `pytest -m security`) encoding specific known bypass classes:
+(798 tests, `pytest -m security`) encoding specific known bypass classes:
 denied-column inference, undeclared-table smuggling, predicate-as-SQL,
 schema-discovery leaks, policy-cap boundary breaches, and audit no-leak checks.
 New attack vectors are added here as regressions (see the `adversarial-probe`

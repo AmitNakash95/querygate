@@ -164,7 +164,7 @@ human-SSO/identity stream; these start at 210.
 - [ ] **215** — One-command install and first-boot self-configuration.
   *"Single command and it's set up" is the promise; today it needs two YAML
   files plus env configuration.*
-- [ ] **216** — Renewal countdown and lapse UX. *Depends on 211.*
+- [x] **216** — Renewal countdown and lapse UX. *Depends on 211.*
 - [ ] **217** — Customer portal: signup, checkout, downloads, docs.
   **Blocked on the legal entity.**
 - [ ] **218** — Setup guides and quickstart docs for the SaaS motion.

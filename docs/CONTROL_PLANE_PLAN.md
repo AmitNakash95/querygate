@@ -140,7 +140,7 @@ CLI ends up reporting "valid" while the gate returns 402.
 |---|---|
 | Valid, refresh succeeding | Normal. `expires_at` rolls forward ~30 days. |
 | Valid, **refresh failing** | **Fully operational** to `expires_at` (~30 days tolerance). `WARN` from the third *consecutive* failure; **a success resets the counter to zero**. |
-| Expired, inside grace (+14d) | **Fully operational.** Warnings; health `degraded`. |
+| Expired, inside grace (+14d) | **Fully operational.** Warnings escalate; `/health` reports `subscription: renewal_due`, `status` unchanged. |
 | Past grace | **Blocked** (§3.2). |
 | Clock regressed beyond tolerance | Enters **grace**, never expiry directly (§3.5). |
 | **Cold start: no cached entitlement, no network** | **Fails open, in grace, for a bounded first-boot window.** A fresh install, a DR failover into an isolated network, or a scaled-out replica has nothing to be "valid" from; failing closed there means our outage *is* their outage on day one. |

@@ -9,11 +9,21 @@
 #     gate on a CVE in software they never receive.
 name: control-plane
 
+# `src/querygate/subscription/**` is in the filter deliberately, and it is the
+# only product path that is. `tests/test_notice_agreement.py` and
+# `test_the_product_verifies_what_we_sign` are the only places the two codebases
+# meet, and both live on THIS side — so without it, editing SCHEMA_VERSION,
+# RENEWAL_NOTICE_DAYS or LAPSE_CONSEQUENCE in the product runs no job that checks
+# the two sides still agree. The guard would have fired on none of the commits it
+# exists to block.
 on:
   push:
-    paths: ["control-plane/**", ".github/workflows/control-plane.yml"]
+    paths: &paths
+      - "control-plane/**"
+      - "src/querygate/subscription/**"
+      - ".github/workflows/control-plane.yml"
   pull_request:
-    paths: ["control-plane/**", ".github/workflows/control-plane.yml"]
+    paths: *paths
 
 jobs:
   test:
