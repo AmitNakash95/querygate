@@ -22,6 +22,7 @@ from querygate.core.exceptions import (
     QueryValidationError,
     QuotaExceededError,
     ServiceDisabledError,
+    SubscriptionExpiredError,
     public_error_message,
 )
 from querygate.core.logging import get_logger
@@ -55,6 +56,11 @@ def _error_code_from_exception(exc: Exception) -> tuple[str, str]:
         return f"HTTP_{exc.status_code}", message
     if isinstance(exc, AuthorizationError):
         return "FORBIDDEN", public_error_message(exc)
+    # Before the INTERNAL fall-through: without a branch here an expired
+    # subscription is logged with a full traceback as an unexpected fault, and
+    # the agent is told "an internal error occurred" rather than "renew here".
+    if isinstance(exc, SubscriptionExpiredError):
+        return "SUBSCRIPTION_EXPIRED", public_error_message(exc)
     # Checked before PolicyViolationError (its superclass): a per-principal
     # quota rejection (TODO.md item 50) gets its own code so an agent can tell
     # "slow down / budget exhausted, retry later" apart from a structural
