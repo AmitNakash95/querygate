@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from querygate.subscription.models import SCHEMA_VERSION
 from querygate.subscription.verify import (
     ENTITLEMENT_DOMAIN,
     MANIFEST_DOMAIN,
@@ -32,7 +33,7 @@ DEPLOYMENT = "dep_test"
 
 def _payload(**overrides) -> dict:
     body = {
-        "schema_version": 1,
+        "schema_version": SCHEMA_VERSION,
         "org_id": "org_test",
         "deployment_id": DEPLOYMENT,
         "serial": 5,
@@ -40,6 +41,7 @@ def _payload(**overrides) -> dict:
         "expires_at": (NOW + timedelta(days=30)).isoformat(),
         "grace_expires_at": (NOW + timedelta(days=44)).isoformat(),
         "enforcement": "enforce",
+        "renewal_state": "auto_renewing",
         "plan": "team",
         "max_connections": 10,
         "max_seats": 25,
@@ -265,3 +267,44 @@ def test_a_manifest_not_signed_by_the_root_is_refused():
     with pytest.raises(EntitlementVerificationError) as caught:
         load_manifest(raw, root_public_key=root.public_key(), now=NOW)
     assert caught.value.reason is VerificationFailure.MANIFEST_UNTRUSTED
+
+
+# --- the signed renewal_state field (item 216) --------------------------------
+
+
+def test_a_missing_renewal_state_is_refused(signing_key, trusted):
+    """The absence case the SCHEMA_VERSION bump reasons about explicitly.
+
+    A v1 document reaching a v2 build fails here rather than defaulting — and
+    defaulting would mean `auto_renewing`, the one value that suppresses every
+    warning.
+    """
+    payload = _payload()
+    del payload["renewal_state"]
+    assert (
+        _reason(_envelope(signing_key, payload), trusted) is VerificationFailure.MALFORMED_PAYLOAD
+    )
+
+
+def test_an_unrecognised_renewal_state_is_refused(signing_key, trusted):
+    """A typo in the issuer must not silently remove the customer's 30 days of
+    notice. Deleting the guard does not merely default — `RenewalState("renewng")`
+    raises a bare `ValueError` that is not an `EntitlementVerificationError`, so
+    the refresh path sees an unclassified crash instead of a typed refusal."""
+    raw = _envelope(signing_key, _payload(renewal_state="renewng"))
+    assert _reason(raw, trusted) is VerificationFailure.MALFORMED_PAYLOAD
+
+
+@pytest.mark.parametrize("field", ["renewal_state", "enforcement"])
+@pytest.mark.parametrize("value", [["auto_renewing"], {"mode": "observe"}, 7, None])
+def test_a_non_string_enum_field_is_refused_rather_than_raising(signing_key, trusted, field, value):
+    """The membership test needs an `isinstance` guard in front of it.
+
+    A JSON array or object makes `value not in {...}` raise
+    `TypeError: unhashable type`, which is **not** an
+    `EntitlementVerificationError` — so it escapes `SubscriptionManager._verify`,
+    escapes the refresh loop, and ends the background task for the process
+    lifetime. One bad issuance would freeze every deployment's verdict, silently.
+    """
+    raw = _envelope(signing_key, _payload(**{field: value}))
+    assert _reason(raw, trusted) is VerificationFailure.MALFORMED_PAYLOAD

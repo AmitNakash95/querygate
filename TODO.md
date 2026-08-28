@@ -240,11 +240,15 @@ order-of-magnitude, not commitments.
 | 213 | Activation — bind a deployment to a subscription via OAuth2 (Google/Microsoft) + MFA, browser and device flows, control-plane-assigned `deployment_id`, unactivated deployments inert | L | 199, 212 |
 | 214 | Single obfuscated compiled binary — Nuitka feasibility spike first (pydantic-core, SQLAlchemy dispatch, MCP annotation resolution), then reproducible build preserving cosign + SLSA provenance | XL | — |
 | 215 | ✅ One-command install and first-boot self-configuration — no operator-authored file needed to reach activation; safe-by-default starter policy; first connection added through the UI | M | 213 |
-| 216 | Renewal countdown and lapse UX — banner with day countdown in both UIs under 30 days when auto-renew is off, email, coarse health field, metric, CLI line; accessible by construction | M | 211 |
+| 216 | ✅ Renewal countdown and lapse UX — banner with day countdown in both UIs under 30 days when auto-renew is off, email, coarse health field, metric, CLI line; accessible by construction | M | 211 |
 | 217 | Customer portal — OAuth2 signup, Stripe Checkout, subscription and deployment management, cancellation flow stating the no-refund terms before confirming, downloads and docs | XL | 212 |
 | 218 | Setup guides and quickstart docs for the SaaS motion — one-screen quickstart, per-target deploy guides, air-gapped guide, troubleshooting, rewritten `CUSTOMER_README.md` and landing/sales copy | M | 215 |
 | 219 | Pre-launch codebase cleanup pass — `repo-audit`, `dep-audit`, `test-gap`, `claim-verify`, `security-invariant-check`; delete BSL dead code; close open defects 192 and 194; full CI matrix green | L | 210 |
 | 222 | The product-guide HTML generator emits a document fragment — no doctype, `lang`, `charset` or viewport meta, so the generated customer-facing page fails WCAG 3.1.1 and its own mobile breakpoint never fires; plus a missing skip link, a split Decision Log list, and the phone-home scan not covering the two shipped `.js` files (load-bearing at item 216) | S | — |
+| 223 | Decide the background catalog refresh's behaviour on a lapsed subscription — the timer-driven reflection path is not subscription-gated while the three caller-initiated ones are; either gate it with a visible state or make the carve-out deliberate and documented | S | 216 |
+| 224 | Bring the pre-existing console surfaces up to the renewal banner's accessibility bar — `#global-banner` is a `hidden` `role="status"` element in both consoles, and neither isolates bidirectional text in database-supplied identifiers | M | 216 |
+| 225 | An entitlement schema-version bump has no compatibility window — `verify.py` rejects any version but its own and the refresh request carries no client version, so the next bump silently removes the countdown from skewed deployments | S | 216 |
+| 226 | `build_provider` in `billing.py` still special-cases construction at the registry, unlike the email registry beside it | XS | 212 |
 | 221 | Move validator bodies out of the model classes into compilable sibling modules — 30 validators / 602 lines of enforcement logic (join form, window scope, CTE names, set ops, credential shape) currently ship readable because a module defining `BaseModel` cannot be Cython-compiled | M | 214 |
 | 220 | ✅ Deny-by-default at table and column granularity: a `Policy` allow-list with no allow-all fallback, so an empty `allowed_tables` denies instead of allowing. Opt-in (default off) so no existing deployment changes behaviour; the starter policy turns it on | M | — |
 
@@ -4274,41 +4278,14 @@ any config-version response; first boot never overwrites an existing config;
 and a source-level test asserts `admin/service.py` is the only module that
 writes `connections.yaml`.
 
-### 216. Renewal countdown and lapse UX
+### 216. Renewal countdown and lapse UX ✅ DONE
 
-**Effort: M.** Depends on 211.
+`renewal_state` is now a signed entitlement field resolved by the control plane;
+one `renewal_notice()` decides the threshold for the shared admin/access banner,
+the renewal email, `querygate-license status` and a coarse three-value signal on
+`/health` and a Prometheus gauge that carry no date or day count.
 
-**Why it matters:** a subscription that stops without warning is a support
-incident and a chargeback. The countdown is the product being honest.
-
-**What it is:**
-- **Trigger:** auto-renew off (or payment failing) **and** under 30 days
-  remaining.
-- **Surfaces:** a persistent banner in `admin_ui` and `access_ui` with a
-  **day countdown** and the exact expiry date; escalation under 7 days; an
-  email; a coarse field on the health endpoint; a Prometheus gauge; a line in
-  `querygate-license status`.
-- **Say exactly what happens at expiry**: every query and write is refused with
-  402, and audit export keeps working. Link straight to the renewal URL.
-- **The unauthenticated `/health` endpoint carries only a coarse state** — no
-  org, plan, dates, or counts. It is deliberately unauthenticated and returning
-  aggregate detail only; publishing an expiry date there tells any scanner
-  exactly when this customer's gateway stops.
-- **The same constraint binds the Prometheus gauge**, which is otherwise the
-  unguarded sibling: `metrics_require_auth` defaults to true but **false is
-  supported**, and a `days_remaining` gauge on such a deployment discloses
-  strictly more than the health field just forbade. The gauge is a coarse state
-  enum; the day countdown lives only on the authenticated UI banner, the email,
-  and `querygate-license status`.
-- The 402 body and the exception message carry a fixed operator-facing string:
-  no org id, deployment id, serial, plan, or date.
-- **Accessibility is part of this item**, not a follow-up: the banner is a live
-  region, dismissible without losing the information, and legible at the
-  contrast the rest of the UI meets.
-
-**Definition of done:** `ui-a11y-reviewer` clean; a test per surface asserting
-the countdown appears at the right threshold and the 402 message names the
-renewal URL.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 216).
 
 ### 217. Customer portal — signup, checkout, downloads, docs
 
@@ -4523,3 +4500,107 @@ viewport; `make product-guide-html` regenerated and
 `test_product_guide_html_freshness.py` green; a skip link; the Decision Log a
 single list; the phone-home scan covering `.js`; the four smaller items above
 either fixed or explicitly declined in this item's body with a reason.
+
+### 223. Decide the background catalog refresh's behaviour on a lapsed subscription
+
+**Effort: S.** Found by `claim-reviewer` during item 216's audit; filed rather
+than fixed there because it is a behaviour decision about a background task, not
+a docs correction, and item 216's own claim has already been narrowed to match
+the code.
+
+**Why it matters:** `check_schema_discovery_funnel` gates `list_tables`,
+`describe_table` and `search_catalog`, so an expired deployment enumerates
+nothing **for a caller**. `CatalogRefreshMonitor.refresh_once` →
+`scan_connection_schema` (`catalog/refresh.py`) reaches `list_live_tables` and
+`get_table_schema` directly on a timer and is not gated. Until 2026-08-28
+`execution/subscription_gate.py`'s docstring claimed it was; that sentence is now
+corrected and the residual is recorded in `docs/THREAT_MODEL.md` §8.
+
+**The decision to make**, which is why this is an item and not a fix: gating a
+background loop has no caller to hand a 402 to. Either
+- the monitor checks the funnel and **stops refreshing** while lapsed, which
+  needs a visible state (a metric, a health field) so "my catalog went stale" is
+  diagnosable rather than mysterious; or
+- the exclusion stays and is a deliberate, documented carve-out — a lapsed
+  deployment reflecting its own schema into its own catalog file discloses
+  nothing to anyone, and the operator can already disable refresh.
+
+**Definition of done:** whichever is chosen, `subscription_gate.py`'s docstring,
+`docs/THREAT_MODEL.md` §8 and `docs/LICENSING_FAQ.md`'s lapse table say the same
+thing, and a test pins it.
+
+### 224. Bring the pre-existing console surfaces up to the banner's accessibility bar
+
+**Effort: M.** Both findings are `ui-a11y-reviewer` pre-existing observations
+from item 216's audit, filed rather than fixed there because they change surfaces
+item 216 did not touch and both have their own tests to update.
+
+**Why it matters:** item 216's renewal banner was built to avoid two defects that
+the surfaces beside it still have.
+
+- **`#global-banner` is a `hidden` `role="status"` element** in both
+  `admin_ui/index.html` and `access_ui/index.html`, and `setBanner()` writes
+  `textContent` and *then* clears `hidden` — so the text is written into a
+  `display: none` region and announcement is unreliable across assistive tech.
+  This is the exact anti-pattern `tests/unit/test_renewal_banner_ui.py`'s
+  docstring names; the fix is the same never-hidden wrapper the renewal banner
+  now uses.
+- **No bidirectional-text isolation anywhere in either console.** No `dir="auto"`,
+  `<bdi>`, `unicode-bidi` or U+2068 appears in `admin_ui/` or `access_ui/`.
+  Database- and operator-sourced identifiers are escaped but never isolated:
+  `access_ui/app.js` renders `${connection}.${table}.${column}` into one
+  `<strong>`, and the `.` separators are neutral characters — so a table named
+  with RTL characters visually reorders and the identifier a user reads is not
+  the identifier the policy names. That is a policy-comprehension problem, not a
+  cosmetic one.
+
+**Definition of done:** `ui-a11y-reviewer` clean on both surfaces; a test that
+the global banner's live region is never the element that gets hidden; a test
+that every rendered identifier composed of database-supplied parts is isolated.
+
+### 225. An entitlement schema-version bump has no compatibility window
+
+**Effort: S.** Found by `architecture-boundary-reviewer` during item 216's audit.
+Filed rather than fixed there: item 216's own bump (1 → 2) is safe because no
+entitlement has ever been issued to a customer, so there are no v1 documents to
+strand and a compatibility path for them would be dead code. The *mechanism* gap
+is real for the next bump.
+
+**Why it matters:** gateways are self-hosted and upgrade on the customer's
+schedule, so issuer and deployment will skew. `verify.py` rejects any version but
+its own outright, and `PAYLOAD_FIELDS` is pinned by `test_no_phone_home.py`, so
+the refresh request cannot carry a client version for the issuer to negotiate
+against. On the next bump, a skewed deployment falls back to
+`evaluate(None, ...)` — grace, observe, no `expires_at`, therefore **no renewal
+banner and no countdown** — while `refresh` still reports OK. Fail-open, so no
+outage; also no signal.
+
+Note that the sharpest half of this is already fixed: `manager.py` now caches
+**after** verification, so a document this build cannot read no longer evicts the
+last one it could.
+
+**What it is:** a supported-versions set rather than a single constant, with a
+stated deprecation window; or a client version in the refresh *request* (which is
+a disclosure change — `PAYLOAD_FIELDS`, `docs/LICENSING_FAQ.md` and the EULA's
+§16.1 all name the four fields, so it needs that decision first, not a code
+change).
+
+**Definition of done:** a test that signs a payload at the previous version and
+asserts the current build's behaviour is the decided one, whichever it is.
+
+### 226. `build_provider` in `billing.py` still special-cases construction at the registry
+
+**Effort: XS.** Found by `architecture-boundary-reviewer` during item 216's audit
+as the precedent that item 216's `notifications.py` copied.
+
+**Why it matters:** `notifications.py`'s email registry now maps each name to a
+factory that takes `Settings`, so adding a transport is one entry plus one class.
+`billing.py:build_provider` still branches (`if cls is ManualBillingProvider` /
+`if not webhook_secret`), which is the shape that leaked a second copy of the
+assumption into a call site before. Two registries in one service with different
+construction contracts is the drift worth closing, and the next provider registry
+anyone writes here will copy whichever they read first.
+
+**Definition of done:** `build_provider(name, settings)` with no per-class
+branch; `test_the_registry_constructs_every_provider_from_settings`'s billing
+sibling iterating `known_providers()` with no branching in the test either.

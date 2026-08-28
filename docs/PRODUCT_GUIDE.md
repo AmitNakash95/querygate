@@ -1610,7 +1610,7 @@ or worked around.
 > Credentials never sit on any returned model, and that's asserted against the
 > live API schema, not by convention. And none of it is "trust us": every
 > guarantee is backed by a deny-by-default CI gate (static analysis, dependency
-> audit, SBOM, image and secret scanning, OpenAPI fuzzing, and a 751-test
+> audit, SBOM, image and secret scanning, OpenAPI fuzzing, and a 798-test
 > adversarial suite), and reviewers get a reproducible packet where each claim
 > names the command that reproduces it. The release pipeline signs the container
 > image (cosign keyless) and attaches SLSA build provenance, both
@@ -1907,7 +1907,7 @@ summary.
 
 The gates fall into three groups:
 
-- **The access boundary itself.** The adversarial security suite (751 tests,
+- **The access boundary itself.** The adversarial security suite (798 tests,
   `make test-security`) encodes specific known bypass classes as regressions —
   denied-column inference, undeclared-table smuggling, predicate-as-SQL,
   schema-discovery leaks, policy-cap breaches, audit no-leak. On top of that,
@@ -4367,6 +4367,46 @@ certification. See [Security Model](#security-model), section 6.
 Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
+
+- **2026-08-28 — Whether a subscription will renew itself is a *signed* field,
+  and the countdown that reads it is decided in one function (item 216).** A
+  deployment cannot see a billing subscription, so `renewal_state`
+  (`auto_renewing` / `cancelling` / `payment_failing`) is resolved by the
+  control plane from the billing record and signed into the entitlement
+  alongside `enforcement`. The alternative — inferring it deployment-side from
+  refresh behaviour — would warn the customer that their access is ending every
+  time *we* had an outage, which is the exact failure `GTM_SAAS.md` §5 promises
+  cannot happen. It is three values rather than a boolean because "your payment
+  failed" and "you cancelled" call for different actions, and one bool renders
+  them identically.
+
+  The countdown itself lives in `renewal_notice()` and nothing else compares a
+  date: the banner, the email, the CLI line and the coarse public signal all
+  derive from it. The trigger is `renewal_state != auto_renewing` **and** under
+  30 days — and the conjunction is load-bearing, not belt-and-braces. The
+  entitlement term is 30 days, so a healthy monthly subscription is *always*
+  inside the window; a day-count trigger alone would banner every deployment
+  forever.
+
+  **The unauthenticated surfaces say strictly less, and `/metrics` counts as
+  unauthenticated.** `/health` carries a three-value enum (`ok` /
+  `renewal_due` / `expired`) and the Prometheus gauge carries the same one;
+  neither carries a date, a day count, a plan or an org id. `metrics_require_auth`
+  defaults to true but `false` is supported, so a `days_remaining` gauge would
+  tell any scanner when a named customer's gateway stops serving. Grace collapses
+  into `renewal_due` for the same reason: the operator action is identical, and
+  the distinction is a commercial fact about the customer rather than an
+  operational one. An expired subscription is also deliberately **not** a 503 —
+  the process is healthy and refusing on a billing decision, and reporting
+  "unavailable" would make an orchestrator restart the pod in a loop.
+
+  The renewal *email* is sent by the control plane, not the gateway. The
+  self-hosted product has no customer email address, no SMTP credentials and no
+  outbound path but the licence refresh; giving it an SMTP client would add an
+  egress channel to every customer's network to say something we already know.
+  `EmailProvider` follows the same Protocol + registry shape as `BillingProvider`,
+  and `console` is a real provider that runs the whole pipeline before a mail
+  account exists.
 
 - **2026-08-28 — An empty allow-list can now mean deny-everything, and the flag
   that does it defaults to off (item 220).** `Policy.table_allowed` returned

@@ -43,11 +43,12 @@ below is verifiable from this repository; none of it is buried further down.
 - **Self-hosted only.** There is no hosted QueryGate, we never execute your
   queries, and offering QueryGate itself to third parties as a service is not
   something any order permits.
-- **Proprietary, sold as a paid subscription — and the subscription machinery
-  is not built yet.** The licence of record is
+- **Proprietary, sold as a paid subscription.** The licence of record is
   [`docs/legal/EULA.en.md`](docs/legal/EULA.en.md) and it still carries unfilled
-  placeholders pending counsel; the entitlement gate, control plane, and
-  activation flow are specified but unimplemented (`TODO.md` items 211-213).
+  placeholders pending counsel. The entitlement gate, the vendor control plane
+  and the renewal countdown are implemented (`TODO.md` items 211, 212, 216);
+  **self-service activation (item 213) and the customer portal (item 217) are
+  not**, so an account is opened and a deployment enrolled by hand today.
   See [Licence](#licence).
 - **Three dialects are live-verified; two are not.** Postgres, MSSQL and MySQL
   run against real servers in CI. Snowflake and BigQuery are
@@ -57,7 +58,7 @@ below is verifiable from this repository; none of it is buried further down.
 What *is* real: the structural guarantee below; live Postgres/MSSQL/MySQL tiers
 in CI; a maintained threat model; and a reconciliation between what the docs
 claim and what the code does that is itself gated in CI. The adversarial
-security suite is 751 tests (`make test-security`); the unit and integration
+security suite is 798 tests (`make test-security`); the unit and integration
 suites are 3,326 and 428. Every number there is reproducible — `poetry run
 pytest -m unit -q`, `-m "integration and not real_db"`, `make test-security` —
 and the adversarial count is itself CI-gated against the documents that quote
