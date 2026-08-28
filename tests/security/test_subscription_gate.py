@@ -28,10 +28,12 @@ from querygate.metrics import SUBSCRIPTION_WOULD_BLOCK_TOTAL
 from querygate.subscription.gate import require_active_subscription
 from querygate.subscription.models import (
     PAYLOAD_FIELDS,
+    SCHEMA_VERSION,
     EnforcementMode,
     Entitlement,
     EntitlementState,
     RefreshHealth,
+    RenewalState,
     evaluate,
 )
 from querygate.subscription.sources import RefreshPayload
@@ -42,10 +44,16 @@ pytestmark = [pytest.mark.security, pytest.mark.unit]
 NOW = datetime(2026, 6, 1, tzinfo=timezone.utc)
 
 
-def _entitlement(*, expires_in_days: int, grace_days: int = 14, enforce: bool = True):
+def _entitlement(
+    *,
+    expires_in_days: int,
+    grace_days: int = 14,
+    enforce: bool = True,
+    renewal_state: RenewalState = RenewalState.AUTO_RENEWING,
+):
     expires = NOW + timedelta(days=expires_in_days)
     return Entitlement(
-        schema_version=1,
+        schema_version=SCHEMA_VERSION,
         org_id="org",
         deployment_id="dep",
         serial=1,
@@ -53,6 +61,7 @@ def _entitlement(*, expires_in_days: int, grace_days: int = 14, enforce: bool = 
         expires_at=expires,
         grace_expires_at=expires + timedelta(days=grace_days),
         enforcement=EnforcementMode.ENFORCE if enforce else EnforcementMode.OBSERVE,
+        renewal_state=renewal_state,
         plan="team",
         max_connections=None,
         max_seats=None,

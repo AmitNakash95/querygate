@@ -14935,6 +14935,81 @@ refuses a tag while any remain, in either language. `docs/CONTAINER_IMAGE_LICENC
 to Microsoft) is still not met and needs an owner decision, and the in-image
 `THIRD_PARTY_NOTICES` file it asks for is not written.
 
+### 216. Renewal countdown and lapse UX ✅ DONE
+
+**Effort: M.** Depends on 211.
+
+**Why it matters:** a subscription that stops without warning is a support
+incident and a chargeback. The countdown is the product being honest.
+
+**What it is:**
+- **Trigger:** auto-renew off (or payment failing) **and** under 30 days
+  remaining.
+- **Surfaces:** a persistent banner in `admin_ui` and `access_ui` with a
+  **day countdown** and the exact expiry date; escalation under 7 days; an
+  email; a coarse field on the health endpoint; a Prometheus gauge; a line in
+  `querygate-license status`.
+- **Say exactly what happens at expiry**: every query and write is refused with
+  402, and audit export keeps working. Link straight to the renewal URL.
+- **The unauthenticated `/health` endpoint carries only a coarse state** — no
+  org, plan, dates, or counts. It is deliberately unauthenticated and returning
+  aggregate detail only; publishing an expiry date there tells any scanner
+  exactly when this customer's gateway stops.
+- **The same constraint binds the Prometheus gauge**, which is otherwise the
+  unguarded sibling: `metrics_require_auth` defaults to true but **false is
+  supported**, and a `days_remaining` gauge on such a deployment discloses
+  strictly more than the health field just forbade. The gauge is a coarse state
+  enum; the day countdown lives only on the authenticated UI banner, the email,
+  and `querygate-license status`.
+- The 402 body and the exception message carry a fixed operator-facing string:
+  no org id, deployment id, serial, plan, or date.
+- **Accessibility is part of this item**, not a follow-up: the banner is a live
+  region, dismissible without losing the information, and legible at the
+  contrast the rest of the UI meets.
+
+**Definition of done:** `ui-a11y-reviewer` clean; a test per surface asserting
+the countdown appears at the right threshold and the 402 message names the
+renewal URL.
+
+**What shipped, and what the audit changed.** `renewal_state` is a *signed*
+field (`auto_renewing` / `cancelling` / `payment_failing`) resolved by the
+control plane from the billing record — a deployment cannot see a billing
+subscription, and a deployment-side heuristic would warn on *our* outage.
+`renewal_notice()` is the one place a threshold is decided; the banner, the
+email, `querygate-license status` and the coarse public signal all derive from
+it. `/health` and the Prometheus gauge carry a three-value enum and no date.
+
+Five reviewers ran and returned 41 accepted findings. The ones that changed the
+design rather than the wording:
+
+- **The dedupe slot was keyed per subscription *lifetime*, not per billing
+  period.** A customer whose card failed in month 1 and again in month 7 was
+  warned once, ever — the second claim hit the unique constraint, the job
+  reported success, and nobody was told. `Notification` now carries `period_end`.
+- **There was no Alembic migration for that table.** Every control-plane test
+  builds its schema with `create_all`, so it existed in all of them and in no
+  deployment; `control-plane-notices` would have failed on its first claim.
+  `tests/test_migrations.py` now diffs models against migrations permanently.
+- **Observe mode reported `expired` while refusing nothing.** New deployments
+  start in observe by design, so the false alarm would have landed on the first
+  customers first. `renewal_notice` now branches on `would_block`.
+- **The banner was rendered while the sign-in modal was still open**, and a modal
+  `<dialog>` makes everything outside it inert — so on every path where the
+  dialog is shown, a screen reader never heard the warning. It now renders after
+  `close()`.
+- **`LAPSE_CONSEQUENCE` claimed "configuration access keeps working"** while the
+  FAQ claimed configuration was suspended. The code sides with neither exactly:
+  live schema reflection is gated, configuration and audit retrieval are not.
+  Both sentences now say that.
+- Six of the ten enforcement points originally mutation-verified turned out to
+  have tests that pass under a mutation breaking the behaviour they name — an
+  inverted `safeHref` ternary, an identity `escapeHtml`, a `/health` assertion
+  whose first branch was dead because Starlette renders JSON without spaces.
+  `tests/unit/test_renewal_banner_behaviour.py` executes the module under Node
+  for the two that no static assertion can carry.
+
+Four follow-ups were filed rather than fixed here: items 223–226.
+
 ### 220. Deny-by-default at table and column granularity: a `Policy` allow-list with no allow-all fallback ✅ DONE
 
 **Effort: M. Blocks item 215.** Owner decision, 2026-08-23.
@@ -15004,4 +15079,3 @@ operator would be relying on.
 
 Documented in `examples/policy.example.yaml` (which now sets it `true` on the
 demo connection) and in the `PRODUCT_GUIDE.md` Decision Log.
-
