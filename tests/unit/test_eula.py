@@ -543,11 +543,15 @@ _RESTRICTION_HEADING_RE = re.compile(r"^\(([a-zא-ת])\) ", re.M)
 #: The separator alternation must accept a comma AND a conjunction — the first
 #: draft allowed only one, so it silently stopped at `3(g)` and reported the
 #: English `3(h)` as missing when the document was correct and the regex was not.
-#: Must consume at least one character. A fully-optional separator matches the
-#: empty string, so `"Section 8\n\n9. Warranty disclaimer"` captured `8\n\n9` —
-#: the next heading's number read as a reference, in both directions (a spurious
-#: dangling failure, or a real reference silently absorbed).
-_SEPARATOR = r"(?:\s*,\s*|\s+)(?:(?:and|or|או)\s+|ו-)?"
+#: Must consume at least one character — a fully-optional separator matched the
+#: empty string. It must also not span a blank line: `\s+` alone still joined
+#: `"Section 8\n\n9. Warranty disclaimer"` into `8\n\n9`, reading the next
+#: heading's number as a reference, so a paragraph ending in a bare `Section 15`
+#: before a numbered line would inflate one language's Counter and fail parity
+#: spuriously. Horizontal space, or exactly one newline.
+#: Optional space, and at most one line break that is not a paragraph break.
+_GAP = r"[ \t]*(?:\n(?!\s*\n)[ \t]*)?"
+_SEPARATOR = rf"(?:{_GAP},{_GAP}|[ \t]+{_GAP}|\n(?!\s*\n)[ \t]*)(?:(?:and|or|או){_GAP}|ו-)?"
 _REFERENCE_RE = re.compile(
     r"(?:Sections?|סעיפים|סעיף)\s+((?:\d+(?:\.\d+)?(?:\([a-zא-ת]\))?)"
     rf"(?:{_SEPARATOR}\d+(?:\.\d+)?(?:\([a-zא-ת]\))?)*)"
@@ -587,13 +591,38 @@ def _references(text: str) -> list[str]:
     return found
 
 
+#: A floor under the extraction. Both guards below are "find nothing wrong"
+#: shapes, so a `_REFERENCE_RE` that silently stops matching — a dropped `סעיף`
+#: alternative, a broken group — turns *both* green: no references found means no
+#: dangling ones and two equal empty Counters. Measured 2026-08-28: 23 reference
+#: sites, 39 occurrences, 23 distinct, identical in both languages. The floor is
+#: deliberately below the real figure so ordinary editing does not trip it; it
+#: exists to catch a dead extractor, not to pin the prose.
+#:
+#: The same file already does this twice — `assert cited, "LICENSE no longer
+#: cites any EULA section"` and `assert match, "...re-pin it"`. These two guards
+#: were the only extraction-driven ones without it.
+_MINIMUM_REFERENCE_SITES = 15
+
+
+def _assert_extraction_is_alive(name: str, text: str) -> list[str]:
+    references = _references(text)
+    assert len(references) >= _MINIMUM_REFERENCE_SITES, (
+        f"{name}: only {len(references)} cross-references were extracted, against a "
+        f"floor of {_MINIMUM_REFERENCE_SITES}. Either the document lost most of its "
+        "internal pointers, or `_REFERENCE_RE` stopped matching — in which case every "
+        "guard built on it is passing vacuously."
+    )
+    return references
+
+
 def test_every_internal_cross_reference_resolves_in_both_languages():
     for name in check_eula.EULA_FILES:
         text = (check_eula.ROOT / name).read_text("utf-8")
         targets = _targets(text)
         restrictions = set(_RESTRICTION_HEADING_RE.findall(text))
         dangling = []
-        for ref in sorted(set(_references(text))):
+        for ref in sorted(set(_assert_extraction_is_alive(name, text))):
             if "(" in ref:  # `3(h)` resolves iff §3 exists and carries restriction (h)
                 number, letter = ref.split("(")
                 if number not in targets or letter.rstrip(")") not in restrictions:
@@ -618,7 +647,10 @@ def test_the_two_languages_cross_reference_the_same_clauses():
     Hebrew document pointed the enforcement obligation at commercial terms.
     """
     en, he = (
-        Counter(_normalise(r) for r in _references((check_eula.ROOT / n).read_text("utf-8")))
+        Counter(
+            _normalise(r)
+            for r in _assert_extraction_is_alive(n, (check_eula.ROOT / n).read_text("utf-8"))
+        )
         for n in check_eula.EULA_FILES
     )
     assert en == he, (
