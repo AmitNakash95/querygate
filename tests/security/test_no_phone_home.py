@@ -83,13 +83,23 @@ DISCLOSED_PAYLOAD_FIELDS = frozenset({"org_id", "deployment_id", "connection_cou
 #:
 #: **Derived, not guessed.** TODO.md item 211's package list is eight modules
 #: (`models`, `verify`, `state`, `gate`, `sources`, `manager`, `cache`, `cli`)
-#: plus `__init__.py` — `rglob("*.py")` counts that one — so nine, plus one
-#: slot of head-room. The first draft of this bound was 8, which would have
+#: plus `__init__.py` — `rglob("*.py")` counts that one — so nine, plus
+#: `bootstrap.py`, plus one slot of head-room. The first draft of this bound was 8, which would have
 #: tripped on item 211's *intended* implementation on its first commit; a
 #: tripwire that fires before any drift has occurred only teaches people to
 #: raise it. Raise this only against a written module list, never to get a
 #: suite green.
-_MAX_EXEMPT_MODULES = 10
+#:
+#: **Raised to 11 on 2026-08-28 (item 216), and the reason is the rule.** The
+#: increment is `observability.py`, which is `gate.py` *split in two* — the
+#: notice/coarse-signal/gauge read side moved out so `gate.py`'s "one function
+#: the request path calls" docstring stays true. It is not new exempt surface:
+#: `observability.py` opens no socket, names no host, and reads an in-memory
+#: verdict. The rule this establishes: **this bound moves for a split or a
+#: removal, never to admit new functionality under the exemption.** A module
+#: that would do I/O belongs behind `sources.py`, which is already exempt and
+#: already the only place a request is made.
+_MAX_EXEMPT_MODULES = 11
 
 
 def _is_subscription_module(path: Path) -> bool:
@@ -134,10 +144,20 @@ def test_no_telemetry_or_licence_server_vocabulary_in_the_shipped_source():
     )
 
 
+#: Banned outright in shipped source, with no exemption for `subscription/`.
+#:
+#: `smtplib`/`aiosmtplib` are here because three documents — `docs/INSTALL.md`,
+#: `docs/LICENSING_FAQ.md` and `docs/PRODUCT_GUIDE.md` — promise the gateway has
+#: no SMTP client and no address to send to; item 216 put the renewal email in
+#: the vendor control plane specifically so that stays true. Until this line, it
+#: was a three-document promise with nothing enforcing it.
+_BANNED_OUTBOUND_MODULES = frozenset({"requests", "urllib3", "smtplib", "aiosmtplib", "email"})
+
+
 def test_the_shipped_source_imports_no_outbound_http_client_at_module_scope():
     """The weakest of the three rules, and its limits are stated rather than implied.
 
-    It bans exactly `requests` and `urllib3` outside the `allowed` set below. It
+    It bans `_BANNED_OUTBOUND_MODULES` outside the `allowed` set below. It
     does **not** ban `httpx` — that is a real dependency of the MCP SDK and of
     JWKS verification, both of which call hosts the *operator* configures, so a
     ban would fire on legitimate code every time. The consequence worth being
@@ -169,7 +189,7 @@ def test_the_shipped_source_imports_no_outbound_http_client_at_module_scope():
             elif isinstance(node, ast.ImportFrom) and node.module:
                 names = [node.module.split(".")[0]]
             for name in names:
-                if name in {"requests", "urllib3"}:
+                if name in _BANNED_OUTBOUND_MODULES:
                     unexpected.append(f"{rel} imports {name}")
     assert not unexpected, (
         "an unexpected HTTP client is imported in shipped source; if this is legitimate, "

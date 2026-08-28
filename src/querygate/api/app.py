@@ -43,6 +43,7 @@ from querygate.execution.disclosure_budget import clear_redis_disclosure_budget_
 from querygate.execution.quota import clear_redis_quota_limiter
 from querygate.health import HealthMonitor
 from querygate.metrics import CONTENT_TYPE_LATEST, render_latest
+from querygate.subscription.observability import current_signal, publish_signal
 
 
 def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
@@ -524,7 +525,18 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
             # readiness probes, so it returns aggregate counts rather than
             # connection ids, database topology, or driver error details.
             "connections": connection_counts,
+            # A coarse enum and nothing more (TODO.md item 216): ok |
+            # renewal_due | expired. This endpoint is unauthenticated by design
+            # for orchestrator probes, so an expiry date, a day count, a plan or
+            # an org id here would tell any scanner exactly when this customer's
+            # gateway stops serving. The countdown lives on the authenticated
+            # banner, the renewal email and `querygate-license status`.
+            "subscription": current_signal().value,
         }
+        # An expired subscription is deliberately **not** a 503. The process is
+        # healthy and is refusing on a billing decision; returning "unavailable"
+        # would make an orchestrator kill and restart the pod in a loop, turning
+        # a renewal conversation into an outage that looks like a crash.
         return JSONResponse(
             content=body,
             status_code=(
@@ -537,12 +549,14 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
         @application.get("/metrics", tags=["health"])
         async def metrics(principal: Principal = Depends(principal_dependency)) -> Response:
             require_scope(principal, ADMIN_METRICS_READ_SCOPE)
+            publish_signal()
             return Response(content=render_latest(), media_type=CONTENT_TYPE_LATEST)
 
     else:
 
         @application.get("/metrics", tags=["health"])
         async def metrics_unauthenticated() -> Response:
+            publish_signal()
             return Response(content=render_latest(), media_type=CONTENT_TYPE_LATEST)
 
     return application

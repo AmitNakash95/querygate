@@ -170,5 +170,34 @@ you enable it:
 - **New deployments are issued in `observe` mode**, so the gate runs and counts
   but refuses nothing until the control plane says otherwise.
 
+### Renewal warnings
+
+You will not be surprised by an expiry. When a subscription is set not to renew —
+cancelled, or with a payment that failed — and under 30 days remain, three things
+happen:
+
+- a **persistent banner** appears in both `/admin` and `/access`, with the day
+  count and the exact date, escalating under 7 days. Anyone with any credential
+  sees it, including analysts with no admin scope: they are the ones whose
+  queries stop.
+- `querygate-license status` carries the same countdown, from the same function,
+  so the number in a support ticket is the number the operator saw.
+- `/health` always carries `"subscription"`, which moves from `"ok"` to
+  `"renewal_due"` and then `"expired"`; `querygate_subscription_signal{state=...}`
+  carries the same three values.
+
+**Those last two carry no date and no day count, on purpose.** `/health` is
+unauthenticated for readiness probes and `/metrics` may be configured
+unauthenticated, and a countdown on either would tell anyone who can reach the
+port when this gateway stops serving.
+
+An expired subscription is **not** reported as unhealthy. The process is fine and
+is refusing on a billing decision; a 503 would make Kubernetes restart the pod in
+a loop.
+
+The renewal email comes from the licence service, not from your deployment —
+QueryGate has no SMTP client and no address to send to, and adding one would put
+an outbound mail path inside your network.
+
 See [`LICENSING_FAQ.md`](LICENSING_FAQ.md) for what is transmitted (four fields)
 and what never is.

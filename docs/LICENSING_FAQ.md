@@ -7,14 +7,16 @@
 > lawyer and still carries unfilled placeholders. Where this page and the EULA
 > ever disagree, **the EULA governs**.
 
-> **⚠️ What is shipping, and what is decided but not yet built.** QueryGate the
-> gateway ships today. **The subscription mechanics described on this page — the
-> entitlement, the renewal countdown, the refusal after lapse, the four-field
-> licence call — are specified and decided, but not yet implemented** (TODO.md
-> items 211–213). This page describes the terms you will be buying under. It is
-> written ahead of the code deliberately, because the previous version of this
-> page promised the exact opposite and that promise was the thing that had to go
-> first. Nothing here is a description of code that exists today.
+> **⚠️ What is shipping, and what is not.** QueryGate the gateway ships today,
+> and so do the subscription mechanics this page describes: the entitlement and
+> its offline verification, the renewal countdown, the refusal after lapse, and
+> the four-field licence call are all implemented and tested (TODO.md items 211,
+> 212, 215 and 216). **What is not built is self-service activation** — enrolling
+> a deployment through a signed-in browser flow (item 213) — **and the customer
+> portal** (item 217): signup, checkout and downloads. Until those exist, an
+> account is opened and a deployment enrolled by hand. This page is otherwise a
+> description of code that exists; the earlier version of this banner said the
+> reverse and had gone stale.
 
 ## Is QueryGate open source?
 
@@ -61,17 +63,41 @@ stops doing its main job".
 | State | What happens |
 |---|---|
 | Paid and renewing | Nothing. |
-| Auto-renew off, under 30 days left | A persistent countdown banner in the admin and access UIs, an email, a field on the health endpoint, and a metric — naming the exact date and exactly what will happen. |
-| Term expired, inside the grace window | **Everything keeps working.** Warnings escalate; health reports `degraded`. |
-| Past the term *and* the grace window | **Every governed query, every governed write, and every live schema reflection is refused** with HTTP 402 and a message naming the renewal route. |
+| Auto-renew off (or a failed payment), under 30 days left | A persistent countdown banner in the admin and access UIs, an email from the licence service, a `querygate-license status` line, and `"subscription": "renewal_due"` on `/health` plus the matching metric. The banner, the email and the CLI name the exact date; **the health field and the metric deliberately do not** — see below. |
+| Term expired, inside the grace window | **Everything keeps working.** The banner escalates to critical — `expired` is the more urgent level and is reserved for a term that is actually being refused; `/health` still reports `renewal_due`. |
+| Past the term *and* the grace window | **Every governed query, every governed write, and every live schema reflection is refused** with HTTP 402 over REST, and the `SUBSCRIPTION_EXPIRED` error code over MCP (JSON-RPC has no HTTP status), each naming the renewal route. `/health` reports `"subscription": "expired"` — and still returns 200, because the process is healthy and refusing on a billing decision; a 503 would make an orchestrator restart it in a loop. |
+
+**Why the health endpoint and the metric say less than the banner.** `/health`
+is unauthenticated by design, for orchestrator readiness probes, and `/metrics`
+is authenticated only by default — `metrics_require_auth=false` is a supported
+configuration. Both are therefore treated as public, and both carry a
+three-value subscription state (`ok` / `renewal_due` / `expired`) and, on the
+subscription, nothing else: no org, no plan, no dates, no counts. An expiry date there would tell anyone who can
+reach the port the day this customer's gateway stops serving. The day countdown
+lives on the authenticated banner, the renewal email, and
+`querygate-license status`. Grace is not published as its own state for the same
+reason — the operator action is identical to any other renewal warning, and the
+distinction is a commercial fact about the customer rather than an operational
+one.
+
+**The renewal email comes from the licence service, not from your deployment.**
+QueryGate has no customer email address and no SMTP credentials, and the licence
+refresh is its only outbound call **to us**. (It does make outbound calls you
+configure — your IdP for JWKS and OIDC, your secret store, your S3 audit
+archive; those are yours, and `docs/SECURITY_POSTURE.md` lists them.) Giving the gateway a mail
+client so it could warn its own operator would add an egress channel inside your
+network to deliver a message we can already send from ours.
 
 **What keeps working even then**, because you may need it precisely when you are
 in a billing dispute (EULA §15.2): the health and metrics endpoints, the licence
 status view, and **retrieval and integrity verification of your own audit
-records**. Administrative and configuration functions that read live database
-schema, test a database connection, or change enforcement scope are suspended
-along with everything else — a lapsed deployment is not a place to widen a
-policy. Your audit records are yours — the EULA grants a
+records**. **Reading live database schema through the gateway** is suspended along with
+queries and writes — `list_tables`, `describe_table` and catalog search all
+reflect against your database, and that is the funnel that stops. Configuration
+reads and writes, connection tests, and audit retrieval are **not** gated: a
+customer in a billing dispute must be able to retrieve their records and roll
+back a policy, and the code reflects that rather than the stricter sentence this
+paragraph used to carry. Your audit records are yours — the EULA grants a
 **perpetual, irrevocable licence** to export and verify them that survives
 termination even for breach (§18). A product that held your compliance records
 hostage would be indefensible in the regulated sectors that need this most.
@@ -139,13 +165,12 @@ every key in one must be a disclosed field or an HTTP header. Both spellings
 count — `{**payload, "hostname": h}` and `dict(**payload, hostname=h)` are the
 same thing to the wire and to this contract.
 
-**Two honest limits.** First, the package does not exist yet, so on today's tree
-the contract has no subject; every rule in it is nonetheless executed on each run
-against planted source attempting the bypass, so what is waiting on the
-subscription work is the subject, not the guard. Second, this is a static check
+**One honest limit.** This is a static check
 on mappings: a body built from a typed model with a fifth attribute would pass
-it, and catching that is the job of a runtime assertion on the real request body,
-which the subscription work owes. Run
+it, and catching that is the job of a runtime assertion on the real request body.
+The contract now has a real subject — `src/querygate/subscription/` exists and
+`test_the_live_subscription_package_satisfies_the_contract` runs every rule
+against it, not only against planted source. Run
 `grep -rniE '\bquerygate\.(com|io|dev|net|org|ai|sh|app|cloud)\b' src/` yourself — it is a
 one-line check and it is meant to be run. (The word boundaries matter: without
 them the pattern also matches `querygate.compiler`, and you would get eight

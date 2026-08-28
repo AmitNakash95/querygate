@@ -245,6 +245,10 @@ order-of-magnitude, not commitments.
 | 218 | Superseded by the Apache-2.0 open-core decision (see item 210) | — | 215 |
 | 219 | Pre-launch codebase cleanup pass — `repo-audit`, `dep-audit`, `test-gap`, `claim-verify`, `security-invariant-check`; delete BSL dead code; close open defects 192 and 194; full CI matrix green | L | 210 |
 | 222 | The product-guide HTML generator emits a document fragment — no doctype, `lang`, `charset` or viewport meta, so the generated customer-facing page fails WCAG 3.1.1 and its own mobile breakpoint never fires; plus a missing skip link, a split Decision Log list, and the phone-home scan not covering the two shipped `.js` files (load-bearing at item 216) | S | — |
+| 223 | Moot after the Apache-2.0 decision (see item 210) | — | 216 |
+| 224 | Bring the pre-existing console surfaces up to the renewal banner's accessibility bar — `#global-banner` is a `hidden` `role="status"` element in both consoles, and neither isolates bidirectional text in database-supplied identifiers | M | 216 |
+| 225 | Moot after the Apache-2.0 decision (see item 210) | — | 216 |
+| 226 | Moot after the Apache-2.0 decision (see item 210) | — | 212 |
 | 221 | Move validator bodies out of the model classes into compilable sibling modules — 30 validators / 602 lines of enforcement logic (join form, window scope, CTE names, set ops, credential shape) currently ship readable because a module defining `BaseModel` cannot be Cython-compiled | M | 214 |
 | 220 | ✅ Deny-by-default at table and column granularity: a `Policy` allow-list with no allow-all fallback, so an empty `allowed_tables` denies instead of allowing. Opt-in (default off) so no existing deployment changes behaviour; the starter policy turns it on | M | — |
 
@@ -3980,3 +3984,47 @@ viewport; `make product-guide-html` regenerated and
 `test_product_guide_html_freshness.py` green; a skip link; the Decision Log a
 single list; the phone-home scan covering `.js`; the four smaller items above
 either fixed or explicitly declined in this item's body with a reason.
+
+### 223. Background catalog refresh vs. the (removed) subscription gate — MOOT
+
+Was a design question about a subscription-lapse behaviour that no longer exists (see item 210). Moot; not part of this distribution.
+
+
+### 224. Bring the pre-existing console surfaces up to the banner's accessibility bar
+
+**Effort: M.** Both findings are `ui-a11y-reviewer` pre-existing observations
+from item 216's audit, filed rather than fixed there because they change surfaces
+item 216 did not touch and both have their own tests to update.
+
+**Why it matters:** item 216's renewal banner was built to avoid two defects that
+the surfaces beside it still have.
+
+- **`#global-banner` is a `hidden` `role="status"` element** in both
+  `admin_ui/index.html` and `access_ui/index.html`, and `setBanner()` writes
+  `textContent` and *then* clears `hidden` — so the text is written into a
+  `display: none` region and announcement is unreliable across assistive tech.
+  This is the exact anti-pattern `tests/unit/test_renewal_banner_ui.py`'s
+  docstring names; the fix is the same never-hidden wrapper the renewal banner
+  now uses.
+- **No bidirectional-text isolation anywhere in either console.** No `dir="auto"`,
+  `<bdi>`, `unicode-bidi` or U+2068 appears in `admin_ui/` or `access_ui/`.
+  Database- and operator-sourced identifiers are escaped but never isolated:
+  `access_ui/app.js` renders `${connection}.${table}.${column}` into one
+  `<strong>`, and the `.` separators are neutral characters — so a table named
+  with RTL characters visually reorders and the identifier a user reads is not
+  the identifier the policy names. That is a policy-comprehension problem, not a
+  cosmetic one.
+
+**Definition of done:** `ui-a11y-reviewer` clean on both surfaces; a test that
+the global banner's live region is never the element that gets hidden; a test
+that every rendered identifier composed of database-supplied parts is isolated.
+
+### 225. Entitlement schema-version compatibility — MOOT
+
+Was a design question about the (removed) entitlement mechanism (see items 210-212). Moot; not part of this distribution.
+
+
+### 226. Registry-construction cleanup in the (removed) control-plane billing module — MOOT
+
+Was a cleanup item for code that lived in the private control-plane service (see item 212). Not part of this distribution.
+

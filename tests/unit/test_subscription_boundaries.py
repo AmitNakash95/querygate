@@ -53,7 +53,11 @@ _SUBSCRIPTION_MAY_IMPORT = {"subscription", "core", "metrics", "connections", "i
 #: read-only status accessor item 216 renders.
 _ALLOWED_INBOUND = {
     "execution": {"gate"},
-    "api": {"bootstrap", "gate", "manager"},
+    # `observability` is the operator-facing read side (the notice, the coarse
+    # signal, the gauge); `models` is value types only. Both are listed
+    # explicitly rather than widened to the package, so a future edge still has
+    # to be argued for here.
+    "api": {"bootstrap", "gate", "manager", "models", "observability"},
     "mcp": {"gate"},
 }
 

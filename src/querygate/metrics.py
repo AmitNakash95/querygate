@@ -118,6 +118,27 @@ SUBSCRIPTION_WOULD_BLOCK_TOTAL = Counter(
     registry=REGISTRY,
 )
 
+SUBSCRIPTION_SIGNAL = Gauge(
+    "querygate_subscription_signal",
+    "Coarse subscription state (TODO.md item 216), one series per state with "
+    "exactly one set to 1 — the standard Prometheus enum-gauge shape, so "
+    "`max_over_time` and alerting work without string comparison. state: ok | "
+    "renewal_due | expired. **Deliberately carries no day count and no expiry "
+    "date.** metrics_require_auth defaults to true but false is a supported "
+    "configuration, so this endpoint is treated as public: a days_remaining "
+    "gauge on such a deployment would tell any scanner exactly when this "
+    "customer's gateway stops serving. The countdown lives on the "
+    "authenticated banner, the renewal email, and `querygate-license status`. "
+    "Grace collapses into renewal_due for the same reason — the operator "
+    "action is identical and the distinction is a commercial fact about the "
+    "customer, not an operational one.\n\n"
+    "Set by `subscription.gate.publish_signal`, not from here: the label "
+    "vocabulary is `SubscriptionSignal` and `metrics` must not import "
+    "`subscription/` — see tests/unit/test_subscription_boundaries.py.",
+    ["state"],
+    registry=REGISTRY,
+)
+
 QUERY_QUOTA_REJECTIONS_TOTAL = Counter(
     "querygate_query_quota_rejections_total",
     "Execution attempts refused before running by a per-principal quota "
@@ -396,13 +417,14 @@ PERSONAL_DENIALS_RATE_LIMITED_TOTAL = Counter(
 
 
 def reset_subscription_metrics() -> None:
-    """Clear the observe-mode counter between tests.
+    """Clear the observe-mode counter and the state gauge between tests.
 
     The collector lives in the process-global `REGISTRY`, which `tests/conftest.py`
     resets nothing else in — so without this, any absolute assertion on the
     counter is order-dependent and passes or fails on which tests ran first.
     """
     SUBSCRIPTION_WOULD_BLOCK_TOTAL.clear()
+    SUBSCRIPTION_SIGNAL.clear()
 
 
 def record_subscription_would_block(funnel: str) -> None:

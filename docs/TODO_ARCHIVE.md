@@ -14715,6 +14715,11 @@ ceasing to thread the config value through.
 Retired the proprietary/BSL licensing draft in favor of Apache-2.0. See LICENSE and CLAUDE.md's North Star section.
 
 
+### 216. Renewal countdown and lapse UX — REMOVED
+
+Built as part of the (reversed) subscription model (see item 210). Not part of this distribution.
+
+
 ### 220. Deny-by-default at table and column granularity: a `Policy` allow-list with no allow-all fallback ✅ DONE
 
 **Effort: M. Blocks item 215.** Owner decision, 2026-08-23.
@@ -14784,4 +14789,3 @@ operator would be relying on.
 
 Documented in `examples/policy.example.yaml` (which now sets it `true` on the
 demo connection) and in the `PRODUCT_GUIDE.md` Decision Log.
-

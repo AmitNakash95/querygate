@@ -977,8 +977,9 @@ already referenced (TODO item 45 phase 2).
 #### Admin connection-status API
 
 The public `GET /health` returns only aggregate healthy/unhealthy/unknown
-counts, so it can't disclose database topology to an unauthenticated
-orchestrator probe. Administrators still need to know *which* connection is
+counts, plus a three-value `subscription` enum (item 216: `ok` / `renewal_due` /
+`expired` — no date, no day count, no identifier), so it can't disclose database
+topology or a lapse date to an unauthenticated orchestrator probe. Administrators still need to know *which* connection is
 failing and since when — without reading process logs or seeing a raw driver
 error (which can embed the host, port, database, or username). `GET
 /api/v1/admin/connections`, gated by a dedicated `admin:connections:read`

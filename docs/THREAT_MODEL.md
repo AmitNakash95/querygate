@@ -292,6 +292,35 @@ defaults.
 
 ## 8. Residual risks and explicit non-goals
 
+- **Coarse subscription state on unauthenticated surfaces (item 216):**
+  `/health` is unauthenticated by design for orchestrator readiness probes, and
+  `/metrics` is authenticated only by default — `metrics_require_auth=false` is
+  supported. Both publish a three-value `SubscriptionSignal` (`ok` /
+  `renewal_due` / `expired`) and nothing else: no org id, deployment id, serial,
+  plan, expiry date or day count, pinned by an allow-list assertion over the
+  whole `/health` body and an absence assertion over the metric samples. The
+  residual is what the coarse value itself implies. For an `auto_renewing`
+  subscription — the healthy majority — `renewal_due` first appears only once the
+  paid term has elapsed, which the published 14-day grace bounds to a **≤14-day**
+  window before the gateway starts refusing; and `expired` discloses to an
+  unauthenticated caller that the org has lapsed. Exploitability is trivial (one
+  GET); impact is timing and pretext, not access — a caller learns *when*
+  service stops, never any identifier, and never gains a query path. Accepted
+  rather than removed because an operator's readiness probe is the one place
+  this signal is actually actionable; a deployment that objects can put `/health`
+  behind its ingress. Not to be widened: a `days_remaining` gauge here would
+  publish the exact date, which is the disclosure this design exists to refuse.
+- **Background catalog refresh is not subscription-gated (item 216 / TODO item
+  223):** `check_schema_discovery_funnel` covers the three *caller-initiated*
+  reflection paths, so an expired deployment enumerates nothing for a caller.
+  `CatalogRefreshMonitor` runs on a timer under a `system:` principal and is
+  deliberately excluded: a 402 has no caller to reach there, and gating it would
+  make a lapsed deployment's refresh loop either raise every tick or stop
+  silently. The residual is that a lapsed deployment keeps reflecting its own
+  schema into its own catalog file — no row leaves, nothing is disclosed to any
+  party, and the operator can disable refresh. Recorded because
+  `subscription_gate.py`'s docstring previously claimed the opposite.
+
 - **Authorized inference:** QueryGate blocks use of denied columns, but a caller
   authorized for an aggregate can still infer facts from permitted counts and
   narrow filters. Two opt-in, off-by-default controls bound this and neither

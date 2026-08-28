@@ -13,12 +13,22 @@ funnels must not drift apart in what they check.
    and ``WritePreviewService`` are separate classes and ``_execute_many_atomically``
    opens its own ``session_scope``, so a gate only in ``StructuredQueryService``
    would leave every governed INSERT/UPDATE/DELETE running.
-3. **Schema discovery** — ``list_tables``, ``describe_table``, ``search_catalog``
-   and the background catalog refresh reach the live database through reflection
-   and pass through *neither* other funnel: ``_validate_and_compile``'s comment
-   is precise that it covers the ways an *AST* reaches a database, and these
-   carry no AST. They are product, not diagnostics, so an expired deployment
-   enumerates nothing.
+3. **Caller-initiated schema discovery** — ``list_tables``, ``describe_table``
+   and ``search_catalog`` reach the live database through reflection and pass
+   through *neither* other funnel: ``_validate_and_compile``'s comment is precise
+   that it covers the ways an *AST* reaches a database, and these carry no AST.
+   They are product, not diagnostics, so an expired deployment enumerates
+   nothing **for a caller**.
+
+   The **background catalog refresh** (``CatalogRefreshMonitor``) is
+   deliberately *not* gated here, and this docstring used to claim it was. It
+   runs on a timer with a ``system:`` principal, so a 402 has no caller to
+   reach; gating it would mean a lapsed deployment's refresh loop either raises
+   on every tick or silently stops, and neither is a state an operator can read
+   off a metric. The residual — a lapsed deployment keeps reflecting its own
+   schema into its own catalog file, disclosing nothing to anyone — is recorded
+   in ``docs/THREAT_MODEL.md`` and tracked as TODO.md item 223 rather than left
+   as a sentence that is not true.
 
 The gate is deliberately **not** in ``validation/write_policy_validation``. That
 is a pure function of (AST, Policy) with no I/O and no process state; gating
