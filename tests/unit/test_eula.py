@@ -14,6 +14,7 @@ nobody can prove works.
 from __future__ import annotations
 
 import re
+from collections import Counter
 
 import pytest
 
@@ -516,3 +517,154 @@ def test_every_eula_section_the_licence_notice_cites_exists_with_that_title():
     referenced = {int(n) for group in bare for n in re.findall(r"\d+", group)}
     missing = sorted(n for n in referenced if n not in headings)
     assert not missing, f"LICENSE cites EULA section(s) that do not exist: {missing}"
+
+
+# --- internal cross-references must resolve, in both languages ----------------
+#
+# The EULA is heavily self-referential — §7.3 points at §3(b)/(c)/(g)/(h), §7.5
+# excepts §18, §14.4 points at §7.4 and §15, §17.2 points at §15.4 — and item 210
+# renumbered the old §14 to §19 while inserting six new sections in the middle.
+# That combination is exactly how a licence acquires a pointer to a clause that
+# no longer says what the pointer claims, and nothing checked it: the parity test
+# compares section *numbers* between the languages, and the LICENSE test resolves
+# only the references that leave the EULA.
+#
+# A dangling internal reference in a licence of record is not cosmetic. §7.5's
+# survival list and §7.3's list of non-curable breaches are both enumerations of
+# section numbers; a wrong number in either changes which clauses outlive
+# termination and which breaches end the agreement with no cure period.
+
+_SECTION_HEADING_RE = re.compile(r"^## (\d+)\. ", re.M)
+_SUBCLAUSE_HEADING_RE = re.compile(r"^\*\*(\d+\.\d+(?:\([a-zא-ת]\))?) ", re.M)
+_RESTRICTION_HEADING_RE = re.compile(r"^\(([a-zא-ת])\) ", re.M)
+
+#: A reference list: `Section 15`, `Sections 8 and 9`, `Section 7.2 or 7.3`,
+#: `Section 3(b), 3(c), 3(g), or 3(h)`, `סעיפים 3, 4, 5 ... ו-18`.
+#: The separator alternation must accept a comma AND a conjunction — the first
+#: draft allowed only one, so it silently stopped at `3(g)` and reported the
+#: English `3(h)` as missing when the document was correct and the regex was not.
+#: Must consume at least one character. A fully-optional separator matches the
+#: empty string, so `"Section 8\n\n9. Warranty disclaimer"` captured `8\n\n9` —
+#: the next heading's number read as a reference, in both directions (a spurious
+#: dangling failure, or a real reference silently absorbed).
+_SEPARATOR = r"(?:\s*,\s*|\s+)(?:(?:and|or|או)\s+|ו-)?"
+_REFERENCE_RE = re.compile(
+    r"(?:Sections?|סעיפים|סעיף)\s+((?:\d+(?:\.\d+)?(?:\([a-zא-ת]\))?)"
+    rf"(?:{_SEPARATOR}\d+(?:\.\d+)?(?:\([a-zא-ת]\))?)*)"
+)
+
+#: Hebrew legal enumeration runs א ב ג ד ה ו ז ח, matching a b c d e f g h. The
+#: two languages therefore label the SAME restriction differently, so raw labels
+#: cannot be compared across them.
+_HEBREW_ENUMERATION = "אבגדהוזחטי"
+
+
+def _normalise(ref: str) -> str:
+    """Fold a Hebrew restriction letter onto its English counterpart."""
+    if "(" not in ref:
+        return ref
+    number, letter = ref.split("(")
+    letter = letter.rstrip(")")
+    index = _HEBREW_ENUMERATION.find(letter)
+    if index >= 0:
+        letter = chr(ord("a") + index)
+    return f"{number}({letter})"
+
+
+_ONE_REFERENCE_RE = re.compile(r"\d+(?:\.\d+)?(?:\([a-zא-ת]\))?")
+
+
+def _targets(text: str) -> set[str]:
+    """Every label something in the document can legitimately point at."""
+    return set(_SECTION_HEADING_RE.findall(text)) | set(_SUBCLAUSE_HEADING_RE.findall(text))
+
+
+def _references(text: str) -> list[str]:
+    """Every reference occurrence, **with repeats** — see the parity test."""
+    found: list[str] = []
+    for group in _REFERENCE_RE.findall(text):
+        found.extend(_ONE_REFERENCE_RE.findall(group))
+    return found
+
+
+def test_every_internal_cross_reference_resolves_in_both_languages():
+    for name in check_eula.EULA_FILES:
+        text = (check_eula.ROOT / name).read_text("utf-8")
+        targets = _targets(text)
+        restrictions = set(_RESTRICTION_HEADING_RE.findall(text))
+        dangling = []
+        for ref in sorted(set(_references(text))):
+            if "(" in ref:  # `3(h)` resolves iff §3 exists and carries restriction (h)
+                number, letter = ref.split("(")
+                if number not in targets or letter.rstrip(")") not in restrictions:
+                    dangling.append(ref)
+            elif ref not in targets:
+                dangling.append(ref)
+        assert not dangling, (
+            f"{name} points at section(s) that do not exist: {dangling}. "
+            f"Present: {sorted(targets)}"
+        )
+
+
+def test_the_two_languages_cross_reference_the_same_clauses():
+    """A pointer present in one language and not the other means the documents
+    impose different obligations — the asymmetry §12 makes expensive, since the
+    Hebrew version is what an Israeli customer reads before signing.
+
+    A **Counter**, not a set. Comparing sets could not see a pointer *moved*
+    between two clauses that both already appear elsewhere: retargeting one
+    Hebrew `סעיף 15` (Technical Enforcement) to `סעיף 13` (Order / Commercial
+    Terms) left the union unchanged, so every guard stayed green while the
+    Hebrew document pointed the enforcement obligation at commercial terms.
+    """
+    en, he = (
+        Counter(_normalise(r) for r in _references((check_eula.ROOT / n).read_text("utf-8")))
+        for n in check_eula.EULA_FILES
+    )
+    assert en == he, (
+        "the two languages reference different clauses, or reference them a "
+        f"different number of times; English−Hebrew: {sorted((en - he).items())}; "
+        f"Hebrew−English: {sorted((he - en).items())}"
+    )
+
+
+#: §7.5's survival enumeration, in full. Pinned as an exact set rather than a
+#: subset: the first version required only {3, 4, 5, 15, 16, 18}, so dropping §8
+#: (warranty disclaimer) or §9 (liability cap) — the two clauses a disputing
+#: customer reaches first — passed clean.
+_SURVIVING_SECTIONS = frozenset({3, 4, 5, 8, 9, 11, 12, 15, 16, 18})
+
+#: The survival sentence in each language. Hebrew is checked too because the
+#: first version read only the English file, and the Hebrew list could lose §16
+#: — the transmission disclosure — with the whole suite green. That is exactly
+#: the failure class `test_no_phone_home.py` documents for `seat_count`.
+#:
+#: `re.S`-tolerant: the list wraps across a line in the real document, and a
+#: guard that only matches the unwrapped form fails on a reflow that changed no
+#: meaning. A *reword* makes the match fail loudly, which is the right direction.
+_SURVIVAL_PATTERNS = {
+    "docs/legal/EULA.en.md": r"Sections? ([\d,\s]+(?:and\s+)?\d+)\s+survive termination",
+    "docs/legal/EULA.he.md": r"סעיפים ([\d,\s]+(?:ו-)?\d+)\s+יוסיפו לעמוד בתוקפם",
+}
+
+
+def test_the_survival_list_names_the_same_clauses_in_both_languages():
+    """§7.5 enumerates what survives termination. A wrong number there silently
+    changes which obligations outlive the agreement — and a wrong number in only
+    one language changes them for only some customers."""
+    for name, pattern in _SURVIVAL_PATTERNS.items():
+        text = (check_eula.ROOT / name).read_text("utf-8")
+        match = re.search(pattern, text, re.S)
+        assert match, f"{name}: §7.5's survival list is not in the expected form — re-pin it"
+        named = {int(n) for n in re.findall(r"\d+", match.group(1))}
+        sections = {int(n) for n in _SECTION_HEADING_RE.findall(text)}
+        assert (
+            named <= sections
+        ), f"{name} says these survive but they do not exist: {sorted(named - sections)}"
+        assert named == _SURVIVING_SECTIONS, (
+            f"{name}'s survival list is {sorted(named)}, expected "
+            f"{sorted(_SURVIVING_SECTIONS)}. Confidentiality, ownership, technical "
+            "enforcement, the transmission disclosure, the warranty disclaimer, the "
+            "liability cap and the post-termination audit licence all have to outlive "
+            "the agreement — changing this set is a deliberate legal decision."
+        )

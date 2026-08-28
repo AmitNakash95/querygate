@@ -14837,10 +14837,26 @@ list and that **partly satisfies** Microsoft ODBC requirement §2(b)(ii)
 
 `tests/security/test_no_phone_home.py` was **narrowed, not deleted**: the vendor
 hostname and licence-vocabulary bans now exempt exactly `src/querygate/
-subscription/`, the exemption's width is bounded, and the package's outbound
-**declared** payload constant is pinned to the four disclosed fields — a
-declaration, not the wire, and item 211's DoD owns the request-body assertion.
-`docs/LICENSING_FAQ.md` was
+subscription/`, the exemption's width is bounded, and that package is held to a
+four-rule payload contract: one literal declaration matching the EULA, no `**`
+spread into a body-bound mapping, no mapping literal passed as the body, and no
+key in one that is neither disclosed nor an HTTP header. It took three passes to
+get right, and each failure is worth recording because they are the same mistake
+in different clothes. The first draft checked only the *declaration*, which a
+reviewer showed a client could satisfy while posting
+`{**payload, "hostname": ...}`. The second caught that but keyed on `ast.Dict`
+alone, so re-spelling it `dict(**payload, hostname=h)` walked past all four rules
+— measured, not theorised. The second also put `url`, `data`, `content` and
+`params` in the *key* allowlist when they are *argument* names, so
+`{"org_id": o, "url": dsn}` passed clean, and applied the key rules to every dict
+in the package, which would have turned item 211's first commit red over a
+`cache.py` entry. The third recognises both spellings, scopes the rules to
+mappings that can reach the wire, and narrows the allowlist to four header names.
+Because the package does not exist yet the contract is a pure function over a
+directory, and every rule runs on each pass against planted bypasses — the
+*subject* is deferred to item 211, the *guard* is not. What it does **not** cover,
+stated rather than implied: a body built from a typed model with an extra
+attribute, which is the runtime assertion item 211 owes. `docs/LICENSING_FAQ.md` was
 rewritten end to end. Five cancelled-plan documents plus `.github/cla/` carry
 whole-document superseded/retired banners, recorded as whole-file exemptions in
 `scripts/claim_drift_sites.py` and kept honest by

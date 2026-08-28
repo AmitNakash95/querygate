@@ -131,12 +131,21 @@ your databases. **There is no transmission path for any of it in the software.**
 [`tests/security/test_no_phone_home.py`](../tests/security/test_no_phone_home.py)
 fails the build if a QueryGate-controlled hostname or a licence-server,
 activation, or telemetry endpoint appears anywhere in shipped source **outside
-the single `src/querygate/subscription/` package** — and it separately pins that
-package's **declared** payload constant to exactly the four fields above, so
-adding a fifth is a disclosure change before it is a code change. Two honest
-limits on that second half: it checks the declaration, not the request body (the
-wire assertion belongs to the subscription work itself), and it does not run at
-all until that package exists, which it does not yet. Run
+the single `src/querygate/subscription/` package** — and it separately enforces a
+four-rule contract on that package: the field list must be declared once as a
+literal and match this page; no mapping reaching a request body may spread
+another mapping into itself; none may be written out in place as the body; and
+every key in one must be a disclosed field or an HTTP header. Both spellings
+count — `{**payload, "hostname": h}` and `dict(**payload, hostname=h)` are the
+same thing to the wire and to this contract.
+
+**Two honest limits.** First, the package does not exist yet, so on today's tree
+the contract has no subject; every rule in it is nonetheless executed on each run
+against planted source attempting the bypass, so what is waiting on the
+subscription work is the subject, not the guard. Second, this is a static check
+on mappings: a body built from a typed model with a fifth attribute would pass
+it, and catching that is the job of a runtime assertion on the real request body,
+which the subscription work owes. Run
 `grep -rniE '\bquerygate\.(com|io|dev|net|org|ai|sh|app|cloud)\b' src/` yourself — it is a
 one-line check and it is meant to be run. (The word boundaries matter: without
 them the pattern also matches `querygate.compiler`, and you would get eight
