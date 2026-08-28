@@ -3833,10 +3833,15 @@ when *we* fail, and without lying in the customer's audit ledger.
   2. The package must declare a module-level
      **`PAYLOAD_FIELDS`** literal naming every field it transmits, and it must
      equal `{"org_id", "deployment_id", "connection_count", "seat_count"}` —
-     **that guard checks the declaration, not the wire**, so this item's own DoD
-     still owes the behavioural half: a schema-level test asserting the refresh
-     request body's key set, built in the shape of
-     `test_credential_redaction.py`, not as a mock-call assertion —
+     and the package must satisfy `payload_contract_violations()` in that same
+     file — one literal declaration, no `**` spread into a dict literal, no dict
+     literal passed as `json=`/`data=`/`content=`, and no literal key outside the
+     disclosed set plus transport plumbing. **That checker is already
+     detector-tested against planted bypasses, so it holds the moment this
+     package exists.** What this item still owes is the runtime half: a
+     schema-level test asserting the actual refresh request body's key set, built
+     in the shape of `test_credential_redaction.py` rather than as a mock-call
+     assertion —
      the four fields `docs/legal/EULA.en.md` §16.1 discloses and
      `docs/business/GTM_SAAS.md` §3 publishes. A fifth field is a **disclosure
      change before it is a code change**: amend the EULA (both languages), the

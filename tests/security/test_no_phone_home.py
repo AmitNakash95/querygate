@@ -311,7 +311,7 @@ def test_the_exemption_is_path_scoped_and_not_a_pattern_hole():
     assert not _is_subscription_module(SOURCE_ROOT / "subscription_helper.py")
 
 
-def _payload_field_declarations() -> dict[str, frozenset[str]]:
+def _payload_field_declarations(package: Path = SUBSCRIPTION_PKG) -> dict[str, frozenset[str]]:
     """Every module-level `PAYLOAD_FIELDS` in the subscription package.
 
     Accepts `X = {...}`, `X: frozenset[str] = {...}` (an `ast.AnnAssign`, which
@@ -324,8 +324,8 @@ def _payload_field_declarations() -> dict[str, frozenset[str]]:
     presents as a flake rather than as the finding it is.
     """
     found: dict[str, frozenset[str]] = {}
-    for path in sorted(SUBSCRIPTION_PKG.rglob("*.py")):
-        rel = str(path.relative_to(SOURCE_ROOT))
+    for path in sorted(package.rglob("*.py")):
+        rel = str(path.relative_to(package.parent))
         # `tree.body`, NOT `ast.walk`: walk descends into functions and class
         # bodies, so a shadowing `PAYLOAD_FIELDS` inside a request builder read
         # as a module-level declaration and — being keyed by file — silently
@@ -370,6 +370,332 @@ def _payload_field_declarations() -> dict[str, frozenset[str]]:
             # entries, not one silently overwriting the other.
             found[f"{rel}:{node.lineno}"] = frozenset(literal)
     return found
+
+
+#: Header names a licence client legitimately writes as dict keys. Deliberately
+#: four: every addition widens what may sit in a body-bound mapping inside the
+#: exempt package, so an entry here is a decision, not a convenience.
+#:
+#: These are **keys**, not keyword-argument names. The first draft also listed
+#: `url`, `json`, `data`, `content`, `params` and `timeout` — which are argument
+#: names, already handled by `_BODY_KEYWORDS` — and the effect was to exempt a
+#: payload field literally called `url`, so `{"org_id": o, "url": dsn}` passed
+#: clean. A reviewer measured it.
+_NON_PAYLOAD_KEYS = frozenset({"authorization", "user-agent", "content-type", "accept"})
+
+#: Keyword arguments that carry a request body.
+_BODY_KEYWORDS = frozenset({"json", "data", "content"})
+
+
+def _is_mapping_literal(node: ast.AST) -> bool:
+    """A dict written out in place, in either spelling.
+
+    `{...}` and `dict(...)` are the same thing to a reader and to the wire, but
+    only the first is an `ast.Dict`. The first draft of this contract keyed
+    entirely on `ast.Dict`, so changing one token — `{**payload, "hostname": h}`
+    to `dict(**payload, hostname=h)` — walked past all four rules at once.
+    """
+    if isinstance(node, ast.Dict):
+        return True
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "dict"
+
+
+def _mapping_keys(node: ast.AST) -> tuple[list[str], bool, bool]:
+    """(literal keys, spreads another mapping, has an uncheckable key)."""
+    if isinstance(node, ast.Dict):
+        spread = any(key is None for key in node.keys)
+        literal = [
+            key.value
+            for key in node.keys
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        ]
+        computed = any(
+            key is not None and not (isinstance(key, ast.Constant) and isinstance(key.value, str))
+            for key in node.keys
+        )
+        return literal, spread, computed
+    # `dict(a=1, **rest)` / `dict(pairs)`
+    spread = any(kw.arg is None for kw in node.keywords)
+    literal = [kw.arg for kw in node.keywords if kw.arg is not None]
+    return literal, spread, bool(node.args)
+
+
+def _body_bound_mappings(tree: ast.Module) -> list[ast.AST]:
+    """Mapping literals that can reach the wire in this module.
+
+    Scoped deliberately. Applying the key rules to *every* dict in the package
+    would fire on `cache.py`'s entries and a Pydantic `model_config`, so item
+    211's first commit would go red for reasons that have nothing to do with
+    disclosure — and the only relief would be widening the allowlist, which is
+    how a bound becomes a rubber stamp. Two shapes reach the wire: a literal
+    passed straight to a body keyword, and a literal assigned to a name that is
+    passed to one somewhere in the same module.
+    """
+    bound: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            for keyword in node.keywords:
+                if keyword.arg in _BODY_KEYWORDS and isinstance(keyword.value, ast.Name):
+                    bound.add(keyword.value.id)
+
+    mappings: list[ast.AST] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            for keyword in node.keywords:
+                if keyword.arg in _BODY_KEYWORDS and _is_mapping_literal(keyword.value):
+                    mappings.append(keyword.value)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if (
+                node.value is not None
+                and _is_mapping_literal(node.value)
+                and any(isinstance(t, ast.Name) and t.id in bound for t in targets)
+            ):
+                mappings.append(node.value)
+    return mappings
+
+
+def payload_contract_violations(package: Path) -> list[str]:
+    """Static check that the subscription client cannot transmit an undisclosed field.
+
+    A pure function over a source tree, so it can be exercised against planted
+    packages today rather than waiting for item 211 to make it runnable. Four
+    rules, each closing a *named* bypass rather than a hypothetical one:
+
+    1. **`PAYLOAD_FIELDS` is declared exactly once, as a literal, equal to the
+       disclosed set.** The constant is the disclosure's counterpart in code.
+    2. **No `**` unpacking in any dict literal.** This is the bypass a reviewer
+       named against the declaration-only guard: `post(json={**payload,
+       "hostname": ...})` satisfies rule 1 completely while putting a fifth field
+       on the wire. A licence client has no legitimate use for dict-splat.
+    3. **No dict literal passed as a request body.** The body must come from the
+       declared constant or a model built from it, so that what rule 1 checks is
+       what actually goes out.
+    4. **Every string key in every dict literal is disclosed or transport
+       plumbing**, and no dict literal uses a computed key — a key that is not a
+       literal cannot be checked against the disclosure at all.
+
+    Returns a list of human-readable violations. **Empty means no *mapping
+    literal* reaching a request body carries an undisclosed field** — it does not
+    mean the package cannot transmit one. A body built from a Pydantic model or
+    a dataclass with a fifth attribute passes this cleanly, because a model field
+    is an `ast.AnnAssign` in a `ClassDef`, not a mapping. That path is the
+    runtime half, and TODO.md item 211 owns it: a schema-level assertion on the
+    real request body, in the shape of `test_credential_redaction.py`. Saying so
+    here rather than in a caveat elsewhere, because this is the sentence a
+    reviewer quotes.
+    """
+    violations: list[str] = []
+    declarations = _payload_field_declarations(package)
+
+    if not declarations:
+        violations.append(
+            "no module-level `PAYLOAD_FIELDS` is declared; the EULA discloses a fixed "
+            "list, so the code must state one that can be compared against it"
+        )
+    elif len(declarations) > 1:
+        violations.append(
+            f"PAYLOAD_FIELDS is declared {len(declarations)} times, so which one "
+            f"describes the wire is ambiguous: {sorted(declarations)}"
+        )
+    else:
+        where, declared = next(iter(declarations.items()))
+        if declared != DISCLOSED_PAYLOAD_FIELDS:
+            violations.append(
+                f"{where} declares {sorted(declared)} but the EULA discloses "
+                f"{sorted(DISCLOSED_PAYLOAD_FIELDS)}; change the disclosure first"
+            )
+
+    for path in sorted(package.rglob("*.py")):
+        rel = str(path.relative_to(package.parent))
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+
+        for mapping in _body_bound_mappings(tree):
+            literal, spread, computed = _mapping_keys(mapping)
+            if spread:
+                violations.append(
+                    f"{rel}:{mapping.lineno} spreads another mapping into a request body "
+                    "(`**`). That is exactly how an undisclosed field reaches the wire past "
+                    "a declared PAYLOAD_FIELDS; build the body from the constant."
+                )
+            if computed:
+                violations.append(
+                    f"{rel}:{mapping.lineno} builds a request body with a key that is not a "
+                    "string literal, so it cannot be checked against the disclosure at all"
+                )
+            for name in literal:
+                if name.lower() in _NON_PAYLOAD_KEYS or name in DISCLOSED_PAYLOAD_FIELDS:
+                    continue
+                violations.append(
+                    f"{rel}:{mapping.lineno} names {name!r} in a request body; it is neither "
+                    "a disclosed payload field nor a header. Putting it on the wire is a "
+                    "disclosure change (EULA §16.1) before it is a code change."
+                )
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            for keyword in node.keywords:
+                if keyword.arg in _BODY_KEYWORDS and _is_mapping_literal(keyword.value):
+                    violations.append(
+                        f"{rel}:{node.lineno} passes a mapping literal as `{keyword.arg}=`. "
+                        "The request body must be built from PAYLOAD_FIELDS so the declared "
+                        "set and the transmitted set cannot diverge."
+                    )
+    return violations
+
+
+# --- the contract's detectors, exercised against planted packages -------------
+#
+# `src/querygate/subscription/` does not exist yet, so the live check below can
+# only skip. A guard that has never executed is a guard nobody can prove works —
+# the same reasoning `test_eula.py` uses for its detector half. So the checker is
+# a pure function over a directory, and these plant each bypass in `tmp_path` and
+# require the rule to fire. When item 211 lands, the guard is known-good rather
+# than never-run.
+
+_COMPLIANT = 'PAYLOAD_FIELDS = {"org_id", "deployment_id", "connection_count", "seat_count"}\n'
+
+
+def _plant(tmp_path, source: str, name: str = "client.py") -> Path:
+    package = tmp_path / "subscription"
+    package.mkdir(parents=True, exist_ok=True)
+    (package / name).write_text(source, encoding="utf-8")
+    return package
+
+
+def test_a_compliant_client_passes_the_contract(tmp_path):
+    """The positive control. Without it every detector below could be passing
+    because the checker rejects everything."""
+    source = _COMPLIANT + (
+        "\n\ndef build(org, deployment, connections, seats):\n"
+        "    return RefreshRequest(org_id=org, deployment_id=deployment,\n"
+        "                          connection_count=connections, seat_count=seats)\n"
+        "\n\nasync def refresh(client, body):\n"
+        "    return await client.post(ENTITLEMENT_URL, json=body.model_dump(),\n"
+        '                             headers={"authorization": token}, timeout=10)\n'
+    )
+    assert payload_contract_violations(_plant(tmp_path, source)) == []
+
+
+def test_the_named_bypass_is_caught(tmp_path):
+    """`post(json={**payload, "hostname": ...})` — satisfies a declared
+    PAYLOAD_FIELDS completely while putting a fifth field on the wire. This is
+    the exact hole the declaration-only guard could not see."""
+    source = _COMPLIANT + (
+        "\n\nasync def refresh(client, payload, host):\n"
+        '    return await client.post(URL, json={**payload, "hostname": host})\n'
+    )
+    problems = payload_contract_violations(_plant(tmp_path, source))
+    assert any("`**`" in p for p in problems), problems
+    assert any("mapping literal as `json=`" in p for p in problems), problems
+
+
+def test_the_same_bypass_spelled_with_dict_is_caught(tmp_path):
+    """`dict(**payload, hostname=host)` is the identical bypass with one token
+    changed. The first version of this contract keyed on `ast.Dict` alone and
+    walked straight past it — a reviewer measured zero violations."""
+    source = _COMPLIANT + (
+        "\n\nasync def refresh(client, payload, host):\n"
+        "    return await client.post(URL, json=dict(**payload, hostname=host))\n"
+    )
+    problems = payload_contract_violations(_plant(tmp_path, source))
+    assert any("`**`" in p for p in problems), problems
+    assert any("mapping literal as `json=`" in p for p in problems), problems
+
+
+def test_an_undisclosed_field_spelled_with_dict_is_caught(tmp_path):
+    source = _COMPLIANT + (
+        "\n\nasync def refresh(client, org, host):\n"
+        "    return await client.post(URL, json=dict(org_id=org, hostname=host))\n"
+    )
+    problems = payload_contract_violations(_plant(tmp_path, source))
+    assert any("'hostname'" in p and "disclosure change" in p for p in problems), problems
+
+
+def test_an_undisclosed_field_in_a_body_bound_dict_is_caught(tmp_path):
+    """The indirect shape: a module-level body assembled once, sent elsewhere."""
+    source = _COMPLIANT + (
+        "\n\nBODY = {\n"
+        '    "org_id": org,\n'
+        '    "deployment_id": deployment,\n'
+        '    "connection_count": connections,\n'
+        '    "seat_count": seats,\n'
+        '    "hostname": socket.gethostname(),\n'
+        "}\n"
+        "\n\nasync def refresh(client):\n"
+        "    return await client.post(URL, json=BODY)\n"
+    )
+    problems = payload_contract_violations(_plant(tmp_path, source))
+    assert any("'hostname'" in p and "disclosure change" in p for p in problems), problems
+
+
+def test_a_computed_body_key_is_caught(tmp_path):
+    """A key that is not a literal cannot be compared to the disclosure at all."""
+    source = _COMPLIANT + (
+        '\n\nBODY = {FIELD_NAME: value, "org_id": org}\n'
+        "\n\nasync def refresh(client):\n"
+        "    return await client.post(URL, json=BODY)\n"
+    )
+    problems = payload_contract_violations(_plant(tmp_path, source))
+    assert any("not a string literal" in p for p in problems), problems
+
+
+def test_a_dict_unrelated_to_the_wire_is_not_flagged(tmp_path):
+    """The false-positive control that keeps the bound honest.
+
+    Item 211's package holds `cache.py`, `state.py` and `models.py`; each will
+    have dict literals with nothing to do with the request body. A rule firing on
+    those would turn that item's first commit red for a reason unrelated to
+    disclosure, and the only relief would be widening the key allowlist — which
+    is how a bound becomes a rubber stamp.
+    """
+    source = _COMPLIANT + (
+        '\n\nmodel_config = {"extra": "forbid"}\n'
+        '\n\nCACHED = {"plan": plan, "expires_at": expires, "status": "active"}\n'
+        "\n\ndef merged(overrides):\n"
+        "    return {**DEFAULTS, **overrides}\n"
+    )
+    assert payload_contract_violations(_plant(tmp_path, source)) == []
+
+
+def test_a_declaration_that_disagrees_with_the_eula_is_caught(tmp_path):
+    source = 'PAYLOAD_FIELDS = {"org_id", "deployment_id", "connection_count"}\n'
+    problems = payload_contract_violations(_plant(tmp_path, source))
+    assert any("the EULA discloses" in p for p in problems), problems
+
+
+def test_a_missing_or_duplicated_declaration_is_caught(tmp_path):
+    assert any(
+        "no module-level" in p for p in payload_contract_violations(_plant(tmp_path, "X = 1\n"))
+    )
+    duplicated = _plant(tmp_path / "dup", _COMPLIANT, name="a.py")
+    (duplicated / "z.py").write_text(_COMPLIANT, encoding="utf-8")
+    assert any("declared 2 times" in p for p in payload_contract_violations(duplicated))
+
+
+def test_transport_plumbing_is_not_mistaken_for_a_payload_field(tmp_path):
+    """The false-positive control. A guard that fires on `headers` gets deleted."""
+    source = _COMPLIANT + (
+        "\n\nHEADERS = {\n"
+        '    "authorization": f"Bearer {key}",\n'
+        '    "user-agent": agent,\n'
+        '    "content-type": "application/json",\n'
+        "}\n"
+    )
+    assert payload_contract_violations(_plant(tmp_path, source)) == []
+
+
+def test_the_live_subscription_package_satisfies_the_contract():
+    """Applies the proven checker to the real package.
+
+    Skips only because item 211 has not created it. Every rule above is
+    exercised against planted sources on every run, so the skip is a missing
+    *subject*, not a missing *guard*.
+    """
+    if not SUBSCRIPTION_PKG.exists():
+        pytest.skip("item 211 has not shipped; the contract is detector-tested above")
+    assert payload_contract_violations(SUBSCRIPTION_PKG) == []
 
 
 def test_the_subscription_client_declares_only_the_disclosed_fields():
