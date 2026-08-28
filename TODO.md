@@ -239,7 +239,7 @@ order-of-magnitude, not commitments.
 | 212 | ✅ Control plane — accounts, Stripe subscriptions, KMS-signed entitlement issuance, enrolment, append-only issuance ledger, in `control-plane/` with its own lockfile and mirror CI gates | XL | — |
 | 213 | Activation — bind a deployment to a subscription via OAuth2 (Google/Microsoft) + MFA, browser and device flows, control-plane-assigned `deployment_id`, unactivated deployments inert | L | 199, 212 |
 | 214 | Single obfuscated compiled binary — Nuitka feasibility spike first (pydantic-core, SQLAlchemy dispatch, MCP annotation resolution), then reproducible build preserving cosign + SLSA provenance | XL | — |
-| 215 | One-command install and first-boot self-configuration — no operator-authored file needed to reach activation; safe-by-default starter policy; first connection added through the UI | M | 213 |
+| 215 | ✅ One-command install and first-boot self-configuration — no operator-authored file needed to reach activation; safe-by-default starter policy; first connection added through the UI | M | 213 |
 | 216 | Renewal countdown and lapse UX — banner with day countdown in both UIs under 30 days when auto-renew is off, email, coarse health field, metric, CLI line; accessible by construction | M | 211 |
 | 217 | Customer portal — OAuth2 signup, Stripe Checkout, subscription and deployment management, cancellation flow stating the no-refund terms before confirming, downloads and docs | XL | 212 |
 | 218 | Setup guides and quickstart docs for the SaaS motion — one-screen quickstart, per-target deploy guides, air-gapped guide, troubleshooting, rewritten `CUSTOMER_README.md` and landing/sales copy | M | 215 |
@@ -4169,7 +4169,7 @@ would invalidate the packaging plan.
 `make release-smoke`; a documented support-debugging procedure exists; the spike
 report is committed even if the answer is no.
 
-### 215. One-command install and first-boot self-configuration
+### 215. One-command install and first-boot self-configuration ✅ DONE (phase 1)
 
 **Effort: M.**
 
@@ -4234,6 +4234,35 @@ env configuration before it does anything.
   gateway that "never writes anything". It stays that way and the setup guide
   links to it as the last step; first-boot self-configuration is new server-side
   code.
+
+**Phase 1 shipped 2026-08-28** — the security fix, first boot, the starter
+policy and `docs/INSTALL.md`:
+
+- `HARDENED_IMAGE=1` in the Dockerfile removes the anonymous-auth bypass from the
+  shipped image, and `debug`/`openapi_url`/`docs_url` are off in it regardless of
+  environment. Deliberately a **separate switch from `ENVIRONMENT`**, so an
+  operator setting `ENVIRONMENT=development` for readable logs does not re-open
+  it. `tests/security/test_shipped_image_posture.py` pins all of it, including a
+  source-level assertion that the Dockerfile still sets the flag — without which
+  deleting one ENV line would leave every other test green while the artifact
+  reverted.
+- `src/querygate/bootstrap.py` seeds `connections.yaml`/`policy.yaml`/
+  `catalog.yaml` and generates an admin key, all create-if-absent with `O_EXCL`,
+  mode 0600, before any store is constructed. Never regenerates. A
+  `ThreadPoolExecutor` test proves eight concurrent boots agree on one key — the
+  race a read-then-write would lose intermittently, on exactly the multi-replica
+  deployments hardest to debug.
+- The starter policy sets `require_explicit_allowlist: true` (item 220), so a
+  fresh install reaches nothing. **A test loads the seeded YAML into the real
+  `Policy` model** and caught that the first draft used a field name
+  (`max_select_items`) that does not exist — the seeded file would have failed to
+  load on every first boot.
+- `test_only_the_admin_service_and_bootstrap_write_connections_yaml` asserts the
+  single-writer rule.
+
+**Phase 2, still open:** the write side of a secret resolver (so the first
+connection can be added through the UI rather than by editing YAML), the
+checkout-page/portal snippet, and the Helm values snippet.
 
 **Definition of done:** a clean machine goes from the command to a governed
 query in under ten minutes with no file editing; the flow works identically on
