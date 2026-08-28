@@ -1610,7 +1610,7 @@ or worked around.
 > Credentials never sit on any returned model, and that's asserted against the
 > live API schema, not by convention. And none of it is "trust us": every
 > guarantee is backed by a deny-by-default CI gate (static analysis, dependency
-> audit, SBOM, image and secret scanning, OpenAPI fuzzing, and a 721-test
+> audit, SBOM, image and secret scanning, OpenAPI fuzzing, and a 731-test
 > adversarial suite), and reviewers get a reproducible packet where each claim
 > names the command that reproduces it. The release pipeline signs the container
 > image (cosign keyless) and attaches SLSA build provenance, both
@@ -1907,7 +1907,7 @@ summary.
 
 The gates fall into three groups:
 
-- **The access boundary itself.** The adversarial security suite (721 tests,
+- **The access boundary itself.** The adversarial security suite (731 tests,
   `make test-security`) encodes specific known bypass classes as regressions —
   denied-column inference, undeclared-table smuggling, predicate-as-SQL,
   schema-discovery leaks, policy-cap breaches, audit no-leak. On top of that,
@@ -4367,6 +4367,28 @@ certification. See [Security Model](#security-model), section 6.
 Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
+
+- **2026-08-28 — An empty allow-list can now mean deny-everything, and the flag
+  that does it defaults to off (item 220).** `Policy.table_allowed` returned
+  `True` on an empty `allowed_tables`, and `column_allowed` followed the same
+  convention, so the only deny-all lever in the model was `enabled = False` —
+  all-or-nothing. The moment an operator enabled a connection to run their first
+  query, every table and column on it was readable up to the numeric caps. For a
+  product whose entire pitch is governing *what a query is allowed to be*, that
+  is the wrong default, and it made item 215's "safe-by-default starter policy"
+  literally inexpressible. `require_explicit_allowlist` flips the empty-list
+  meaning. **It defaults to `False`, and that is the load-bearing half of the
+  decision**: flipping the meaning of a live security control under every
+  existing deployment is the change that breaks a customer at 3am, so this is a
+  new opt-in guarantee rather than a silent tightening. The starter policy sets
+  it `True`; existing policies are untouched until someone opts in. Two details
+  worth keeping: the `"*"` column wildcard still works under the flag, because an
+  operator who wants deny-by-default at the table level but not the column level
+  is the common case and a flag that forbids it is a flag nobody turns on; and
+  the field is registered in `INVERTED_GUARDRAIL_FIELDS`, since `True` is the
+  *tighter* posture — an existing guard caught the omission, and without it the
+  access diff would have reported a deny-by-default cutover as a loosening,
+  which is precisely the review an operator would be relying on.
 
 - **2026-08-27 — The licence of record moves from `LICENSE` to the EULA, and
   "no outbound calls, ever" is retired rather than defended (item 210).** The
