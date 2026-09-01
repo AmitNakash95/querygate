@@ -193,7 +193,7 @@ MySQL client libraries are a well-known copyleft trap: `mysqlclient` and `mysql-
 | `packageurl-python` | 0.17.6 | MIT |
 | `packaging` | 25.0 | Apache-2.0 OR BSD |
 | `pathspec` | 1.1.1 | MPL-2.0 |
-| `pip` | 26.1.2 | MIT |
+| `pip` | 26.2.1 | MIT |
 | `pip-api` | 0.0.34 | Apache-2.0 |
 | `pip-audit` | 2.10.1 | Apache-2.0 |
 | `pip-requirements-parser` | 32.0.1 | MIT |
