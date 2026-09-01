@@ -1,0 +1,71 @@
+# CodeQL static analysis.
+#
+# This is the third SAST layer, not the first. `ci.yml`'s `sast` job already
+# runs Bandit and Semgrep over `src/`, and both gate the build. CodeQL adds
+# something neither provides: interprocedural dataflow (taint tracking from a
+# request-handler parameter through to a sink), which is the analysis that
+# matters most for QueryGate's actual threat model — a caller-controlled value
+# reaching SQL construction, a credential reaching a response model, or
+# untrusted input reaching a file path.
+#
+# It is also the SAST tool OpenSSF Scorecard can actually see: the Makefile
+# targets that drive Bandit and Semgrep are invisible to it, so the SAST check
+# scored 0 despite two scanners running on every push.
+#
+# Results land in the repository's Security tab. This workflow reports; it does
+# not currently fail the build on a new finding, because a first run on a
+# 59k-line codebase will surface a backlog that needs triage before it can be a
+# gate. Promote it to blocking (`continue-on-error: false` is already the
+# default; add a required status check) once that backlog is at zero.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, so a newly-published CodeQL query runs against unchanged code.
+    # Offset off the hour to avoid GitHub's scheduling congestion.
+    - cron: "27 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # The only elevation this workflow needs: uploading the SARIF result.
+      security-events: write
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # `python` covers src/, scripts/ and tests/. `javascript-typescript`
+        # covers clients/typescript and the browser assets served by admin_ui /
+        # access_ui, which render operator- and database-provided text.
+        language: [python, javascript-typescript]
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@6f5948dfacef28e207b48d0905cf90c03365536d # v3
+        with:
+          languages: ${{ matrix.language }}
+          # `security-and-quality` over the default `security` suite: the extra
+          # quality queries are cheap here and this repository's own working
+          # agreement treats dead code and inconsistent patterns as defects.
+          queries: security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@6f5948dfacef28e207b48d0905cf90c03365536d # v3
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@6f5948dfacef28e207b48d0905cf90c03365536d # v3
+        with:
+          category: /language:${{ matrix.language }}
