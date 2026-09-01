@@ -1,9 +1,15 @@
-FROM python:3.11-slim-bookworm AS builder
+# Base image pinned by digest (Scorecard Pinned-Dependencies). The tag is kept
+# in the comment for readability; Dependabot's `docker` ecosystem bumps the
+# digest weekly, so this is pinned, not frozen.
+FROM python:3.11-slim-bookworm@sha256:0bee7276f83efd4a1ee05bbbf4281d95ed28e079220a9457f25a93e3f1e3c31b AS builder
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential curl unixodbc-dev \
     && rm -rf /var/lib/apt/lists/*
 ARG POETRY_VERSION=2.4.1
-RUN pip install --upgrade pip "poetry==${POETRY_VERSION}"
+ARG PIP_VERSION=26.2.1
+# Both pinned: an unpinned `--upgrade pip` makes the build non-reproducible
+# and is what Scorecard flags as an unpinned pipCommand.
+RUN pip install --no-cache-dir "pip==${PIP_VERSION}" "poetry==${POETRY_VERSION}"
 WORKDIR /app
 ENV POETRY_NO_INTERACTION=1 \
     POETRY_VIRTUALENVS_IN_PROJECT=1 \
@@ -33,7 +39,8 @@ RUN poetry install --no-root --only main \
     && .venv/bin/pip uninstall -y pip setuptools wheel \
     && rm -rf $POETRY_CACHE_DIR dist
 
-FROM python:3.11-slim-bookworm AS production
+# python:3.11-slim-bookworm, pinned by digest (see the builder stage above).
+FROM python:3.11-slim-bookworm@sha256:0bee7276f83efd4a1ee05bbbf4281d95ed28e079220a9457f25a93e3f1e3c31b AS production
 # TODO.md item 215, and the single highest-severity fix in that phase.
 #
 # Without HARDENED_IMAGE, `docker run <registry>/querygate:latest` — the exact
