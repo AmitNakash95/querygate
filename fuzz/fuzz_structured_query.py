@@ -38,9 +38,34 @@ from __future__ import annotations
 import json
 import sys
 
-# `consume` is deliberately importable and runnable without atheris, so the
-# harness logic itself is testable in the normal unit environment rather than
-# only inside the ClusterFuzzLite container.
+# Instrumentation, and its measured limit — read this before changing it.
+#
+# `atheris.instrument_all()` (called in `main()`) rewrites the bytecode of
+# every module already in `sys.modules`, so importing the target at module
+# scope is correct here. Wrapping these imports in `instrument_imports()`
+# instead was tried and is WRONG: measured on this target, coverage fell from
+# 31 features to 2 and libFuzzer reported "no interesting inputs were found so
+# far. Is the code instrumented for coverage?".
+#
+# **The honest limit.** Even wired correctly, coverage feedback on this target
+# is weak — 31 features over 2.7M executions. `StructuredQuery.model_validate`
+# dispatches almost immediately into `pydantic-core`, which is compiled Rust.
+# Atheris instruments Python bytecode and cannot see inside it, so the majority
+# of the work this target performs is invisible to the coverage-guided search,
+# which degrades it towards blind random input.
+#
+# That is a real constraint on what this target is worth, not a defect to fix
+# by rewiring. It means: treat a clean run as evidence that the boundary does
+# not crash on random bytes, NOT as evidence that the input space was explored.
+# The hand-written corpus in tests/security/test_malformed_input_fuzzing.py
+# remains the load-bearing coverage of this boundary. See TODO.md item 227.
+try:
+    import atheris
+
+    _HAS_ATHERIS = True
+except ImportError:  # pragma: no cover - only present in the fuzzing image
+    _HAS_ATHERIS = False
+
 import pydantic
 
 from querygate.query_ast.models import StructuredQuery
@@ -110,8 +135,15 @@ def main() -> int:
     if "--selftest" in sys.argv:
         return _selftest()
 
-    import atheris  # imported lazily: only present in the fuzzing image
+    if not _HAS_ATHERIS:
+        raise SystemExit(
+            "atheris is not installed — run with --selftest, or build via "
+            ".clusterfuzzlite/build.sh inside the OSS-Fuzz image."
+        )
 
+    # Instruments every already-imported module, including the target imported
+    # at module scope above. Do not replace this with `instrument_imports()`
+    # around those imports — see the measured comparison at the top of the file.
     atheris.instrument_all()
     atheris.Setup(sys.argv, consume)
     atheris.Fuzz()
