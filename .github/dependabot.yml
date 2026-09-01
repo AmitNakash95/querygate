@@ -1,0 +1,69 @@
+# Dependency update automation.
+#
+# Deliberately conservative: QueryGate's dependency posture is deny-by-default
+# (`security/dependency-audit-allowlist.json`, `make dep-audit`), so a bumped
+# lockfile still has to pass the same CVE and licence gates as a hand-edited
+# one. Dependabot opens the PR; the existing gates decide whether it lands.
+#
+# Grouping keeps the PR volume reviewable for a small maintainer team — the
+# failure mode this file is most likely to cause is alert fatigue, not a missed
+# CVE (the scheduled `dependency-audit` job already covers that independently).
+version: 2
+
+updates:
+  # Python runtime + dev dependencies (Poetry-managed; Dependabot reads
+  # pyproject.toml and poetry.lock).
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-and-patch:
+        update-types: [minor, patch]
+    labels: [dependencies, python]
+
+  # The control plane is a separate Poetry project with its own lockfile.
+  - package-ecosystem: pip
+    directory: /control-plane
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      control-plane-minor-and-patch:
+        update-types: [minor, patch]
+    labels: [dependencies, control-plane]
+
+  # GitHub Actions are pinned by commit SHA (Scorecard Pinned-Dependencies).
+  # Dependabot understands SHA pins and rewrites both the hash and the trailing
+  # `# vX` comment, which is the only sustainable way to keep pinned actions
+  # current — without this, pinning silently becomes "frozen and stale".
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      actions-all:
+        patterns: ["*"]
+    labels: [dependencies, ci]
+
+  # The TypeScript client builder (clients/typescript, item 51 phase 2).
+  - package-ecosystem: npm
+    directory: /clients/typescript
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    labels: [dependencies, typescript]
+
+  # Base images in the shipped Dockerfile.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    labels: [dependencies, docker]

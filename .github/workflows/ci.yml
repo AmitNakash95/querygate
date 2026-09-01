@@ -5,14 +5,21 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege: every job in this workflow only reads the repository.
+# The `docker` job builds and scans the image locally via `make release-smoke`
+# and never pushes — pushing to GHCR happens only in release.yml, which
+# elevates permissions on the one job that needs it.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Format check + full test suite
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
 
@@ -20,7 +27,7 @@ jobs:
         run: pipx install poetry==2.4.1
 
       - name: Cache Poetry virtualenv
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .venv
           key: poetry-${{ runner.os }}-${{ hashFiles('poetry.lock') }}
@@ -75,7 +82,7 @@ jobs:
             --env-file deploy/docker-compose/.env.production config --quiet
           rm deploy/docker-compose/.env.production
 
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
         with:
           version: "v3.16.1"
 
@@ -109,9 +116,9 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
 
@@ -191,9 +198,9 @@ jobs:
       QUERYGATE_TEST_MSSQL_PORT: "1433"
       QUERYGATE_TEST_MSSQL_SA_PASSWORD: "QueryGate_Test_Pw1!"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
 
@@ -257,9 +264,9 @@ jobs:
       QUERYGATE_TEST_MYSQL_PORT: "3306"
       QUERYGATE_TEST_MYSQL_ROOT_PASSWORD: "QueryGate_Test_Pw1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
 
@@ -322,9 +329,9 @@ jobs:
       QUERYGATE_TEST_MSSQL_PORT: "1433"
       QUERYGATE_TEST_MSSQL_SA_PASSWORD: "QueryGate_Test_Pw1!"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
 
@@ -367,9 +374,9 @@ jobs:
     name: TypeScript client builder (item 51 phase 2a)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           cache: "npm"
@@ -391,7 +398,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Build image and execute a structured query against Postgres
         run: make release-smoke
@@ -403,7 +410,7 @@ jobs:
       # `--ignore-unfixed` keeps the gate actionable: it fails only on CVEs that
       # actually have a fix we could pull in. See TODO.md item 89.
       - name: Trivy scan of the shipped image
-        uses: aquasecurity/trivy-action@v0.24.0
+        uses: aquasecurity/trivy-action@6e7b7d1fd3e4fef0c5fa8cce1229c54b2c9bd0d8 # v0.24.0
         with:
           image-ref: querygate:release-smoke
           severity: HIGH,CRITICAL
@@ -416,7 +423,7 @@ jobs:
     name: Secret scan (gitleaks, full history)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # gitleaks needs the whole history to prove no credential was ever
           # committed, not just the tip tree.
@@ -436,9 +443,9 @@ jobs:
     name: SAST (Bandit + Semgrep OSS)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
 
@@ -459,7 +466,7 @@ jobs:
       # or token required for the public `p/...` rule packs.
       - name: Semgrep OSS
         run: |
-          pipx install semgrep
+          pipx install semgrep==1.175.0
           semgrep --error --disable-version-check \
             --config p/python \
             --config p/security-audit \
@@ -470,9 +477,9 @@ jobs:
     name: DAST (Schemathesis OpenAPI fuzzing)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
 
