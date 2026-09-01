@@ -168,6 +168,9 @@ human-SSO/identity stream; these start at 210.
 - [ ] **217** — Customer portal: signup, checkout, downloads, docs.
   **Blocked on the legal entity.**
 - [ ] **218** — Setup guides and quickstart docs for the SaaS motion.
+- [ ] **227** — Deepen ClusterFuzzLite: add a fuzz target whose work is in
+      Python, since pydantic-core is native and coverage feedback on the
+      model target is measured shallow (31 features / 2.7M execs)
 - [ ] **221** — Move validator bodies out of the model classes so the
   enforcement logic can be compiled. *Measured residual from 214's spike: 30
   validators / 602 lines of Structural-pillar logic ship readable, because a
