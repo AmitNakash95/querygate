@@ -833,7 +833,7 @@ Three runnable MCP integration examples (LangChain/LangGraph, LlamaIndex, OpenAI
 itself is an external vendor engagement and calendar-time cost, not
 solo-engineer effort.**
 
-**Why it matters:** `docs/business/GO_TO_MARKET.md` already lists
+**Why it matters:** an internal go-to-market analysis already lists
 "independent threat-model review, formal certification, or external
 penetration testing" under things not safe to claim yet. No amount of
 internal adversarial testing (item 28) substitutes for third-party
@@ -877,7 +877,7 @@ quota per-replica unless the Redis quota backend is configured (item 50 phase
 shared), the multi-replica zero-downtime config-reload contract, multi-zone/
 multi-region topology, and a backup/restore + RTO/RPO DR procedure. Chart HA
 invariants are asserted against `helm template` in
-`tests/unit/test_helm_ha_deployment.py`. GO_TO_MARKET claims reconciled. The
+`tests/unit/test_helm_ha_deployment.py`. the go-to-market analysis claims reconciled. The
 live multi-region failover *drill* is the operator's step (checklist in HA_DR).
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 56).
@@ -919,7 +919,7 @@ scope. Until it ships, this item is not fully `✅ DONE` and stays inline here.
 and QA scenarios (item 36) into a repeatable, publishable comparison, not
 new attack development.
 
-**Why it matters:** `docs/business/GO_TO_MARKET.md`'s adversarial
+**Why it matters:** the go-to-market analysis's adversarial
 five-minute demo is currently a sales narrative performed live. Turning it
 into a repeatable, published benchmark (attack corpus, catch rate, latency
 overhead versus a raw-SQL agent baseline and Google's Toolbox where a fair
@@ -1232,7 +1232,7 @@ distribution channel today. Both are maintainer decisions, not code work.
 ## P6 — Category-defining moats (from competitive-scan, 2026-07-22)
 
 Items 90–92 promote three of the "breakout four" features from
-`docs/business/MARKET_DOMINATION_ANALYSIS.md` (F1/F5/F3) from strategy prose
+an internal competitive analysis (F1/F5/F3) from strategy prose
 into scoped worklist items. The fourth, F2 (minimum-group-size), already
 shipped as item 88. F4 (safe NL→StructuredQuery) is deliberately **not** an
 item yet: it requires an explicit maintainer decision on model provider/posture
@@ -1258,7 +1258,7 @@ Cost/row-estimate and catalog-sensitivity triggers pause a gated read; approval 
 ## P7 — Governed Writes (flagship structural expansion — decision-gated)
 
 Item 93 is the largest scope expansion on the roadmap and the market's biggest
-unsolved problem (see `docs/business/MARKET_DOMINATION_ANALYSIS.md` §P1). It
+unsolved problem (see the competitive analysis §P1). It
 **crosses the product's read-only line** and therefore **requires an explicit
 maintainer product decision before any implementation** — the write-up below is
 a complete design and worklist, not an approved commitment. It preserves every
@@ -2069,7 +2069,7 @@ formal **extensions framework** with reverse-DNS namespacing — the tasks
 feature moved out of experimental core into `io.modelcontextprotocol/tasks`
 under it. This gives strategic play P2 ("open the contract — publish the
 StructuredQuery AST as an open standard",
-`docs/business/MARKET_DOMINATION_ANALYSIS.md` §7) a standards-blessed vehicle
+an internal competitive analysis §7) a standards-blessed vehicle
 it previously lacked: the AST can be declared as a named, versioned MCP
 extension rather than a product-specific JSON schema.
 
@@ -2113,7 +2113,7 @@ are draft-only by charter.
 
 ### 132. Reconcile stale shipped-status claims left behind by items 90–93 ✅ DONE
 
-Fixed the drift across `GO_TO_MARKET.md`, `README.md`, and `TODO.md` itself
+Fixed the drift across the go-to-market analysis, `README.md`, and `TODO.md` itself
 left behind by items 90–93 (and, surfaced along the way, items 45/50/56/58)
 describing shipped capability as open or partial; a post-build claim-reviewer
 audit caught three further stale spots in the same pass.
@@ -2339,7 +2339,7 @@ original calling principal, no SDK `RequestStateSecurity` wiring) and why.
 ### 152. Sales/landing pages don't reflect items 19 (MySQL) / 134 (WORM retention) shipping ✅ DONE
 
 Reconciled `sales/index.html`, `landing/security.html`, `landing/index.html`,
-`landing/sandbox.html`, `README.md`, and `docs/business/GO_TO_MARKET.md`'s
+`landing/sandbox.html`, `README.md`, and the go-to-market analysis's
 dialect and WORM-retention claims against what items 19/134 phase 1 actually
 shipped (MySQL support; S3 Object Lock WORM retention with the phase-2
 managed-search caveat kept explicit). **Full write-up:**
@@ -2740,7 +2740,7 @@ identical `reset_engines()`-doesn't-dispose gap (item 2).
 ### 176. Three claim-accuracy drifts found while fixing the item-134 stale WORM-search line ✅ DONE
 
 `sales/index.html`'s two sales-guardrail lists, `CUSTOMER_README.md`,
-`docs/business/GO_TO_MARKET.md` and TODO.md's own Quick-scan row for item 134
+an internal go-to-market analysis and TODO.md's own Quick-scan row for item 134
 now describe the shipped `GET /api/v1/admin/observability/worm-search` endpoint
 instead of denying it exists — each scoped to what actually ships: a bounded
 API over the S3 WORM archive, with no UI of its own, no server-side table
@@ -3246,7 +3246,7 @@ than folded in because none is about item 134:
    uncommitted work.
 7. **`landing/security.html:502` omits the item-184 non-exhaustive-paging
    caveat** that `CUSTOMER_README.md`, `sales/index.html`,
-   `docs/business/GO_TO_MARKET.md` and README now carry. Omission, not a false
+   an internal go-to-market analysis and README now carry. Omission, not a false
    statement — but the public security page is exactly who needs it.
 
 8. **`src/querygate/execution/disclosure_budget.py:25-34` and
@@ -3254,7 +3254,7 @@ than folded in because none is about item 134:
    targeted probe cap" and say `shape_fingerprint` "closes the evasion at the
    shape layer too" — the two places an engineer reads first, both wrong per
    item 186. *Found 2026-08-12 (round 5).*
-9. **`docs/business/MARKET_DOMINATION_ANALYSIS.md:516-518`** still says
+9. **`an internal competitive analysis:516-518`** still says
    multi-query differencing "stays honestly out of scope"; item 179 bounds it.
    *Found 2026-08-12 (round 5).*
 10. **The four-eyes rollback exemption has no test.** Five surfaces now state it
@@ -3443,7 +3443,7 @@ decision in it was reversed.**
 Its premise was Shape A — the BSL Additional Use Grant's unlimited free internal
 production use — which left no production threshold for a licence to self-check,
 so the token was to be an *entitlement marker for the paid tier*, never a gate.
-That grant was cancelled on 2026-08-23 (`docs/business/GTM_SAAS.md`). QueryGate
+That grant was cancelled on 2026-08-23 (an internal commercial plan). QueryGate
 is a paid subscription, and the entitlement now **blocks**: after the paid term
 plus a grace window has fully elapsed, every governed query and write is refused
 with HTTP 402.
@@ -3472,18 +3472,18 @@ notice and the enforcement-model survey both items rest on.
 ### 198. QueryGate Notary — append-only transparency log for the audit ledger's chain head — not-before-customers
 
 **Effort: M. NOT BEFORE CUSTOMERS — do not claim or implement. Originally
-logged per `docs/business/GTM_EXECUTION_PLAN.md` §4 (owner decision,
+logged per an internal commercial plan §4 (owner decision,
 2026-08-21); pitch it now, build it when a customer asks, not before.**
 
-**Scope unchanged by the 2026-08-23 licence decision** (`docs/business/GTM_SAAS.md`,
+**Scope unchanged by the 2026-08-23 licence decision** (an internal commercial plan,
 which supersedes that plan), unlike its sibling item 197. Two things did move
-around it: `GTM_SAAS.md` §7 lists Notary among the trust-rebuilding measures that
+around it: an internal commercial plan §7 lists Notary among the trust-rebuilding measures that
 matter *more* under closed source, and `docs/LICENSING_FAQ.md` names it as a
 forward statement a prospect must not be allowed to mistake for a shipping
 service.
 
 **Why it matters:** the shipped hash-chained audit ledger (item 91) is
-tamper-evident, but `docs/business/NORTH_STAR.md` and `docs/PRODUCT_GUIDE.md`
+tamper-evident, but `CLAUDE.md`’s "North Star" section and `docs/PRODUCT_GUIDE.md`
 both already record the honest limit: **unkeyed, it is tamper-evident only
 against an externally anchored head** — without a third party attesting to the
 chain head at a point in time, an operator with write access to the ledger
@@ -3786,7 +3786,7 @@ preceding line is unparseable, resumed at the following record, reports
 ## SaaS subscription work packages (items 210–219)
 
 Owner decision, 2026-08-23: QueryGate ships **proprietary, closed-source, as a
-paid monthly subscription**. See `docs/business/GTM_SAAS.md`, which supersedes
+paid monthly subscription**. See an internal commercial plan, which supersedes
 `GTM_EXECUTION_PLAN.md` and the Shape A / BSL decision of 2026-08-21 in full.
 
 **Numbering note:** 199–209 were reserved for the concurrent human SSO /
@@ -3849,9 +3849,9 @@ when *we* fail, and without lying in the customer's audit ledger.
      in the shape of `test_credential_redaction.py` rather than as a mock-call
      assertion —
      the four fields `docs/legal/EULA.en.md` §16.1 discloses and
-     `docs/business/GTM_SAAS.md` §3 publishes. A fifth field is a **disclosure
+     an internal commercial plan §3 publishes. A fifth field is a **disclosure
      change before it is a code change**: amend the EULA (both languages), the
-     FAQ, and `NORTH_STAR.md`'s Reach pillar first.
+     FAQ, and `CLAUDE.md`’s "North Star" section's Reach pillar first.
 - **`src/querygate/subscription/`** — a peer package to `audit/` and `secrets/`:
   `models.py`, `verify.py` (pure, no I/O), `state.py` (module singleton),
   `gate.py`, `sources.py` (the registry above; the only modules doing outbound
@@ -3979,7 +3979,7 @@ manifest cache, `app.state`, **and the observe-mode Prometheus counter** — the
 collector lives in the process-global `REGISTRY`, which conftest resets nothing
 in today, so any absolute assertion on it is order-dependent); the bidirectional
 import guard above; **a schema-level test asserting the refresh request body's
-key set is exactly what `GTM_SAAS.md` §8 publishes** — built in the shape of
+key set is exactly what an internal commercial plan §8 publishes** — built in the shape of
 `test_credential_redaction.py`, not as a mock-call assertion, because that
 sentence is the load-bearing answer to the phone-home objection and is currently
 unbacked; and a test that the rendered 402 body and the MCP error message both
@@ -4165,7 +4165,7 @@ would invalidate the packaging plan.
   SLSA provenance preserved (both already exist in `release.yml`).
 - **Accept and document the costs**: stack traces become far less useful for
   support, and a native extension complicates the SBOM and pip-audit story that
-  §7 of `GTM_SAAS.md` leans on. Decide how support debugging works *before*
+  §7 of an internal commercial plan leans on. Decide how support debugging works *before*
   shipping, not after the first incident.
 - **No obfuscation theatre.** Compilation raises the bar; it does not make the
   gate unbypassable, and the EULA's anti-circumvention clause (item 210) is the
@@ -4633,7 +4633,7 @@ count for each target in the PR so the improvement is measured rather than
 asserted, and keep the existing model target — its value is crash-resistance on
 hostile bytes, which is real even with weak coverage. Update the honest-limit
 comment at the top of `fuzz/fuzz_structured_query.py` and Appendix C of
-`docs/business/OSS_SEPARATION_PLAN.md` once the numbers change.
+an internal publication plan once the numbers change.
 
 ### 228. Microsoft ODBC driver redistribution in a PUBLIC image — blocks publishing the image
 

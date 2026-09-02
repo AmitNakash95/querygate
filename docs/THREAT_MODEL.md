@@ -494,7 +494,7 @@ defaults.
   30. No independent penetration test or formal certification has been
   performed.
 - **The vendor entitlement channel (items 211-213, not yet built).** The
-  proprietary subscription (item 210, `docs/business/GTM_SAAS.md`) adds the first
+  proprietary subscription (item 210, an internal commercial plan) adds the first
   outbound path from a deployment to a vendor-controlled endpoint. Four residual
   risks, recorded now so the implementation is reviewed against them rather than
   measured after:
@@ -506,7 +506,7 @@ defaults.
      entitlements the deployment obeys, so a vendor compromise or a stolen
      signing key can suspend a customer's governed operation. It cannot read or
      write customer data — the control plane holds no database credential and
-     receives no row (`NORTH_STAR.md`, non-goal "no hosted query execution") —
+     receives no row (`CLAUDE.md`’s "North Star" section, non-goal "no hosted query execution") —
      but availability is now partly ours to lose.
   3. **Fail-open windows are deliberate and are an enforcement gap.** A failed
      refresh never blocks (~30 days of entitlement validity), and a cold start

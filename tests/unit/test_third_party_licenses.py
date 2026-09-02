@@ -1,7 +1,7 @@
 """Dependency-licence gate — `scripts/check_licenses.py` / `docs/THIRD_PARTY_LICENSES.md`.
 
 QueryGate ships **proprietary and closed-source** (item 210,
-`docs/business/GTM_SAAS.md`), and a copyleft licence in the *redistributed*
+the commercial plan), and a copyleft licence in the *redistributed*
 dependency set is a blocking legal problem — a reciprocal licence whose
 conditions attach to the distributed larger work is exactly what a closed-source
 product cannot satisfy. The premise changed with the licence decision (it was
