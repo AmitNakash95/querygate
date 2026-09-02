@@ -346,7 +346,7 @@ Medium/Medium-High severity), then the CI-scheduling and observability gaps
   `query_ast/models.py`, `write_ast/models.py`, `compiler/dialect_adapters.py`,
   `mcp/tools/write.py`/`query.py`, `.github/workflows/ci.yml`, `Makefile`,
   `docs/SECURITY_POSTURE.md`, `docs/THREAT_MODEL.md`,
-  `docs/business/SECURITY_BENCHMARK.md`.
+  `docs/benchmarks/SECURITY_BENCHMARK.md`.
 - **Not run:** `make test-postgres-live`, `make test-load`, `make test-soak`,
   `make release-smoke` (all require a running Postgres/MSSQL via `docker
   compose up -d`, not started for this review to avoid touching local
@@ -355,7 +355,7 @@ Medium/Medium-High severity), then the CI-scheduling and observability gaps
   cross-checked instead by direct code reading and by the existing recorded
   test names/assertions in `TODO.md`'s item write-ups.
 - `poetry run querygate-security-benchmark run --json` — ran successfully;
-  output matched `docs/business/SECURITY_BENCHMARK.md`'s published numbers
+  output matched `docs/benchmarks/SECURITY_BENCHMARK.md`'s published numbers
   exactly (14/14 catch, 0/14 baseline, 2 documented residual cases).
 
 ## Documentation Updated

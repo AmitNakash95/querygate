@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compose a single, always-current procurement evidence page (TODO.md item
 147) from artifacts that already exist: `docs/SECURITY_POSTURE.md`,
-`docs/COMPLIANCE_MAPPING.md`, `docs/business/SECURITY_BENCHMARK.md`,
+`docs/COMPLIANCE_MAPPING.md`, `docs/benchmarks/SECURITY_BENCHMARK.md`,
 `SECURITY.md`'s disclosure program, and the current dependency-audit
 allowlist status (`security/dependency-audit-allowlist.json`).
 
@@ -35,7 +35,7 @@ _SOURCES: list[tuple[str, Path]] = [
     ("Compliance control mapping", ROOT / "docs" / "COMPLIANCE_MAPPING.md"),
     (
         "Adversarial benchmark report",
-        ROOT / "docs" / "business" / "SECURITY_BENCHMARK.md",
+        ROOT / "docs" / "benchmarks" / "SECURITY_BENCHMARK.md",
     ),
     ("Responsible disclosure program", ROOT / "SECURITY.md"),
 ]
@@ -60,7 +60,7 @@ def _repoint_links(text: str, source_dir: Path) -> str:
     `docs/TRUST_EVIDENCE.md`.
 
     Every source below is correct *in its own location* — `SECURITY.md` sits at
-    the repo root and links `docs/THREAT_MODEL.md`; `docs/business/
+    the repo root and links `docs/THREAT_MODEL.md`; `docs/benchmarks/
     SECURITY_BENCHMARK.md` links `../THREAT_MODEL.md`. Embedding them verbatim
     into a file in `docs/` broke all of those, and the trust packet is the one
     document a prospect's security reviewer is most likely to actually click

@@ -35,7 +35,7 @@ _CI_WORKFLOW = _ROOT / ".github" / "workflows" / "ci.yml"
 _CLAIM_DOCS = (
     _ROOT / "docs" / "SECURITY_POSTURE.md",
     _ROOT / "docs" / "COMPLIANCE_MAPPING.md",
-    _ROOT / "docs" / "business" / "openssf-best-practices-answers.md",
+    _ROOT / "docs" / "benchmarks" / "openssf-best-practices-answers.md",
 )
 
 _MAKE_REF = re.compile(r"\bmake ([a-z][a-z0-9-]*)\b")
