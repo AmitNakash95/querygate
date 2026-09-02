@@ -67,39 +67,6 @@ ENV PYTHONUNBUFFERED=1 \
     HARDENED_IMAGE=1 \
     VAR_DIR=/app/var
 
-# unixodbc + the Microsoft ODBC driver are only needed for MSSQL connections;
-# skip this layer if you only connect to Postgres.
-#
-# Base image is pinned to -bookworm rather than the floating python:3.11-slim
-# tag: that tag moved to Debian 13 (trixie) and Microsoft's debian/13 apt
-# repo is signed with a key (EE4D7792F748182B) their own microsoft.asc key
-# file doesn't contain — a known upstream issue as of 2026
-# (microsoft/linux-package-repositories#305, #253), not something fixable
-# from here. bookworm + msodbcsql18 is a supported, working combination.
-#
-# The key must be dearmored into a binary keyring, not piped straight into
-# trusted.gpg.d/*.asc — Debian's apt (via sqv) rejects an ASCII-armored key
-# there. /usr/share/keyrings/microsoft-prod.gpg is the exact path
-# Microsoft's own prod.list already references via signed-by=.
-# `msodbcsql18` is proprietary and accepted under EULA, and the base image's
-# "slim" dpkg config path-excludes /usr/share/doc/*, so the driver's own
-# LICENSE.txt was declared by the package but never landed in the image — we
-# were shipping Microsoft's driver without its licence text. The path-include
-# below must be written BEFORE the install for dpkg to honour it. Measured
-# 2026-08-21 (TODO item 196): 124 OS packages, of which msodbcsql18 was one of
-# only three with no copyright file present.
-RUN printf 'path-include /usr/share/doc/msodbcsql18/*\n' \
-      > /etc/dpkg/dpkg.cfg.d/msodbcsql18-licence \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends curl gnupg unixodbc \
-    && curl -sSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg \
-    && curl -sSL https://packages.microsoft.com/config/debian/12/prod.list -o /etc/apt/sources.list.d/mssql-release.list \
-    && apt-get update \
-    && ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18 \
-    && apt-get purge -y gnupg \
-    && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
 # The base python:3.11-slim image ships pip/setuptools/wheel in the SYSTEM
 # site-packages, and setuptools vendors CVE-bearing copies of jaraco.context /
@@ -116,10 +83,10 @@ RUN rm -rf /usr/local/lib/python3.11/site-packages/setuptools* \
     /usr/local/lib/python3.11/site-packages/_distutils_hack \
     /usr/local/lib/python3.11/site-packages/distutils-precedence.pth
 RUN addgroup --system querygate && adduser --system --ingroup querygate querygate
-# BSL 1.1 requires the licence to be displayed conspicuously on each copy of the
-# Licensed Work, and the container image is how QueryGate is distributed. The
-# wheel already carries it (`License-File: LICENSE` in its METADATA); the image
-# did not until this line. Asserted by `scripts/check_release_artifacts.py`.
+# Apache-2.0 §4(a) requires every recipient of the work to receive a copy of the
+# licence, and a container image is a distribution of the work. The wheel carries
+# it via `License-File: LICENSE` in its METADATA; the image needs this explicit
+# COPY. Asserted by `scripts/check_release_artifacts.py`.
 COPY LICENSE /app/LICENSE
 COPY --from=builder /app/.venv /app/.venv
 RUN chown -R querygate:querygate /app
@@ -127,3 +94,54 @@ USER querygate
 
 EXPOSE 8000
 CMD ["querygate"]
+
+
+# ---------------------------------------------------------------------------
+# Optional MSSQL variant — NOT the default image.
+#
+#     docker build --target production-mssql -t querygate:mssql .
+#
+# Microsoft's ODBC driver is proprietary, installed under ACCEPT_EULA=Y, and
+# redistributing it inside a PUBLICLY pullable image raises questions Apache-2.0
+# cannot answer on its own: it carries no third-party pass-through clause, and a
+# public image reaches people who never agreed to Microsoft's terms. Under the
+# previous proprietary model both halves were covered — the EULA carried a
+# pass-through, and nobody without an Order could use the image at all.
+#
+# So the DEFAULT image ships no proprietary third-party binary. A deployment
+# that needs MSSQL builds this target itself, which puts the party who accepts
+# ACCEPT_EULA=Y and the party who installs the driver back together — the same
+# person. `scripts/check_release_artifacts.py` fails if the install moves back
+# into the default stage. See TODO.md item 228.
+#
+# Postgres and MySQL need nothing from this stage.
+FROM production AS production-mssql
+USER root
+
+RUN printf 'path-include /usr/share/doc/msodbcsql18/*\n' \
+      > /etc/dpkg/dpkg.cfg.d/msodbcsql18-licence \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends curl gnupg unixodbc \
+    && curl -sSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg \
+    && curl -sSL https://packages.microsoft.com/config/debian/12/prod.list -o /etc/apt/sources.list.d/mssql-release.list \
+    && apt-get update \
+    && ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18 \
+    && apt-get purge -y gnupg \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
+USER querygate
+
+# ---------------------------------------------------------------------------
+# The default build target. THIS STAGE MUST BE LAST.
+#
+# `docker build .` with no --target builds the FINAL stage in the file, so
+# appending the opt-in MSSQL variant above silently made IT the default — the
+# driver-free image was correct in intent and absent in practice. Caught only by
+# building the image and looking inside it: `docker build --check` parsed
+# happily and the release-artifact guard passed, because both inspect the
+# Dockerfile rather than the result.
+#
+# This stage adds nothing. It exists so the last stage is the driver-free one.
+FROM production AS default
+

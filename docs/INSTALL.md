@@ -20,6 +20,18 @@ docker run -d --name querygate \
   ghcr.io/<your-org>/querygate:latest
 ```
 
+> **Connecting to Microsoft SQL Server?** The default image deliberately ships
+> **no** Microsoft ODBC driver — it is proprietary, and Apache-2.0 carries no
+> clause binding whoever pulls a public image to Microsoft's terms. Build the
+> opt-in variant yourself, which is also what puts the person accepting
+> `ACCEPT_EULA=Y` and the person installing the driver back together:
+>
+> ```bash
+> docker build --target production-mssql -t querygate:mssql .
+> ```
+>
+> Postgres and MySQL need nothing extra. See `docs/CONTAINER_IMAGE_LICENCES.md`.
+
 Then read the admin key it generated:
 
 ```bash
