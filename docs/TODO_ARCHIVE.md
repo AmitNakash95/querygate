@@ -15079,3 +15079,67 @@ operator would be relying on.
 
 Documented in `examples/policy.example.yaml` (which now sets it `true` on the
 demo connection) and in the `PRODUCT_GUIDE.md` Decision Log.
+
+### 228. Microsoft ODBC driver redistribution in a PUBLIC image ✅ DONE
+
+**Effort: S to remove the question; M to answer it. BLOCKS the first public
+image release.** Found 2026-09-02 while reconciling `docs/CONTAINER_IMAGE_LICENCES.md`
+to the Apache-2.0 transition.
+
+**Why it matters:** the shipped image installs Microsoft's proprietary
+`msodbcsql18` under `ACCEPT_EULA=Y`. Under the cancelled proprietary model this
+was tolerable because two things were true at once: the EULA carried a
+Third-party components pass-through, and `LICENSE` meant nobody without an Order
+had any licence to use the image at all — so the pass-through reached every
+lawful user and nobody else.
+
+**Apache-2.0 removes both.** It has no pass-through clause and no mechanism to
+bind a downstream recipient to another vendor's terms, and a public image can be
+pulled by anyone, including people who agreed to nothing. Microsoft's §2(b)(ii)
+("require distributors and external end users to agree to terms that protect it
+and Microsoft at least as much as this agreement") went from *partly met* to
+*not met*, and §2(b)(iii)'s indemnity running to Microsoft was never addressed
+under any model.
+
+**Definition of done — pick one, cheapest first:**
+
+1. **Make the default image driver-free** and ship MSSQL support as a separate,
+   clearly-labelled variant, so the default artifact carries no third-party
+   proprietary binary. Removes the question rather than answering it.
+2. **Document `apt-get install msodbcsql18` as an operator step**, so whoever
+   accepts `ACCEPT_EULA=Y` is whoever installs it. Also removes the question,
+   at the cost of a less turnkey MSSQL install.
+3. **Get the redistribution and indemnity position reviewed by counsel** before
+   publishing an image containing the driver. Answers it, and costs money.
+
+Either way, ship a `THIRD_PARTY_NOTICES` file **inside the image** — `Dockerfile`
+already `COPY`s `LICENSE`, so this is the same shape and is not done. Necessary
+under any option, sufficient under none.
+
+**Do not publish the container image until this is closed.** The repository and
+the wheel are unaffected; this is a container-artifact blocker only.
+
+**How it shipped (2026-09-02):** option 1 — the question was removed rather than
+answered. `msodbcsql18` moved out of the default image into an opt-in
+`production-mssql` target. The party who accepts `ACCEPT_EULA=Y` and the party
+who installs the driver are the same person again, so §2(b)(ii) has nobody left
+to reach and §2(b)(iii)'s indemnity is not triggered by a distribution that does
+not happen. `scripts/check_release_artifacts.py` slices the default stage out of
+the Dockerfile and fails on an `apt-get install … msodbcsql18` there —
+mutation-verified, and keyed on the install command rather than the package name
+because the opt-in stage's own comment names the package and a naive substring
+check flagged that comment on its first run.
+
+**The gotcha that nearly shipped this broken, recorded because it is silent:**
+`docker build .` with no `--target` builds the **last** stage in the file.
+Appending `production-mssql` at the end therefore made *it* the default, so the
+"driver-free" image still contained the driver. `docker build --check` parsed
+happily and the release-artifact guard passed, because both inspect the
+Dockerfile rather than the built image — the only thing that caught it was
+running the image and looking inside. A trailing one-line `FROM production AS
+default` stage now guarantees the last stage is the driver-free one. Verified on
+the real image: 0 `msodbcsql18` packages, no `/opt/microsoft`, 576MB vs 588MB.
+
+**Accepted cost:** MSSQL users build one extra line instead of pulling a turnkey
+image. A real convenience regression for one of three supported dialects, taken
+over redistributing a proprietary binary to anyone who runs `docker pull`.
