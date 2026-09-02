@@ -80,5 +80,5 @@ drift-tested; edit the source and regenerate instead.
 |---|---|---|
 | `SCOPE_CATALOG.md` | `make scope-catalog` | `src/querygate/core/scopes.py` |
 | `THIRD_PARTY_LICENSES.md` | `make license-report` | `poetry.lock` |
-| `TRUST_EVIDENCE.md` | `make trust-page` | `SECURITY_POSTURE.md`, `COMPLIANCE_MAPPING.md`, `business/SECURITY_BENCHMARK.md`, `../SECURITY.md`, the dependency allowlist |
+| `TRUST_EVIDENCE.md` | `make trust-page` | `SECURITY_POSTURE.md`, `COMPLIANCE_MAPPING.md`, `benchmarks/SECURITY_BENCHMARK.md`, `../SECURITY.md`, the dependency allowlist |
 | `product-guide.html` | `make product-guide-html` | `PRODUCT_GUIDE.md` |
