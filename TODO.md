@@ -3160,7 +3160,7 @@ the PRODUCT_GUIDE Decision Log, TECHNICAL_REVIEW, two TODO_ARCHIVE write-ups
 and a test docstring), the unconditional "resumable page" claim (both
 `worm_search.py` bullets, its `WormSearchBounds` docstring, README, QG-40,
 THREAT_MODEL, PRODUCT_GUIDE ×2, the generated HTML, CHANGELOG, TODO_ARCHIVE),
-the two disclosure-budget code docs, MARKET_DOMINATION_ANALYSIS, and the
+the two disclosure-budget code docs, the competitive analysis, and the
 rollback-exemption test (mutation-verified: closing the exemption fails it,
 and a control proves the gate is still on). Verified by re-running
 `scripts/claim_drift_sites.py --all`. **Open: #2, #3, #5, #6, #7** — all four
@@ -3453,7 +3453,7 @@ product, which is why this item is superseded rather than merely re-scoped:
 
 - *"Soft enforcement only … must never refuse to start and must never block or
   degrade a query"* — item 211's gate does exactly that, deliberately and
-  disclosed (`docs/legal/EULA.en.md` §15).
+  disclosed (the EULA §15).
 - *"Zero network calls — no phone-home, ever"* — item 212's control plane is
   contacted on start-up and roughly daily, carrying the four fields §16.1 of the
   EULA discloses.
@@ -3463,10 +3463,10 @@ product, which is why this item is superseded rather than merely re-scoped:
 
 **What survived**, and where it went: the Ed25519-signed, offline-verifiable,
 locally-checked token shape is the design items 211-213 build on
-(`docs/CONTROL_PLANE_PLAN.md` §3), and the availability objection this item
+(the control-plane plan §3), and the availability objection this item
 raised was answered rather than dropped — a *failed refresh* is never
 fail-closed, cold start fails open, and administration, health and audit
-retrieval survive a lapse. `docs/LICENSE_ENFORCEMENT.md` carries the reversal
+retrieval survive a lapse. the licence-enforcement analysis carries the reversal
 notice and the enforcement-model survey both items rest on.
 
 ### 198. QueryGate Notary — append-only transparency log for the audit ledger's chain head — not-before-customers
@@ -3478,7 +3478,7 @@ logged per an internal commercial plan §4 (owner decision,
 **Scope unchanged by the 2026-08-23 licence decision** (an internal commercial plan,
 which supersedes that plan), unlike its sibling item 197. Two things did move
 around it: an internal commercial plan §7 lists Notary among the trust-rebuilding measures that
-matter *more* under closed source, and `docs/LICENSING_FAQ.md` names it as a
+matter *more* under closed source, and the licensing FAQ names it as a
 forward statement a prospect must not be allowed to mistake for a shipping
 service.
 
@@ -3805,7 +3805,7 @@ its scope and stays deferred. Both bodies need rewriting as part of item 210.
 
 ### 210. Proprietary licence transition — retire the BSL apparatus ✅ DONE
 
-`LICENSE` is now a proprietary notice pointing at `docs/legal/EULA.en.md` as the
+`LICENSE` is now a proprietary notice pointing at the EULA as the
 licence of record; the EULA carries the subscription's commercial clauses in both
 languages; the phone-home guard was narrowed rather than deleted; and the
 licensing claim sweep went from 235 sites to 35 deliberate lookalikes (part
@@ -3848,7 +3848,7 @@ when *we* fail, and without lying in the customer's audit ledger.
      schema-level test asserting the actual refresh request body's key set, built
      in the shape of `test_credential_redaction.py` rather than as a mock-call
      assertion —
-     the four fields `docs/legal/EULA.en.md` §16.1 discloses and
+     the four fields the EULA §16.1 discloses and
      an internal commercial plan §3 publishes. A fifth field is a **disclosure
      change before it is a code change**: amend the EULA (both languages), the
      FAQ, and `CLAUDE.md`’s "North Star" section's Reach pillar first.
@@ -4528,7 +4528,7 @@ background loop has no caller to hand a 402 to. Either
   nothing to anyone, and the operator can already disable refresh.
 
 **Definition of done:** whichever is chosen, `subscription_gate.py`'s docstring,
-`docs/THREAT_MODEL.md` §8 and `docs/LICENSING_FAQ.md`'s lapse table say the same
+`docs/THREAT_MODEL.md` §8 and the licensing FAQ's lapse table say the same
 thing, and a test pins it.
 
 ### 224. Bring the pre-existing console surfaces up to the banner's accessibility bar
@@ -4583,7 +4583,7 @@ last one it could.
 
 **What it is:** a supported-versions set rather than a single constant, with a
 stated deprecation window; or a client version in the refresh *request* (which is
-a disclosure change — `PAYLOAD_FIELDS`, `docs/LICENSING_FAQ.md` and the EULA's
+a disclosure change — `PAYLOAD_FIELDS`, the licensing FAQ and the EULA's
 §16.1 all name the four fields, so it needs that decision first, not a code
 change).
 

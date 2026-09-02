@@ -109,7 +109,7 @@ kind of change those rules exist to constrain:
    every procedure the DB user can see becomes callable. If this design ever
    drifts toward "list every procedure the connection's DB role can execute,
    let the caller invoke any of them," that is a non-goal violation requiring
-   its own NORTH_STAR decision, not something to slide into during
+   its own recorded product-identity decision, not something to slide into during
    implementation.
 
 ---

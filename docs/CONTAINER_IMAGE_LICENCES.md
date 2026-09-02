@@ -80,7 +80,7 @@ materially harder, not easier. This section is the honest record of that, and it
 is the one part of this repository that most needs a lawyer's eye before the
 image is published.**
 
-Under the cancelled proprietary plan, `docs/legal/EULA.en.md` §2 carried a
+Under the cancelled proprietary plan, the EULA §2 carried a
 Third-party components pass-through, and — critically — the image only ever
 reached a party who had *entered* an Order. `LICENSE` said in terms that someone
 without an Order had no licence to use the software, so the pass-through reached

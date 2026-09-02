@@ -104,7 +104,7 @@ pitch-down: ## Stop the three demo processes (leaves the database running)
 		pids=$$(lsof -ti tcp:$$port 2>/dev/null || true); \
 		if [ -n "$$pids" ]; then kill $$pids 2>/dev/null || true; fi; \
 	done
-	@echo "  demo processes stopped, deck included (database still up on :5544)"
+	@echo "  demo processes stopped (database still up on :5544)"
 
 .PHONY: pitch-stop
 pitch-stop: ## Stop EVERYTHING including the demo database
@@ -124,21 +124,6 @@ pitch-top: ## Watch what the agent is currently doing to the database
 .PHONY: pitch-selfcheck
 pitch-selfcheck: ## PRE-FLIGHT — assert the demo's actual claims against the live stack (run this before the meeting)
 	@$(PITCH_PY) demo/selfcheck.py
-
-.PHONY: pitch-deck
-pitch-deck: ## Serve the demo deck on :8901 with the live demo wired in (run pitch-up first)
-	@echo "  demo deck → http://127.0.0.1:8901   (talk track: press n)"
-	@$(PITCH_PY) demo/deck/serve.py
-
-.PHONY: pitch-deck-check
-pitch-deck-check: ## Assert the deck's own claims + the deck server's boundary (run before the meeting)
-	@$(PITCH_PY) -m pytest demo/deck/test_serve.py -q
-
-.PHONY: pitch-deck-down
-pitch-deck-down: ## Stop the demo deck server
-	@pids=$$(lsof -ti tcp:8901 2>/dev/null || true); \
-	  if [ -n "$$pids" ]; then kill $$pids 2>/dev/null || true; echo "  deck server stopped"; \
-	  else echo "  deck server was not running"; fi
 
 .PHONY: pitch-prove-audit
 pitch-prove-audit: ## ACT 4 — prove the audit ledger is tamper-evident, live (edit/delete/truncate all caught)

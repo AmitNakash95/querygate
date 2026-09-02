@@ -141,7 +141,7 @@ def test_no_vendor_hostname_appears_anywhere_in_the_shipped_source():
                 )
     assert not offenders, (
         "a QueryGate-controlled hostname appears in shipped source, which would make "
-        "`docs/LICENSING_FAQ.md`'s 'no outbound calls to us, ever' false:\n" + "\n".join(offenders)
+        "the licensing FAQ's 'no outbound calls to us, ever' false:\n" + "\n".join(offenders)
     )
 
 
@@ -164,7 +164,7 @@ def test_no_telemetry_or_licence_server_vocabulary_in_the_shipped_source():
 #: Banned outright in shipped source, with no exemption for `subscription/`.
 #:
 #: `smtplib`/`aiosmtplib` are here because three documents — `docs/INSTALL.md`,
-#: `docs/LICENSING_FAQ.md` and `docs/PRODUCT_GUIDE.md` — promise the gateway has
+#: the licensing FAQ and `docs/PRODUCT_GUIDE.md` — promise the gateway has
 #: no SMTP client and no address to send to; item 216 put the renewal email in
 #: the vendor control plane specifically so that stays true. Until this line, it
 #: was a three-document promise with nothing enforcing it.
