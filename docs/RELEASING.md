@@ -237,14 +237,12 @@ gh attestation verify oci://ghcr.io/agitmit/querygate:0.1.0 --repo AGitmit/Query
 signed+attested release is only produced when a maintainer actually pushes a version tag —
 publishing is never automatic on a `main` commit.
 
-**Python package index: ⚠️ the public-PyPI decision is superseded.** It was made under
-the cancelled source-available plan, where "a package that cannot be `pip install`ed
-defeats its own purpose" was the deciding argument. Under the proprietary subscription
-(`docs/business/GTM_SAAS.md` §6) **the container image is the only distribution channel**
-(signing and provenance are wired in `release.yml` but have not yet run on a
-tag), and publishing an installable wheel of a closed-source product to a public
-index would hand out the very artifact the packaging plan (item 214) exists to compile
-and obfuscate.
+**Python package index: still not published, but the reasoning has changed.** The
+argument against publishing was that an installable wheel of a closed-source
+product hands out the artifact the packaging plan existed to obfuscate. Under
+Apache-2.0 that argument is void — the source is public, so a wheel gives nothing
+away, and `pip install querygate` is the lowest-friction way for someone to try
+it. Publishing to PyPI is now a **wanted** step that simply has not been built.
 
 Nothing was built either way, so nothing has to be undone: `.github/workflows/release.yml`
 builds, scans, pushes, signs, and attests the container image only, and contains no PyPI
@@ -254,41 +252,31 @@ verified by `SHA256SUMS` / `make verify-release` — and are not published. If a
 step is ever wanted, it needs a fresh decision under the current licence, and it must
 inherit the same tag gate as the image: publishing is never automatic on a `main` commit.
 
-## The EULA is the licence of record
+## Apache-2.0 is the licence
 
-QueryGate ships proprietary and closed-source under a paid monthly subscription
-— decision recorded in `docs/business/GTM_SAAS.md`, licence transition landed as
-item 210. There is no BSL flip and no Change Date.
+QueryGate ships under **Apache-2.0**. [`LICENSE`](../LICENSE) carries the full
+licence text and is the operative grant — not a notice pointing elsewhere, which
+is what it was under the cancelled proprietary plan.
 
-`docs/legal/EULA.en.md` (with the Hebrew `EULA.he.md`; English governs) **is the
-licence of record** — the document a customer accepts. `LICENSE` now carries the
-proprietary notice: it reserves all rights, grants nothing, and points at the
-EULA. It is not a grant and must not be edited as though it were one.
+Two release-time obligations follow from Apache-2.0 §4(a), and both are gated:
 
-⚠️ **The text is not settled, which is exactly why these gates exist.** The
-Licensor legal entity does not exist yet, so `LICENSE` carries two `<…>`
-placeholders and `docs/legal/EULA.{en,he}.md` carry the commercial blanks counsel
-must fill (effective date, entity, address, cure and notice periods, retention
-window, liability cap). `make eula-check-release` refuses a tag while any of them
-remain, in **either** language.
+- **Every artifact that carries the code carries the licence.**
+  `scripts/check_release_artifacts.py` asserts `LICENSE` reaches the wheel
+  (via `license-files` in `pyproject.toml`), the sdist, and the container image
+  (via an explicit `COPY LICENSE` in the `Dockerfile`). A recipient of any one of
+  the three must receive a copy, so this is a licence requirement rather than
+  good manners.
+- **Both licence signals must agree.** `pyproject.toml` declares
+  `license = "Apache-2.0"` (PEP 639) *and* the OSI classifier.
+  `tests/unit/test_release_metadata.py` fails if either is missing, if a stale
+  proprietary classifier survives beside the SPDX expression, or if `LICENSE`
+  stops containing the operative grant clauses (§2 copyright, §3 patent,
+  §7 warranty disclaimer) — a file merely *named* Apache-2.0 grants nothing.
 
-```bash
-make eula-check            # tolerant: reports outstanding placeholders, exit 0
-make eula-check-release    # pre-tag: refuses ANY unfilled placeholder
-```
-
-- **`make eula-check`** runs on pushes to `main` and on every pull request (CI),
-  and inside `make release-check`.
-  While counsel has not settled the text it reports how many placeholders remain
-  and passes, so development is never blocked by an unfinished legal document.
-- **`make eula-check-release`** is the pre-tag gate, wired into
-  `.github/workflows/release.yml` *before* the image is built. A tag pushed while
-  the licence of record still reads `[LICENSOR LEGAL NAME]` or `[ADDRESS]` fails
-  the release rather than publishing a signed image with a blank licence.
-- The placeholder pattern deliberately matches **any** bracketed span, not
-  `\[[A-Z_ ]+\]`. `EULA.he.md`'s placeholders are Hebrew, so an ASCII-uppercase
-  pattern would give a green build on an entirely unfilled Hebrew licence.
-  Markdown links are excluded. Drift-tested by `tests/unit/test_eula.py`.
+Dependency licences are separate and stricter: `make license-check` gates every
+locked package deny-by-default (`docs/THIRD_PARTY_LICENSES.md`), and
+`docs/CONTAINER_IMAGE_LICENCES.md` covers the non-Python half of the image,
+including Microsoft's ODBC driver, which ships under its own proprietary terms.
 
 ## Tagging
 
