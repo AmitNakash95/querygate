@@ -14717,7 +14717,7 @@ ceasing to thread the config value through.
 **Why it matters:** the repo is wired end-to-end for a BSL flip that will now
 never happen — two CI jobs, three Make targets, a script, a test, and roughly
 thirty documents assert a source-available future and unlimited free production
-use. Shipping a paid product while `LICENSING_FAQ.md` promises *"no licence key
+use. Shipping a paid product while the licensing FAQ promises *"no licence key
 to obtain"* and *"no check that can refuse to start or block a query"* is not a
 doc bug; it is a written promise that is the exact inverse of what the product
 will do.
@@ -14727,7 +14727,7 @@ will do.
   file** — `pyproject.toml`'s `license-files`, `check_release_artifacts.py`'s
   wheel/sdist/image assertions, and the Dockerfile's `COPY LICENSE` all require
   it to exist.
-- **`docs/legal/EULA.{en,he}.md` becomes the licence of record.** Add, for
+- **`the EULA (both languages)` becomes the licence of record.** Add, for
   counsel, in both languages: term/renewal/fees/invoicing; **no-refund on
   cancellation with access to end of the paid period**; effect of non-payment;
   **suspension distinct from termination**; a cure period consistent with the
@@ -14764,7 +14764,7 @@ will do.
   with its endpoint named, scope the vendor-host and vocabulary rules to "outside
   `subscription/`", and add the positive payload assertion. Note it also shifts
   the adversarial-suite count pinned across eight documents.
-- **Rewrite `docs/LICENSING_FAQ.md` end to end** — roughly thirteen claims go
+- **Rewrite the licensing FAQ end to end** — roughly thirteen claims go
   false. Highest exposure: the "no kill switch, no time bomb, no check that can
   refuse to start or block a query" promise.
 - **✅ The `licensing` class is added to `scripts/claim_drift_sites.py` and the
@@ -14778,7 +14778,7 @@ will do.
   Two scoping facts the measurement gives us:
   - **126 of the 209 are in five BSL-*execution* artifacts** —
     `GTM_EXECUTION_PLAN.md` (56, already banner-marked superseded),
-    `LICENSE_NOTES.md` (29), `PRE_BSL_CLEANUP_PLAN.md` (21),
+    the licence drafting notes (29), the publication plan (21),
     `BSL_EXECUTION_PROMPT.md` (11), `GTM_EXECUTION_PROMPT.md` (9). These are
     plans *for the flip that was cancelled*, not live claims about the product.
     Banner-mark or archive them **as whole documents**; line-editing them is
@@ -14788,7 +14788,7 @@ will do.
     for 62 of them; the remaining ~21 sit across a further dozen files —
     including an internal commercial plan itself (4), `RELEASING.md` (3) and
     `test_no_phone_home.py` (3) — so run the command for the live list rather
-    than treating this as the decomposition. Named:  `LICENSING_FAQ.md` (23),
+    than treating this as the decomposition. Named:  the licensing FAQ (23),
     `CONTRIBUTING.md` + `.github/cla/` (13 — the CLA exists for outside
     contributors to a public repo, of which there are now none),
     `CONTAINER_IMAGE_LICENCES.md` (5), `PRODUCT_GUIDE.md` (4), `docs/README.md`
@@ -14806,8 +14806,8 @@ will do.
   reconcile an internal commercial plan §2 to carry all seven; the two lists currently disagree
   in both directions),
   `PRODUCT_GUIDE.md` Decision Log, a superseded-by banner on
-  `GTM_EXECUTION_PLAN.md`, `LICENSE_ENFORCEMENT.md`, `LICENSE_NOTES.md`,
-  `DISTRIBUTION_STRATEGY.md`, `PRE_BSL_CLEANUP_PLAN.md`,
+  `GTM_EXECUTION_PLAN.md`, the licence-enforcement analysis, the licence drafting notes,
+  the distribution-strategy note, the publication plan,
   `BSL_EXECUTION_PROMPT.md`, `GTM_EXECUTION_PROMPT.md`,
   `CONTAINER_IMAGE_LICENCES.md`, `docs/README.md`, `CONTRIBUTING.md` +
   `.github/cla/` (the CLA exists for outside contributors to a public repo —
@@ -14822,7 +14822,7 @@ will do.
 a superseded-by banner; `claim-verify` clean.
 
 **Shipped 2026-08-27.** `LICENSE` is a proprietary notice reserving all rights
-and naming `docs/legal/EULA.en.md` as the licence of record; the EULA gained, in
+and naming the EULA as the licence of record; the EULA gained, in
 **both** languages, the ten commercial clauses this item named — term/renewal/
 fees/invoicing/tax (§14), no-refund with access to the end of the paid period
 (§14.3), non-payment with its own notice and cure period (§14.4), suspension
@@ -14856,7 +14856,7 @@ Because the package does not exist yet the contract is a pure function over a
 directory, and every rule runs on each pass against planted bypasses — the
 *subject* is deferred to item 211, the *guard* is not. What it does **not** cover,
 stated rather than implied: a body built from a typed model with an extra
-attribute, which is the runtime assertion item 211 owes. `docs/LICENSING_FAQ.md` was
+attribute, which is the runtime assertion item 211 owes. the licensing FAQ was
 rewritten end to end. Five cancelled-plan documents plus `.github/cla/` carry
 whole-document superseded/retired banners, recorded as whole-file exemptions in
 `scripts/claim_drift_sites.py` and kept honest by
@@ -14881,7 +14881,7 @@ the 234 recorded exemptions: five cancelled-plan documents plus `.github/cla/`
 under whole-document superseded banners, and the licensing guards' own docstrings
 naming the claim each one replaced.
 
-Real editing did happen and is visible per file — `LICENSING_FAQ.md` went 23 → 7
+Real editing did happen and is visible per file — the licensing FAQ went 23 → 7
 raw — but it was offset by new text elsewhere. **Two earlier drafts of this
 paragraph got the number wrong**: the first published 35 when the command printed
 48 (before `docs/TODO_ARCHIVE.md` was exempted), and the second claimed ~200
@@ -14902,7 +14902,7 @@ allowed to disagree with the design:
   signed licence. Now narrowed to health, metrics, licence status and audit
   retrieval, with the enumerated set deferred to the Documentation — and, after
   the re-review caught that the EULA alone had been fixed, in
-  `LICENSING_FAQ.md`, `PRODUCT_GUIDE.md` and `LICENSE_ENFORCEMENT.md` too.
+  the licensing FAQ, `PRODUCT_GUIDE.md` and the licence-enforcement analysis too.
 - **§16 asserted a *complete* transmission disclosure and omitted transport
   metadata** that an internal commercial plan §8 says is sent — and §8 claimed the EULA named
   it. §16.1(b) now discloses egress IP, product version and liveness, with a
@@ -14922,7 +14922,7 @@ allowed to disagree with the design:
   predicate, true for `lambda p: True`. It survived a mutation test because the
   *neighbouring* assertion fired.
 - **The whole-file claim-drift exemptions were not class-scoped**, so exempting
-  `docs/CONTROL_PLANE_PLAN.md` for licensing also blinded it to the
+  the control-plane plan for licensing also blinded it to the
   `cost-estimation`, `worm-resumable`, `four-eyes`, `admin-ui` and
   `disclosure-budget` sweeps. `KNOWN_OK` entries now name their class.
 - **`sales/index.html` was given a claim its own governing doc forbids** —
