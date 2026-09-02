@@ -4411,7 +4411,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   control plane from the billing record and signed into the entitlement
   alongside `enforcement`. The alternative — inferring it deployment-side from
   refresh behaviour — would warn the customer that their access is ending every
-  time *we* had an outage, which is the exact failure `GTM_SAAS.md` §5 promises
+  time *we* had an outage, which is the exact failure an internal commercial plan §5 promises
   cannot happen. It is three values rather than a boolean because "your payment
   failed" and "you cancelled" call for different actions, and one bool renders
   them identically.
@@ -4503,7 +4503,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   rather than promises — including a **post-termination audit-retrieval
   carve-out**, without which the product would permit an act its own licence
   forbade, worst in exactly the regulated sectors it is sold into. A seventh
-  non-goal, **no hosted query execution**, is recorded in `NORTH_STAR.md` with
+  non-goal, **no hosted query execution**, is recorded in `CLAUDE.md`’s "North Star" section with
   it: the subscription creates commercial pressure toward "we'll run it for
   you", which would destroy the Reach pillar outright, so it is written down
   rather than assumed.
@@ -4661,8 +4661,8 @@ reasoning behind them, newest first. Added to incrementally as work happens
   was superseded on 2026-08-23 — see the 2026-08-23 entry below.** Retained
   unedited because the reasoning for rejecting open-core is what survived the
   reversal, and it is load-bearing for why the proprietary product is *whole*
-  rather than split. `docs/business/PRE_BSL_CLEANUP_PLAN.md` Phase 0 had left
-  this "a later, reversible decision." `docs/business/GTM_EXECUTION_PLAN.md`
+  rather than split. an internal publication plan Phase 0 had left
+  this "a later, reversible decision." an internal commercial plan
   §1 **supersedes that keep-it-reversible posture** and rejects open-core
   outright, consciously, because the reasoning changed rather than being
   forgotten: the features a split would hold back — per-human attribution,
@@ -4681,9 +4681,9 @@ reasoning behind them, newest first. Added to incrementally as work happens
 - **2026-08-21 — The product's category name is deliberately left undecided,
   and "agent database firewall" is rejected as a candidate.** A category name
   is worth choosing carefully, because whoever names one tends to own it —
-  but `docs/business/GTM_EXECUTION_PLAN.md` §5.3 sets one hard constraint any
+  but an internal commercial plan §5.3 sets one hard constraint any
   candidate must clear first: **the name must not imply inspection.** The
-  firewall/inspection mental model is exactly what `docs/business/NORTH_STAR.md`
+  firewall/inspection mental model is exactly what `CLAUDE.md`’s "North Star" section
   ("by construction, never by inspecting a string") and the flagship essay
   exist to demolish, so a name that reintroduces it would undercut the
   product's own positioning at the naming layer. "Agent database firewall"
@@ -4693,7 +4693,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   Imperva SecureSphere own "database firewall"; Pipelock, Radware, and A10
   already use "AI agent firewall" in active vendor positioning), and — the
   more important reason — it *is* the inspection model, the one this product
-  is built to reject. No category name goes into `NORTH_STAR.md` until a
+  is built to reject. No category name goes into `CLAUDE.md`’s "North Star" section until a
   candidate clears this constraint.
 - **2026-08-21 — The dependency-licence gate records copyleft findings rather
   than blocking on them, and scopes itself to Python packages.** Ahead of the
@@ -4805,7 +4805,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   turns a deterministic gate probabilistic, opens a prompt-injection surface
   inside the control plane, and is self-attested by the exact party being
   governed — an agent that would exfiltrate will also write "routine
-  reporting". Adding it would need a NORTH_STAR decision, not just this log.
+  reporting". Adding it would need a recorded product-identity decision, not just this log.
   (3) **Intent as read off the query shape, accumulated over time** — built,
   as item 179.
 
@@ -6274,7 +6274,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   `io.github.agitmit/structured-query-ast` rather than a not-yet-owned domain
   (TODO.md item 131, internal half).** The `2026-07-28` protocol revision's
   SEP-2133 extensions framework gives strategic play P2 ("open the contract",
-  `docs/business/MARKET_DOMINATION_ANALYSIS.md` §7) a standards-blessed
+  an internal competitive analysis §7) a standards-blessed
   vehicle: the read `StructuredQuery` AST and the write
   `Insert`/`Update`/`Delete`/`Upsert` union can be declared as a named,
   versioned artifact instead of just a product-specific JSON schema no one
@@ -6909,8 +6909,8 @@ reasoning behind them, newest first. Added to incrementally as work happens
   column `column_masks` merge test); and two stale-claim corrections
   (`docs/SECURITY_POSTURE.md`'s adversarial-suite test count corrected from a
   pre-existing stale 310 to the actual 463, propagated into a regenerated
-  `docs/TRUST_EVIDENCE.md`; `docs/business/PRODUCT_SCORECARD.md`/
-  `MARKET_DOMINATION_ANALYSIS.md` marked stale where they described items
+  `docs/TRUST_EVIDENCE.md`; an internal product scorecard/
+  an internal competitive analysis marked stale where they described items
   137/145 as open gaps that shipped the same day, without attempting a full
   re-score — that's `product-scorecard`'s job, not a side effect of an audit
   response). Full unit (1994), integration (345, excluding `real_db`),
@@ -6965,7 +6965,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   generator disagree, so "always current" is enforced the same way item 95's
   `docs/SCOPE_CATALOG.md` guard already is, not left as a habit to remember.
   Deliberately no HTML/CSS page: the item's own scope explicitly rules out
-  this becoming a marketing page (that's `pitch-sync`/`GO_TO_MARKET.md`'s
+  this becoming a marketing page (that's `pitch-sync`/the go-to-market analysis's
   job) — a generated Markdown doc is the evidentiary companion, not a
   landing-page replacement for `landing/security.html`.
 
@@ -8564,7 +8564,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   of on the query-semantic guarantee (its moat). The legitimate instinct behind
   the question — *be the enforcement point guarding all access within a client's
   architecture* — is already served on-thesis by the **P4 verdict endpoint**
-  (`NORTH_STAR.md` leverage move #1: any front door, gateway, or app calls
+  (`CLAUDE.md`’s "North Star" section leverage move #1: any front door, gateway, or app calls
   QueryGate for the query-semantic verdict it cannot compute itself) and by the
   **sole-credential-holder deployment** (below), neither of which requires a new
   query language or broadens the AI-agent wedge. Reaching non-AI *apps* is a

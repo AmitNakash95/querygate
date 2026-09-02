@@ -52,7 +52,7 @@ Mark each one clean or not clean by name. Skip nothing silently.
    resembling `execute_sql`, raw-SQL mode, execution of model-generated code, a
    stored-procedure path, a mandatory semantic-modeling step, or a warehouse of
    QueryGate's own, unless it cites a Decision Log entry in
-   `docs/PRODUCT_GUIDE.md` or `docs/business/NORTH_STAR.md`.
+   `docs/PRODUCT_GUIDE.md` or `CLAUDE.md`’s "North Star" section.
 
 ## Rules of engagement
 

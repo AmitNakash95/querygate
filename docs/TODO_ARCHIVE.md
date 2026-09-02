@@ -4002,7 +4002,7 @@ queries a principal can have *in flight at once*, not how many it can run
 *over time*. A well-behaved agent that never exceeds its concurrency limit
 can still issue tens of thousands of sequential queries an hour, exhausting
 DB capacity or a customer's cost budget — the multi-tenant cost-governance
-story enterprise buyers in `docs/business/GO_TO_MARKET.md`'s target segment
+story enterprise buyers in the go-to-market analysis's target segment
 will ask for directly.
 
 **What to do:** Add a per-principal (and optionally per-connection)
@@ -4134,7 +4134,7 @@ risk — rather than leaving the inference category silently unaddressed.
 cross-instance concurrency state; the new work was failover behavior and a
 documented recovery procedure, not a new deployment topology from scratch.
 
-**Why it mattered:** `docs/business/GO_TO_MARKET.md` explicitly said not to
+**Why it mattered:** an internal go-to-market analysis explicitly said not to
 claim "a production Helm/Kubernetes reference deployment" yet. Item 29's
 reference stack is not the same claim as proven multi-instance failover —
 enterprise buyers evaluating this for production traffic ask for an HA/DR story
@@ -4169,7 +4169,7 @@ specifically, not just a docker-compose file or a single Helm chart.
   (Git-as-config-backup, governance PVC snapshot, audit-via-log-aggregator), and
   reference RTO (≈ minutes) / RPO (≈ zero for config) targets, plus a failover
   drill checklist for the one step only the operator can run.
-- Cross-links from `deploy/README.md` and `deploy/runbook.md`; GO_TO_MARKET
+- Cross-links from `deploy/README.md` and `deploy/runbook.md`; the go-to-market analysis
   claims reconciled (HA/DR deployment now "safe to claim now" with the quota and
   live-drill caveats; only an enterprise *SLA* remains "do not claim").
 
@@ -6030,7 +6030,7 @@ strengthens attribution.
 
 ### 91. Tamper-evident hash-chained audit ledger + per-query compliance receipts ✅ DONE
 
-**Feature ref: F5. Completes the Proof pillar (`docs/business/NORTH_STAR.md`)
+**Feature ref: F5. Completes the Proof pillar (`CLAUDE.md`’s "North Star" section)
 with item 90 — attribution (who, on whose behalf, under which policy) plus
 tamper-evidence (and the record proving it wasn't edited).**
 
@@ -8596,7 +8596,7 @@ server-side defense:
 > — [Streamable HTTP § Server Validation](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)
 
 **Why it matters more for QueryGate than for a typical MCP server.** The P4
-leverage move (`docs/business/MARKET_DOMINATION_ANALYSIS.md` §7) is to sit
+leverage move (an internal competitive analysis §7) is to sit
 *behind* MCP gateways and proxies as the enforcement point they can't be. That
 is exactly the deployment where this mismatch is a real confused-deputy: a
 fronting gateway authorizes `Mcp-Name: list_tables` for a low-privilege
@@ -8671,8 +8671,8 @@ claim — were run in parallel; each is recorded here with its finding ID):
 
 Claim-reviewer also caught this write-up's own test count drifting ("eight"
 vs. the seven tests that existed at that point) and flagged that the adjacent
-`docs/business/` strategy docs (`MARKET_DOMINATION_ANALYSIS.md`,
-`COMPETITOR_MCP_GATEWAYS.md`, `NORTH_STAR.md`) still described item 127 as
+`docs/business/` strategy docs (an internal competitive analysis,
+`COMPETITOR_MCP_GATEWAYS.md`, `CLAUDE.md`’s "North Star" section) still described item 127 as
 unshipped — both corrected.
 
 **Coverage.** 13 test functions (14 test items — one is parametrized ×2) in
@@ -8809,7 +8809,7 @@ the real v2 `MCPServer` end to end (`streamable_http_app`, `tools/list`,
 `connections, schema, query, write, help, templates`) updated for the v2
 forward-ref resolution mechanics; `docs/PRODUCT_GUIDE.md`'s architecture
 section, item-127/128 narrative, tools list, and Decision Log updated;
-`docs/business/NORTH_STAR.md`'s "MCP protocol currency" gap marked CLOSED
+`CLAUDE.md`’s "North Star" section's "MCP protocol currency" gap marked CLOSED
 2026-08-06.
 
 **Effort:** L (as scoped). **Depends on:** 90, 92, 93 (all shipped), and the
@@ -9225,7 +9225,7 @@ all shipped, but several surfaces still described them as open or partial.
 
 **What shipped — every claim verified against the code before editing:**
 
-- `docs/business/GO_TO_MARKET.md`'s "Safe to claim now" list gained four
+- the go-to-market analysis's "Safe to claim now" list gained four
   bullets for items 90 (delegated agent identity, dual-identity audit, MCP
   OAuth resource-server conformance RFC 9728/8707/6750), 91 (tamper-evident
   hash-chained audit ledger + per-query receipts, `AUDIT_SINK_BACKEND=jsonl_chained`),
@@ -9271,19 +9271,19 @@ spots surfaced by, but not part of, this same reconciliation pass — all fixed
 in the same commit: README's approval section still claimed MCP elicitation
 approval as "the one remaining piece" three lines below a heading this item
 had just marked complete, when `mcp/elicitation.py` had shipped it weeks
-earlier; GO_TO_MARKET's "do not claim yet" list still said "signed
+earlier; the go-to-market analysis's "do not claim yet" list still said "signed
 release/SBOM distribution" in blanket form when `sales/index.html` already
 carried the precise, reconciled framing (mechanism built and CI-tested,
 no release cut through it yet) — reused verbatim; and item 56's own HA/DR body
-carried the identical stale quota phrase GO_TO_MARKET's copy had just been
+carried the identical stale quota phrase the go-to-market analysis's copy had just been
 corrected away from.
 
 **Effort:** S. **Depends on:** none.
 
 ### 133. The verdict endpoint — expose the decision without the execution (play P4) ✅ DONE
 
-**Surfaced 2026-07-30 by `competitive-scan`.** `MARKET_DOMINATION_ANALYSIS.md`
-§7 names P4 as one of the two leverage moves, `NORTH_STAR.md` lists it under
+**Surfaced 2026-07-30 by `competitive-scan`.** an internal competitive analysis
+§7 names P4 as one of the two leverage moves, `CLAUDE.md`’s "North Star" section lists it under
 "the two leverage moves", `COMPETITORS.md` tells us to build it, and
 `COMPETITOR_MCP_GATEWAYS.md`'s Decision leads with it.
 
@@ -9399,7 +9399,7 @@ vocabulary; scope-completeness).
 
 ### 134. Compliance-grade (WORM) audit retention + managed search ✅ DONE
 
-**Surfaced 2026-07-30 by `competitive-scan`.** `GO_TO_MARKET.md`'s "Do not
+**Surfaced 2026-07-30 by `competitive-scan`.** the go-to-market analysis's "Do not
 claim yet" list had named compliance-grade/WORM audit retention and managed
 search since early on. Item 91's hash-chained ledger detects tampering in
 what was kept; this item closes the other half a regulated (fintech/
@@ -10316,7 +10316,7 @@ rejection counter.
 today and never enforced. Immuta's flagship primitive — purpose-based access,
 where a caller must declare *why* it needs the data from an allowed set of
 purposes, and that purpose narrows what it can see — is real and, per the
-2026-07-22 survey (`docs/business/MARKET_DOMINATION_ANALYSIS.md` F7), "barely
+2026-07-22 survey (an internal competitive analysis F7), "barely
 exists elsewhere": the access proxies log a justification string at best; no
 MCP gateway or DB-vendor server enforces a declared purpose at all.
 
@@ -10469,7 +10469,7 @@ suites pass on the final tree.
 already assembles a defensible security-posture packet — SBOM, item-54
 compliance mapping, item-58 benchmark results, threat-model coverage,
 credential-redaction evidence — but only ad hoc, hand-rebuilt per prospect
-engagement. `docs/business/NORTH_STAR.md`'s own stated posture is "we are
+engagement. `CLAUDE.md`’s "North Star" section's own stated posture is "we are
 not behind on capability, we are behind on evidence and market presence,"
 and the one defined success metric is a design partner's security team
 signing off; the artifact that shortens that review cycle doesn't persist
@@ -10507,7 +10507,7 @@ the drift-guard test fail for the expected reason; reverted (regenerated via
 `make trust-page`) and the full unit suite passes on the final tree.
 
 **Explicitly out of scope (per the item's own scope, honored as-is):** no
-HTML/CSS marketing page — that's `pitch-sync`/`GO_TO_MARKET.md`'s job, and
+HTML/CSS marketing page — that's `pitch-sync`/the go-to-market analysis's job, and
 `landing/security.html` already exists for that purpose; no unearned SOC 2 /
 ISO / third-party-pentest claims (nothing here asserts one).
 
@@ -11020,9 +11020,9 @@ managed search" and listed only Postgres/SQL Server as supported dialects —
 both false as of items 19 phase 1 and 134 phase 1. Ran the `pitch-sync`
 skill to reconcile every dialect/WORM mention across `sales/index.html`,
 `landing/security.html`, `landing/index.html`, and `landing/sandbox.html`
-against `docs/business/GO_TO_MARKET.md`'s framing.
+against the go-to-market analysis's framing.
 
-**Correction to the item's own premise:** `GO_TO_MARKET.md` was *not*
+**Correction to the item's own premise:** an internal go-to-market analysis was *not*
 fully correct going in — item 134's commit had updated its WORM claim
 correctly, but item 19's commit never touched it, so its "safe to claim
 now" list still read "Postgres and SQL Server support" with no MySQL
@@ -11059,7 +11059,7 @@ bounded-grep for it.
 - `landing/sandbox.html`: the demo-to-real handoff line.
 - `README.md`: the opening one-line pitch ("Postgres or MSSQL database" →
   "Postgres, MSSQL, or MySQL database").
-- `docs/business/GO_TO_MARKET.md`: "safe to claim now" dialect line fixed
+- an internal go-to-market analysis: "safe to claim now" dialect line fixed
   to include MySQL (was missed by item 19's own commit).
 
 **Verified against real code, not just plausible wording**, before
@@ -13375,7 +13375,7 @@ outside `docs/` and `archive/` for the same class of denial ("no managed
 search", "search interface over", "managed search … not started") found no
 fourth surface, and this write-up originally concluded "the class is closed".
 **That conclusion was wrong, and the sweep's own exclusion is why:**
-`docs/business/GO_TO_MARKET.md` lives under `docs/`, and it carries its own
+an internal go-to-market analysis lives under `docs/`, and it carries its own
 "Safe to claim / Do not claim yet" lists — structurally the same artifact as
 `sales/index.html`, which this item did fix. It was still telling a seller the
 endpoint does not exist. Caught 2026-08-12 by `claim-reviewer` re-auditing this
@@ -13737,7 +13737,7 @@ and only one is buildable. (a) **Declared purpose as a token** — shipped, item
 and narrowing the effective policy via `for_purpose`. (b) **The
 natural-language ask** (`StructuredQuery.intent`, free text) — deliberately
 **not** governable and must stay that way: enforcing it means inspecting a
-string and judging its meaning, which contradicts NORTH_STAR.md's "by
+string and judging its meaning, which contradicts CLAUDE.md’s "North Star" section's "by
 construction, never by inspecting a string," makes a deterministic gate
 probabilistic, opens a prompt-injection surface inside the control plane, and
 is self-attested by the exact party being governed (an agent that would
@@ -13768,7 +13768,7 @@ upgrades item 145 from a config knob into a materially stronger one: a
 purpose would then bound not only what a caller may see per query but how
 much it may triangulate per window. Immuta *enforces* a declared purpose —
 gating on a declared reason from an allowed set, rather than merely logging a
-justification string — which `MARKET_DOMINATION_ANALYSIS.md` F7 found "barely
+justification string — which an internal competitive analysis F7 found "barely
 exists" elsewhere.
 
 **Be precise about what our own briefs actually establish here, because it is
@@ -14759,7 +14759,7 @@ will do.
   211's client cannot be written without turning the suite red **mid-item**,
   where it reads as a mystery failure and the cheapest reaction is to delete the
   file — taking with it two assertions that become *more* valuable under this
-  model, one of which is the mechanism `GTM_SAAS.md` §8 sells. Narrow it instead:
+  model, one of which is the mechanism an internal commercial plan §8 sells. Narrow it instead:
   keep both assertions, add the subscription source module to the `allowed` set
   with its endpoint named, scope the vendor-host and vocabulary rules to "outside
   `subscription/`", and add the positive payload assertion. Note it also shifts
@@ -14786,7 +14786,7 @@ will do.
     changed.
   - **That leaves 83 sites of genuine editing.** The named files below account
     for 62 of them; the remaining ~21 sit across a further dozen files —
-    including `GTM_SAAS.md` itself (4), `RELEASING.md` (3) and
+    including an internal commercial plan itself (4), `RELEASING.md` (3) and
     `test_no_phone_home.py` (3) — so run the command for the live list rather
     than treating this as the decomposition. Named:  `LICENSING_FAQ.md` (23),
     `CONTRIBUTING.md` + `.github/cla/` (13 — the CLA exists for outside
@@ -14801,9 +14801,9 @@ will do.
   `scripts/check_release_artifacts.py`'s three BSL-specific rationale strings and
   error messages, which would otherwise instruct a future maintainer to satisfy a
   licence that no longer applies.
-- **Sweep the rest**: `NORTH_STAR.md` (Reach pillar narrowing **and** the
+- **Sweep the rest**: `CLAUDE.md`’s "North Star" section (Reach pillar narrowing **and** the
   non-goal list — add "no hosted query execution" as a recorded decision, and
-  reconcile `GTM_SAAS.md` §2 to carry all seven; the two lists currently disagree
+  reconcile an internal commercial plan §2 to carry all seven; the two lists currently disagree
   in both directions),
   `PRODUCT_GUIDE.md` Decision Log, a superseded-by banner on
   `GTM_EXECUTION_PLAN.md`, `LICENSE_ENFORCEMENT.md`, `LICENSE_NOTES.md`,
@@ -14861,8 +14861,8 @@ rewritten end to end. Five cancelled-plan documents plus `.github/cla/` carry
 whole-document superseded/retired banners, recorded as whole-file exemptions in
 `scripts/claim_drift_sites.py` and kept honest by
 `tests/unit/test_claim_drift_exemptions.py` — an exemption is valid only while
-the banner is present. `NORTH_STAR.md` gained the seventh non-goal (**no hosted
-query execution**) and the narrowed Reach pillar; `GTM_SAAS.md` §2's
+the banner is present. `CLAUDE.md`’s "North Star" section gained the seventh non-goal (**no hosted
+query execution**) and the narrowed Reach pillar; an internal commercial plan §2's
 "only an org id and a deployment id" contradiction with its own §3 was fixed.
 Items 197 and 198 were rewritten. `pyproject.toml` declares
 `License :: Other/Proprietary License` — true for the first time.
@@ -14895,7 +14895,7 @@ shape — the EULA had become a *security specification* and was
 allowed to disagree with the design:
 
 - **§15.2 promised blanket administrative and configuration access survives
-  suspension.** `GTM_SAAS.md` §5 deliberately **blocks**
+  suspension.** an internal commercial plan §5 deliberately **blocks**
   `/admin/config/blast-radius`, `/simulate`, `/versions/{id}/apply` and
   `/admin/connections/{id}/test` during a lapse, because they are live-schema and
   secret-reference oracles. Item 216's implementer would have built against the
@@ -14904,7 +14904,7 @@ allowed to disagree with the design:
   the re-review caught that the EULA alone had been fixed, in
   `LICENSING_FAQ.md`, `PRODUCT_GUIDE.md` and `LICENSE_ENFORCEMENT.md` too.
 - **§16 asserted a *complete* transmission disclosure and omitted transport
-  metadata** that `GTM_SAAS.md` §8 says is sent — and §8 claimed the EULA named
+  metadata** that an internal commercial plan §8 says is sent — and §8 claimed the EULA named
   it. §16.1(b) now discloses egress IP, product version and liveness, with a
   retention period.
 - **`LICENSE` cited "Section 16 (Technical enforcement…)" when that is §15** — a
