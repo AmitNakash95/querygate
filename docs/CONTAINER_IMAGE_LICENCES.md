@@ -72,7 +72,7 @@ and a half of them:**
 | Requirement | Status |
 |---|---|
 | (i) "add significant primary functionality to it in your applications" | **Met.** QueryGate is not a repackaged driver. |
-| (ii) "require distributors and external end users to agree to terms that protect it and Microsoft at least as much as this agreement" | **Not met.** The Apache-2.0 transition removed the pass-through that partly addressed it. See below. |
+| (ii) "require distributors and external end users to agree to terms that protect it and Microsoft at least as much as this agreement" | **Not applicable.** We no longer distribute the driver — see below. |
 | (iii) "indemnify, defend, and hold harmless Microsoft from any claims … related to the distribution or use of your applications" | **Not addressed.** Nothing in QueryGate's licence or terms does this. |
 
 Requirement (ii) is the load-bearing one, and **the move to Apache-2.0 made it
@@ -93,32 +93,39 @@ terms — the same gap BSL 1.1 had. And there is no longer an Order gating who m
 pull the image: once it is public, anyone can, including people who never agreed
 to anything.
 
-⚠️ **The specific open question.** `msodbcsql18` is Microsoft's proprietary ODBC
-driver, installed under `ACCEPT_EULA=Y` at build time and shipped inside the
-image. Its licence text is present in the image (the `dpkg path-include` that
-`scripts/check_release_artifacts.py` asserts), which satisfies the
-"licence text accompanies the binary" half. What is **not** established is
-whether publicly redistributing that driver inside an Apache-2.0 image is
-permitted at all, and whether the redistribution and indemnity requirements can
-be discharged without an Order in place. That question did not need answering
-while distribution was gated; it does now.
+✅ **RESOLVED by removing the question, not answering it (TODO.md item 228).**
+`msodbcsql18` no longer ships in the default image. It moved to an opt-in
+`production-mssql` build target that a deployment needing MSSQL builds for
+itself:
 
-**Do not treat this as resolved by the licence change.** Three options, none of
-them free:
+```bash
+docker build --target production-mssql -t querygate:mssql .
+```
 
-1. Get the redistribution position reviewed by counsel before publishing an
-   image that contains the driver.
-2. Ship the driver in a separate, clearly-labelled image variant and make the
-   default image MSSQL-free, so the default artifact carries no third-party
-   proprietary binary at all.
-3. Do not ship the driver; document the `apt-get install msodbcsql18` step as an
-   operator action, so the person who accepts `ACCEPT_EULA=Y` is the person who
-   installs it.
+That puts the party who accepts `ACCEPT_EULA=Y` and the party who installs the
+driver back together — the same person, in their own environment, exactly as if
+they had run `apt-get install msodbcsql18` themselves. Nothing proprietary is
+redistributed by us, so §2(b)(ii)'s "require distributors and external end users
+to agree to terms" has nobody left to reach, and §2(b)(iii)'s indemnity is not
+triggered by a distribution that does not happen.
 
-Option 2 or 3 removes the question rather than answering it, and either is
-cheaper than a legal opinion. Requirement (iii) — the indemnity running to
-Microsoft — remains unaddressed under any of them, and is an owner decision, not
-a drafting one.
+`scripts/check_release_artifacts.py` enforces it structurally: the default stage
+is sliced out of the `Dockerfile` and searched for an `apt-get install …
+msodbcsql18`, so the guard fails if the install migrates back. It is keyed on
+the install command rather than the package name, because the opt-in stage's own
+comment names the package and a naive substring check flagged that comment on
+its first run. Mutation-verified: moving the install into the default stage
+fails the check.
+
+**What this costs, stated plainly:** MSSQL users no longer get a turnkey image
+and must build one line themselves. That is a real regression in convenience for
+one of three supported dialects, accepted because the alternative was either a
+legal opinion or redistributing a proprietary binary to anyone who runs
+`docker pull`. Postgres and MySQL are unaffected.
+
+**Still not addressed under any option:** requirement (iii), an indemnity running
+to Microsoft, if QueryGate ever *does* distribute an image containing the driver.
+The current answer is that it does not.
 
 One restriction *is* now comfortably satisfied: §2(c)(ii) forbids distributing
 the code so that any part of it becomes subject to a licence requiring source

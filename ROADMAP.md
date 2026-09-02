@@ -168,7 +168,7 @@ human-SSO/identity stream; these start at 210.
 - [ ] **217** — Customer portal: signup, checkout, downloads, docs.
   **Blocked on the legal entity.**
 - [ ] **218** — Setup guides and quickstart docs for the SaaS motion.
-- [ ] **228** — Resolve msodbcsql18 redistribution in a public image (blocks
+- [x] **228** — Resolve msodbcsql18 redistribution in a public image (blocks
       the first public image release; repository and wheel unaffected)
 - [ ] **227** — Deepen ClusterFuzzLite: add a fuzz target whose work is in
       Python, since pydantic-core is native and coverage feedback on the
