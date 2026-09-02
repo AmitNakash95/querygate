@@ -26,7 +26,7 @@ them in, and why that order maximizes product growth and ROI.**
 
 ## The strategy this order encodes
 
-**This order serves the North Star (`docs/business/NORTH_STAR.md`).** Every item
+**This order serves the North Star (`CLAUDE.md`’s "North Star" section).** Every item
 here advances one of QueryGate's three pillars — **Structural** (no raw SQL/DML +
 query-shape policy), **Reach** (live operational DB, self-hosted, data never
 leaves), **Proof** (per-human attribution + tamper-evident audit) — or closes a
@@ -36,7 +36,7 @@ no competitor's passes.** A re-sequence must cite which pillar or gap it serves.
 An item that advances none of them is a signal to question the item, not the
 order.
 
-The 2026-07-22 competitive scan (`docs/business/MARKET_DOMINATION_ANALYSIS.md`,
+The 2026-07-22 competitive scan (an internal competitive analysis,
 `docs/business/COMPETITORS.md`) reached one conclusion that drives the whole
 sequence: **QueryGate's white space is real, but the thing that converts
 "promising architecture" into "must-buy" is proof, not more features — and the
@@ -85,7 +85,7 @@ claim when the work ships or before explicitly handing the item back.
 ### Phase S — Ship as a paid SaaS product (gates everything else)
 
 Owner decision, 2026-08-23: QueryGate is **proprietary, closed-source, sold as a
-paid monthly subscription**. See `docs/business/GTM_SAAS.md`, which supersedes
+paid monthly subscription**. See an internal commercial plan, which supersedes
 `GTM_EXECUTION_PLAN.md` and the Shape A / BSL decision of 2026-08-21 in full.
 
 This phase precedes Phase 0 not because it is more valuable, but because it is
@@ -467,7 +467,7 @@ deferred; it is not part of shipping the subscription.
   same-session fix.*
 - [x] **152** — Sales/landing pages don't reflect items 19 (MySQL)/134 (WORM
   retention) shipping. *Surfaced 2026-08-06 by `claim-reviewer` while
-  auditing items 19/128/134/144 — `GO_TO_MARKET.md` was updated correctly,
+  auditing items 19/128/134/144 — an internal go-to-market analysis was updated correctly,
   the public pages weren't; run `pitch-sync`.*
 - [x] **153** — `CHANGELOG.md` has no `[Unreleased]` entry for items 19
   (MySQL) or 134 (WORM retention). *Surfaced 2026-08-06 by `claim-reviewer`
@@ -958,7 +958,7 @@ position.
   headers would leak query semantics to intermediaries.* **Depends on 128, 127.**
 - [x] **132** — Reconcile stale shipped-status claims left behind by items
   90–93. *Surfaced by the `auditors` claim review on 2026-07-30. Cheap, and it
-  is outward-facing: GO_TO_MARKET.md understates four shipped capabilities, and
+  is outward-facing: an internal go-to-market analysis understates four shipped capabilities, and
   item 93's body still points an implementer at a module deleted in July.*
 - [x] **133** — Caller-facing, quota-metered verdict endpoint (play P4).
   *Added 2026-07-30 by `competitive-scan`; scope corrected the same day by
@@ -1073,7 +1073,7 @@ surface them for a human, never auto-start them.
 - **P2 · Open the StructuredQuery AST as a standard.** A standards-governance
   commitment, not just engineering.
 - **18 · Stored-procedure catalog.** Added 2026-07-28 (`roadmap-next` walk):
-  `docs/business/NORTH_STAR.md` lists "No stored-procedure /
+  `CLAUDE.md`’s "North Star" section lists "No stored-procedure /
   arbitrary-procedural-SQL path" as a permanent non-goal — product identity,
   not a gap — and CLAUDE.md's non-negotiable #8 requires an explicit recorded
   NORTH_STAR decision before adding anything the non-goals list forbids.

@@ -11,7 +11,7 @@ cross-check. This document is a point-in-time assessment; see `ROADMAP.md`'s
 QueryGate is a mature, disciplined codebase, not an early-stage prototype —
 106 tracked TODO items (most shipped), ~150 source modules, ~1,630 collected
 tests across unit/integration/security tiers, and process docs
-(`docs/PRODUCT_GUIDE.md`, `docs/business/NORTH_STAR.md`,
+(`docs/PRODUCT_GUIDE.md`, `CLAUDE.md`’s "North Star" section,
 `docs/ENGINE_EXPRESSIVENESS_PLAN.md`) that are unusually well-reconciled to the
 actual code. The core non-negotiables — no caller-controlled raw SQL, no
 credential ever on a returned model, redaction-safe audit, one catalog

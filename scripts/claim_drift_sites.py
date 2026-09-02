@@ -68,7 +68,7 @@ _CLASSES: Dict[str, ClaimClass] = {
     "licensing": ClaimClass(
         "licensing",
         "QueryGate ships proprietary/closed-source on a paid subscription (item 210, "
-        "docs/business/GTM_SAAS.md). Every BSL-flip, free-forever, source-available and "
+        "the commercial plan). Every BSL-flip, free-forever, source-available and "
         "no-outbound-calls claim in the repo is now false. This class is the inverse of "
         "the others: it hunts claims about a future that was CANCELLED, not a shipped "
         "feature that is understated.",
@@ -225,18 +225,6 @@ KNOWN_OK: List[Tuple[str, str, str, str]] = [
     # banner is present, which is why
     # `test_every_banner_exempt_document_still_carries_its_banner` asserts it.
     (
-        "docs/business/GTM_EXECUTION_PLAN.md",
-        "",
-        "Superseded-by-banner (2026-08-23): the cancelled BSL/Shape A execution plan.",
-        "licensing",
-    ),
-    (
-        "docs/business/PRE_BSL_CLEANUP_PLAN.md",
-        "",
-        "Superseded-by-banner (2026-08-23): cleanup sequenced for a flip that will not happen.",
-        "licensing",
-    ),
-    (
         "docs/business/BSL_EXECUTION_PROMPT.md",
         "",
         "Superseded-by-banner (2026-08-23): an execution prompt for the cancelled flip.",
@@ -319,8 +307,6 @@ KNOWN_OK: List[Tuple[str, str, str, str]] = [
 #: superseded/retired banner, and the banner text each must carry. Kept next to
 #: `KNOWN_OK` so the two cannot drift apart.
 BANNER_EXEMPT: Dict[str, str] = {
-    "docs/business/GTM_EXECUTION_PLAN.md": "SUPERSEDED",
-    "docs/business/PRE_BSL_CLEANUP_PLAN.md": "SUPERSEDED",
     "docs/business/BSL_EXECUTION_PROMPT.md": "SUPERSEDED",
     "docs/business/GTM_EXECUTION_PROMPT.md": "SUPERSEDED",
 }
