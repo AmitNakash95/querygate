@@ -67,17 +67,19 @@ PHONE_HOME_TOKENS = re.compile(
 TELEMETRY_ENDPOINT_RE = re.compile(r"telemetry[\w_]*\s*[:=]\s*[\"']https?://", re.I)
 
 
-#: The one package allowed to name the vendor — the subscription client of items
-#: 211-213. Exempting a *package path* rather than loosening the patterns keeps
-#: the hole one directory wide and greppable; the exemption's own width is
-#: bounded by `test_the_subscription_exemption_is_narrow` below.
+#: The path the exemption *would* cover. It no longer exists: the subscription
+#: client was removed with the open-source transition, and
+#: `test_the_subscription_exemption_is_empty` fails if anything reappears here.
+#: The constant is kept so the exemption cannot be re-created silently — adding
+#: a module back has to make a red test green again, deliberately.
 SUBSCRIPTION_PKG = SOURCE_ROOT / "subscription"
 
-#: Exactly the fields `docs/legal/EULA.en.md` §16.1 discloses and
-#: `docs/business/GTM_SAAS.md` §3 publishes (§8 handles the objection about
-#: them; §3 is the publication). Item 211's outbound payload must
-#: equal this set — adding a fifth field is a disclosure change before it is a
-#: code change.
+#: Retained as the payload-contract detector's fixture, NOT as a live
+#: disclosure. The subscription client that transmitted these was removed when
+#: the gateway went open-source, and there is no longer any outbound payload to
+#: disclose — `test_the_subscription_exemption_is_empty` asserts exactly that.
+#: The checker below is still exercised against planted sources on every run, so
+#: it re-arms automatically if anything resembling a client ever returns.
 DISCLOSED_PAYLOAD_FIELDS = frozenset({"org_id", "deployment_id", "connection_count", "seat_count"})
 
 #: A subscription client is a handful of modules. If the exemption ever covers
@@ -230,58 +232,6 @@ def test_no_directory_symlink_can_hide_source_from_every_rule():
     )
 
 
-#: The documents that publish the payload. **`EULA.he.md` is on this list and the
-#: first draft omitted it** — deleting `seat_count` from the Hebrew disclosure
-#: alone kept the whole suite green, in the language an Israeli customer signs.
-_DISCLOSING_DOCUMENTS = (
-    "docs/legal/EULA.en.md",
-    "docs/legal/EULA.he.md",
-    "docs/business/GTM_SAAS.md",
-    "docs/LICENSING_FAQ.md",
-    "docs/business/NORTH_STAR.md",
-)
-
-#: §16.1's own field list, in either language: the backticked identifiers inside
-#: the clause. Both files write them identically (they are code identifiers), so
-#: one pattern serves both.
-_SECTION_16_1_RE = re.compile(r"\*\*16\.1 [^\n]*\*\*(.*?)(?=\n\*\*16\.1\(|\n\*\*16\.2)", re.S)
-_BACKTICKED_RE = re.compile(r"`([a-z_]+)`")
-
-
-def _section_16_1_fields(text: str) -> frozenset[str]:
-    match = _SECTION_16_1_RE.search(text)
-    assert match, "could not locate §16.1 — did the clause numbering change?"
-    return frozenset(_BACKTICKED_RE.findall(match.group(1)))
-
-
-def test_the_disclosed_fields_match_what_the_documents_publish():
-    """The constant is only worth anything while it mirrors the disclosure.
-
-    Enforcement ran one way — code must not exceed the documents. Nothing ran the
-    other way, so amending `EULA.en.md` §16.1 to a fifth field left the whole
-    suite green while the licence of record and the guard disagreed.
-
-    **Set equality against §16.1's own identifiers**, not four substring checks
-    plus a prose count. The substring form passed when a fifth field was added to
-    a *different* clause, or named in a "what we never send" list, and the prose
-    count (`"four fields"`) would have gone red on a lawyer writing "four (4)
-    fields" — a false failure in a document the suite elsewhere pins as awaiting
-    counsel.
-    """
-    root = SOURCE_ROOT.parent.parent
-    for name in _DISCLOSING_DOCUMENTS:
-        text = (root / name).read_text(encoding="utf-8")
-        missing = [f for f in sorted(DISCLOSED_PAYLOAD_FIELDS) if f not in text]
-        assert not missing, f"{name} does not name the disclosed field(s): {missing}"
-    for name in ("docs/legal/EULA.en.md", "docs/legal/EULA.he.md"):
-        declared = _section_16_1_fields((root / name).read_text(encoding="utf-8"))
-        assert declared == DISCLOSED_PAYLOAD_FIELDS, (
-            f"{name} §16.1 discloses {sorted(declared)} but the guard pins "
-            f"{sorted(DISCLOSED_PAYLOAD_FIELDS)}. A change here is a disclosure "
-            "change: amend both languages, the FAQ and NORTH_STAR together."
-        )
-
-
 def test_the_guard_would_catch_a_planted_beacon(tmp_path):
     """Negative control: the patterns must actually match a real phone-home."""
     planted = 'LICENSE_SERVER_URL = "https://api.querygate.com/v1/entitlement"'
@@ -419,7 +369,7 @@ def _payload_field_declarations(package: Path = SUBSCRIPTION_PKG) -> dict[str, f
                     f"{rel}:{node.lineno} does not declare PAYLOAD_FIELDS as a literal "
                     f"({exc}). Accepted forms: `{{...}}`, `[...]`, `(...)`, or one of those "
                     "wrapped in `frozenset(...)`/`set(...)`, with or without an annotation. "
-                    "The EULA discloses a fixed list, so the code must state one too — a "
+                    "The contract fixes a closed list, so the code must state one too — a "
                     "union, a comprehension or a name reference cannot be checked against it."
                 ) from exc
             # Keyed by (file, line) so two declarations in ONE module are two
@@ -627,7 +577,7 @@ def payload_contract_violations(package: Path) -> list[str]:
 
     if not declarations:
         violations.append(
-            "no module-level `PAYLOAD_FIELDS` is declared; the EULA discloses a fixed "
+            "no module-level `PAYLOAD_FIELDS` is declared; the contract fixes a closed "
             "list, so the code must state one that can be compared against it"
         )
     elif len(declarations) > 1:
@@ -639,7 +589,7 @@ def payload_contract_violations(package: Path) -> list[str]:
         where, declared = next(iter(declarations.items()))
         if declared != DISCLOSED_PAYLOAD_FIELDS:
             violations.append(
-                f"{where} declares {sorted(declared)} but the EULA discloses "
+                f"{where} declares {sorted(declared)} but the contract fixes "
                 f"{sorted(DISCLOSED_PAYLOAD_FIELDS)}; change the disclosure first"
             )
 
@@ -674,7 +624,7 @@ def payload_contract_violations(package: Path) -> list[str]:
                 violations.append(
                     f"{rel}:{mapping.lineno} names {name!r} in a request body; it is neither "
                     "a disclosed payload field nor a header. Putting it on the wire is a "
-                    "disclosure change (EULA §16.1) before it is a code change."
+                    "disclosure change before it is a code change."
                 )
 
         for node in ast.walk(tree):
@@ -906,7 +856,7 @@ def test_a_dict_unrelated_to_the_wire_is_not_flagged(tmp_path):
 def test_a_declaration_that_disagrees_with_the_eula_is_caught(tmp_path):
     source = 'PAYLOAD_FIELDS = {"org_id", "deployment_id", "connection_count"}\n'
     problems = payload_contract_violations(_plant(tmp_path, source))
-    assert any("the EULA discloses" in p for p in problems), problems
+    assert any("the contract fixes" in p for p in problems), problems
 
 
 def test_a_missing_or_duplicated_declaration_is_caught(tmp_path):
@@ -943,14 +893,14 @@ def test_the_live_subscription_package_satisfies_the_contract():
 
 
 def test_the_subscription_client_declares_only_the_disclosed_fields():
-    """`docs/legal/EULA.en.md` §16.2 promises no other transmission path exists.
+    """Latent: no client ships, so this skips. Kept so it re-arms if one returns.
 
     **This checks the declaration, not the wire**, and the name says so
     deliberately: a client can satisfy it and still `post(json={**payload,
     "hostname": ...})`. The behavioural assertion — that the refresh request
     body's key set is exactly this — is item 211's own Definition of Done, built
     in the shape of `test_credential_redaction.py` rather than as a mock-call
-    assertion. What lives here is the constant and its binding to the EULA, next
+    assertion. What lives here is the constant and the contract it pins, next
     to the exemption that makes the promise necessary.
     """
     if not _subscription_package_ships():
@@ -961,7 +911,7 @@ def test_the_subscription_client_declares_only_the_disclosed_fields():
     declarations = _payload_field_declarations()
     assert declarations, (
         "the subscription package must declare a module-level `PAYLOAD_FIELDS` "
-        "naming every field it transmits, so the EULA disclosure is checkable"
+        "naming every field it transmits, so the disclosure stays checkable"
     )
     assert len(declarations) == 1, (
         "more than one module declares PAYLOAD_FIELDS, so which one describes the "
@@ -969,6 +919,6 @@ def test_the_subscription_client_declares_only_the_disclosed_fields():
     )
     declared = next(iter(declarations.values()))
     assert declared == DISCLOSED_PAYLOAD_FIELDS, (
-        f"the declared payload is {sorted(declared)} but the EULA discloses "
+        f"the declared payload is {sorted(declared)} but the contract fixes "
         f"{sorted(DISCLOSED_PAYLOAD_FIELDS)}; change the disclosure first"
     )

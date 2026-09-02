@@ -35,11 +35,6 @@ jobs:
       - name: Install dependencies
         run: poetry install --no-interaction
 
-      # docs/legal/EULA.{en,he}.md is the licence of record for the proprietary
-      # subscription (item 210). Nothing referenced those files before this gate.
-      - name: EULA placeholder gate
-        run: make eula-check
-
       - name: black --check
         # Call the Makefile target rather than re-listing the paths, so the
         # formatter's scope has exactly one definition (it gained `scripts/`

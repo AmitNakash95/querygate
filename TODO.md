@@ -250,6 +250,7 @@ order-of-magnitude, not commitments.
 | 225 | An entitlement schema-version bump has no compatibility window — `verify.py` rejects any version but its own and the refresh request carries no client version, so the next bump silently removes the countdown from skewed deployments | S | 216 |
 | 226 | `build_provider` in `billing.py` still special-cases construction at the registry, unlike the email registry beside it | XS | 212 |
 | 227 | ClusterFuzzLite coverage is shallow because `pydantic-core` is native — the model fuzz target plateaued at 31 coverage features over 2.7M executions, so a clean run means "no crash on random bytes", not "the input space was explored" | S | — |
+| 228 | Microsoft's proprietary `msodbcsql18` ships inside the image, but Apache-2.0 has no third-party pass-through and a public image reaches people who agreed to nothing — **blocks the first public image release** | S | 196 |
 | 221 | Move validator bodies out of the model classes into compilable sibling modules — 30 validators / 602 lines of enforcement logic (join form, window scope, CTE names, set ops, credential shape) currently ship readable because a module defining `BaseModel` cannot be Cython-compiled | M | 214 |
 | 220 | ✅ Deny-by-default at table and column granularity: a `Policy` allow-list with no allow-all fallback, so an empty `allowed_tables` denies instead of allowing. Opt-in (default off) so no existing deployment changes behaviour; the starter policy turns it on | M | — |
 
@@ -4633,3 +4634,42 @@ asserted, and keep the existing model target — its value is crash-resistance o
 hostile bytes, which is real even with weak coverage. Update the honest-limit
 comment at the top of `fuzz/fuzz_structured_query.py` and Appendix C of
 `docs/business/OSS_SEPARATION_PLAN.md` once the numbers change.
+
+### 228. Microsoft ODBC driver redistribution in a PUBLIC image — blocks publishing the image
+
+**Effort: S to remove the question; M to answer it. BLOCKS the first public
+image release.** Found 2026-09-02 while reconciling `docs/CONTAINER_IMAGE_LICENCES.md`
+to the Apache-2.0 transition.
+
+**Why it matters:** the shipped image installs Microsoft's proprietary
+`msodbcsql18` under `ACCEPT_EULA=Y`. Under the cancelled proprietary model this
+was tolerable because two things were true at once: the EULA carried a
+Third-party components pass-through, and `LICENSE` meant nobody without an Order
+had any licence to use the image at all — so the pass-through reached every
+lawful user and nobody else.
+
+**Apache-2.0 removes both.** It has no pass-through clause and no mechanism to
+bind a downstream recipient to another vendor's terms, and a public image can be
+pulled by anyone, including people who agreed to nothing. Microsoft's §2(b)(ii)
+("require distributors and external end users to agree to terms that protect it
+and Microsoft at least as much as this agreement") went from *partly met* to
+*not met*, and §2(b)(iii)'s indemnity running to Microsoft was never addressed
+under any model.
+
+**Definition of done — pick one, cheapest first:**
+
+1. **Make the default image driver-free** and ship MSSQL support as a separate,
+   clearly-labelled variant, so the default artifact carries no third-party
+   proprietary binary. Removes the question rather than answering it.
+2. **Document `apt-get install msodbcsql18` as an operator step**, so whoever
+   accepts `ACCEPT_EULA=Y` is whoever installs it. Also removes the question,
+   at the cost of a less turnkey MSSQL install.
+3. **Get the redistribution and indemnity position reviewed by counsel** before
+   publishing an image containing the driver. Answers it, and costs money.
+
+Either way, ship a `THIRD_PARTY_NOTICES` file **inside the image** — `Dockerfile`
+already `COPY`s `LICENSE`, so this is the same shape and is not done. Necessary
+under any option, sufficient under none.
+
+**Do not publish the container image until this is closed.** The repository and
+the wheel are unaffected; this is a container-artifact blocker only.
