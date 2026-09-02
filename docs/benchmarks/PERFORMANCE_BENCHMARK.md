@@ -97,7 +97,7 @@ flatters one tier over another.
    `CLAUDE.md`'s "one request pipeline"). A reported pipeline overhead is what
    shipped code actually costs, not an estimate of it.
 2. **It needs a real database, deliberately.** Unlike the security benchmark
-   (`docs/business/SECURITY_BENCHMARK.md`), which is offline by design because
+   (`docs/benchmarks/SECURITY_BENCHMARK.md`), which is offline by design because
    every guardrail it exercises runs before any database touch, latency
    *is* the thing under measurement here, and a mocked database would make
    the numbers meaningless. Unlike the security benchmark, this means it

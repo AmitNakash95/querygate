@@ -1,5 +1,5 @@
 """Real-Postgres smoke test for the performance benchmark (see
-``querygate.performance_benchmark`` and ``docs/business/PERFORMANCE_BENCHMARK.md``).
+``querygate.performance_benchmark`` and ``docs/benchmarks/PERFORMANCE_BENCHMARK.md``).
 
 Run with ``make compose-up`` then ``poetry run pytest -m postgres_live
 tests/integration/test_performance_benchmark_live.py``, or via

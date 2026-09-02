@@ -10490,7 +10490,7 @@ reading `docs/*.md` at request time would work in a dev checkout and fail in
 the actually-shipped product. `scripts/generate_trust_page.py` (mirroring
 `scripts/generate_sbom.py`'s shape) instead composes
 `docs/SECURITY_POSTURE.md`, `docs/COMPLIANCE_MAPPING.md`,
-`docs/business/SECURITY_BENCHMARK.md`, `SECURITY.md`'s disclosure section,
+`docs/benchmarks/SECURITY_BENCHMARK.md`, `SECURITY.md`'s disclosure section,
 and the live `security/dependency-audit-allowlist.json` status **verbatim**
 (no lossy summarization — no new evidence or claim) into one generated,
 git-committed `docs/TRUST_EVIDENCE.md`, regenerated with `make trust-page`.

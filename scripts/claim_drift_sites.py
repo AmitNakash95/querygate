@@ -249,18 +249,6 @@ KNOWN_OK: List[Tuple[str, str, str, str]] = [
         "licensing",
     ),
     (
-        ".github/cla/CLA.md",
-        "",
-        "Retired-by-banner (2026-08-23): a CLA for outside contributors to a public repo, of which there are none.",
-        "licensing",
-    ),
-    (
-        ".github/cla/README.md",
-        "",
-        "Retired-by-banner (2026-08-23): configuration for the CLA bot that will never be enabled.",
-        "licensing",
-    ),
-    (
         "demo/_dsn_guard.py",
         "password-free forever",
         "A false positive: 'password-free forever' is about the demo DSN, not a licence grant.",
@@ -335,8 +323,6 @@ BANNER_EXEMPT: Dict[str, str] = {
     "docs/business/PRE_BSL_CLEANUP_PLAN.md": "SUPERSEDED",
     "docs/business/BSL_EXECUTION_PROMPT.md": "SUPERSEDED",
     "docs/business/GTM_EXECUTION_PROMPT.md": "SUPERSEDED",
-    ".github/cla/CLA.md": "RETIRED",
-    ".github/cla/README.md": "RETIRED",
 }
 
 

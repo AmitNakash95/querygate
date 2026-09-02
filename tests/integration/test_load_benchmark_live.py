@@ -1,5 +1,5 @@
 """Real-Postgres, real-subprocess smoke test for the load benchmark (see
-``querygate.load_benchmark`` and ``docs/business/LOAD_BENCHMARK.md``).
+``querygate.load_benchmark`` and ``docs/benchmarks/LOAD_BENCHMARK.md``).
 
 Run with ``make compose-up`` then ``poetry run pytest -m postgres_live
 tests/integration/test_load_benchmark_live.py``, or via

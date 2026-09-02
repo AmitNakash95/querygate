@@ -135,10 +135,6 @@ project relicense your work under terms you did not agree to — and since the
 whole point of `COMMERCIAL.md` is that the gateway stays Apache-2.0, asking you
 to sign away that protection would contradict the commitment it makes.
 
-`.github/cla/` is retained as history from an abandoned source-available plan
-and is **not in force**. No bot runs, and no contribution is asked to sign
-anything.
-
 By opening a pull request you are licensing your contribution under Apache-2.0.
 That is the whole agreement.
 

@@ -174,7 +174,7 @@ querygate-security-benchmark list          # list the corpus cases
 ```
 
 Methodology, results, and the factual Google MCP Toolbox comparison live in
-[`docs/business/SECURITY_BENCHMARK.md`](business/SECURITY_BENCHMARK.md).
+[`docs/benchmarks/SECURITY_BENCHMARK.md`](benchmarks/SECURITY_BENCHMARK.md).
 
 Then, in another terminal:
 

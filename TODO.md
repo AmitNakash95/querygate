@@ -898,7 +898,7 @@ that drives the **real** request-pipeline guardrails (policy validation +
 compiler parameter binding + the AST-only no-raw-SQL structural invariant)
 with no DB/network/LLM, the `querygate-security-benchmark` CLI (`run`/`list`,
 `--json`, exit-0-iff-clean so it can gate CI), and the published report
-`docs/business/SECURITY_BENCHMARK.md`. Current corpus: QueryGate blocks
+`docs/benchmarks/SECURITY_BENCHMARK.md`. Current corpus: QueryGate blocks
 **16/16 (100%)** structural boundary attacks vs. a structurally-modeled
 raw-SQL-passthrough baseline at **0/16 (0%)**, with **2** documented
 inference residuals disclosed (never counted as catches) and sub-millisecond
@@ -1201,7 +1201,7 @@ upgrade rather than accepted (see the CVE-remediation bullet).
 - **Trust surface** — `SECURITY.md` (disclosure policy + SLAs),
   `docs/SECURITY_POSTURE.md` (customer-facing status table + reproduce-it
   commands + threat-model mapping; the questionnaire artifact), and
-  `docs/business/openssf-best-practices-answers.md` (honest OpenSSF criteria
+  `docs/benchmarks/openssf-best-practices-answers.md` (honest OpenSSF criteria
   self-assessment). README "Security model" gained a posture pointer.
 
 **Honest scope note:** the **OpenSSF Best Practices badge is FLOSS/public-repo

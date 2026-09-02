@@ -5,7 +5,7 @@ with a worker-count sweep.
 
 Complements ``querygate-performance-benchmark`` (single-request cost) — see
 ``querygate.load_benchmark`` for methodology and
-``docs/business/LOAD_BENCHMARK.md`` for the published write-up. Not the same
+``docs/benchmarks/LOAD_BENCHMARK.md`` for the published write-up. Not the same
 tool as ``make test-load``/``make test-soak`` (guardrail *correctness* under
 load) — see the module docstring for the distinction.
 
@@ -43,7 +43,7 @@ from querygate.load_benchmark import (  # noqa: E402
 from querygate.performance_benchmark import DEFAULT_CONNECTION_STRING  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_MARKDOWN_PATH = _REPO_ROOT / "docs" / "business" / "LOAD_BENCHMARK_RESULTS.md"
+DEFAULT_MARKDOWN_PATH = _REPO_ROOT / "docs" / "benchmarks" / "LOAD_BENCHMARK_RESULTS.md"
 
 
 def _row(*cols: str) -> str:
@@ -97,7 +97,7 @@ def _print_report(report: LoadBenchmarkReport) -> None:
     print(
         "All figures are wall-clock, over a real socket against a real uvicorn server\n"
         "(errors column: baseline/rest failed-request counts). "
-        "See docs/business/LOAD_BENCHMARK.md for methodology."
+        "See docs/benchmarks/LOAD_BENCHMARK.md for methodology."
     )
 
 

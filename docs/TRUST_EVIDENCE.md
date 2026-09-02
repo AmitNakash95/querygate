@@ -224,7 +224,7 @@ claim here matters more than badge-count:
   **self-assessment against its criteria** — a genuine maturity artifact you can
   attach to a security questionnaire, and a ready-to-submit application the day
   any component is open-sourced. See
-  [docs/business/openssf-best-practices-answers.md](business/openssf-best-practices-answers.md).
+  [docs/benchmarks/openssf-best-practices-answers.md](benchmarks/openssf-best-practices-answers.md).
 - **OpenSSF Scorecard** — likewise oriented at public repositories
   (branch-protection introspection, public badge serving). Available to enable
   as an internal metric if/when QueryGate is open-sourced; intentionally not run
@@ -493,7 +493,7 @@ remainder.
 
 ## Adversarial benchmark report
 
-*Source: [`docs/business/SECURITY_BENCHMARK.md`](business/SECURITY_BENCHMARK.md).*
+*Source: [`docs/benchmarks/SECURITY_BENCHMARK.md`](benchmarks/SECURITY_BENCHMARK.md).*
 
 # QueryGate adversarial security benchmark
 

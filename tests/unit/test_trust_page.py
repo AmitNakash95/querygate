@@ -98,11 +98,11 @@ def test_repoint_links_rewrites_relative_targets_and_leaves_urls_alone():
         "[c](https://example.test/x), [d](#anchor)"
     )
     rewritten = generate_trust_page._repoint_links(
-        text, generate_trust_page.ROOT / "docs" / "business"
+        text, generate_trust_page.ROOT / "docs" / "benchmarks"
     )
-    # `docs/business/docs/THREAT_MODEL.md` does not exist, but the rewrite is
+    # `docs/benchmarks/docs/THREAT_MODEL.md` does not exist, but the rewrite is
     # purely positional and must still be relative to `docs/`, not to the source.
-    assert "](business/docs/THREAT_MODEL.md)" in rewritten
+    assert "](benchmarks/docs/THREAT_MODEL.md)" in rewritten
     assert "](INFERENCE_RISKS.md#x)" in rewritten
     assert "](https://example.test/x)" in rewritten
     assert "](#anchor)" in rewritten
