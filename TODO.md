@@ -3160,7 +3160,7 @@ the PRODUCT_GUIDE Decision Log, TECHNICAL_REVIEW, two TODO_ARCHIVE write-ups
 and a test docstring), the unconditional "resumable page" claim (both
 `worm_search.py` bullets, its `WormSearchBounds` docstring, README, QG-40,
 THREAT_MODEL, PRODUCT_GUIDE ×2, the generated HTML, CHANGELOG, TODO_ARCHIVE),
-the two disclosure-budget code docs, MARKET_DOMINATION_ANALYSIS, and the
+the two disclosure-budget code docs, the competitive analysis, and the
 rollback-exemption test (mutation-verified: closing the exemption fails it,
 and a control proves the gate is still on). Verified by re-running
 `scripts/claim_drift_sites.py --all`. **Open: #2, #3, #5, #6, #7** — all four
@@ -3449,7 +3449,7 @@ logged per an internal commercial plan §4 (owner decision,
 **Scope unchanged by the 2026-08-23 licence decision** (an internal commercial plan,
 which supersedes that plan), unlike its sibling item 197. Two things did move
 around it: an internal commercial plan §7 lists Notary among the trust-rebuilding measures that
-matter *more* under closed source, and `docs/LICENSING_FAQ.md` names it as a
+matter *more* under closed source, and the licensing FAQ names it as a
 forward statement a prospect must not be allowed to mistake for a shipping
 service.
 

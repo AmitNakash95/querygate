@@ -815,7 +815,7 @@ position.
   `tests/integration/test_prepared_statement_reuse.py`).
 - [ ] **18** — Stored-procedure catalog. *Extends read coverage where customers
   already encapsulate logic in procs.* **Moved to Decision-gated (2026-07-28):**
-  conflicts with the NORTH_STAR permanent non-goal "no stored-procedure /
+  conflicts with the permanent non-goal "no stored-procedure /
   arbitrary-procedural-SQL path" — see that section below. Left `[ ]` and in
   its original phase position for history; the automated walk skips it there.
 - [x] **57** — Pluggable dialect-adapter architecture. *The enabler that turns
@@ -865,7 +865,7 @@ position.
   item 39 draft-aware and already accepting a `StructuredQuery`) — what is
   unscoped is the **non-admin, caller-facing, quota-metered** verdict about the
   **calling** principal, which is what a gateway needs. Filed in Adoption rather
-  than Moat by the same test applied to item 128: NORTH_STAR files P4 under the
+  than Moat by the same test applied to item 128: the North Star files P4 under the
   leverage moves (turn competitors into distribution), not the three pillars,
   and its gateway value compounds once 128/130 land. Reuse the shared evaluator;
   do not extend `explain`; design it against the discovery-oracle channels
@@ -975,7 +975,7 @@ surface them for a human, never auto-start them.
   `CLAUDE.md`’s "North Star" section lists "No stored-procedure /
   arbitrary-procedural-SQL path" as a permanent non-goal — product identity,
   not a gap — and CLAUDE.md's non-negotiable #8 requires an explicit recorded
-  NORTH_STAR decision before adding anything the non-goals list forbids.
+  product-identity decision before adding anything the non-goals list forbids.
   TODO.md item 18's own body ("when prioritized... a real security review
   given procedures can have side effects") was written before that non-goal
   was reconciled against it. Needs a maintainer decision — reverse the

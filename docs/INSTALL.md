@@ -199,5 +199,5 @@ The renewal email comes from the licence service, not from your deployment —
 QueryGate has no SMTP client and no address to send to, and adding one would put
 an outbound mail path inside your network.
 
-See [`LICENSING_FAQ.md`](LICENSING_FAQ.md) for what is transmitted (four fields)
+See [the licensing FAQ](the licensing FAQ) for what is transmitted (four fields)
 and what never is.

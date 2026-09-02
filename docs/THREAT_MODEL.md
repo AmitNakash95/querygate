@@ -501,7 +501,7 @@ defaults.
   1. **A new egress destination.** The deployment must be permitted to reach the
      vendor's entitlement host. This is the first thing a network reviewer asks
      about and the first thing an air-gapped customer cannot grant — hence the
-     out-of-band offline entitlement (`docs/legal/EULA.en.md` §16.5).
+     out-of-band offline entitlement (the EULA §16.5).
   2. **The vendor becomes a trust boundary.** The control plane signs
      entitlements the deployment obeys, so a vendor compromise or a stolen
      signing key can suspend a customer's governed operation. It cannot read or
