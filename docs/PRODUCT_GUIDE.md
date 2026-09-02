@@ -347,7 +347,7 @@ can't hide inside a subquery either.
 instead of a dozen times is a rounding error next to the query itself. Policy
 validation is fast for a different reason: it is a pure in-memory comparison
 against config with no network call and no database round trip, so a violating
-query dies before a connection is touched (see `docs/business/PERFORMANCE_BENCHMARK.md`
+query dies before a connection is touched (see `docs/benchmarks/PERFORMANCE_BENCHMARK.md`
 for the measured end-to-end overhead, and regenerate it on your own hardware
 rather than quoting a number). The one-walk rule buys **correctness that
 survives the next ten AST features**, which is a different and more valuable
@@ -1973,7 +1973,7 @@ documented inference residuals** it does *not* block (it never counts those as
 catches), which is the point: an honest, rerunnable benchmark is more
 persuasive than an asserted one. The published methodology, results, and the
 factual (capability-level, non-live) Google MCP Toolbox comparison live in
-[`docs/business/SECURITY_BENCHMARK.md`](business/SECURITY_BENCHMARK.md). A
+[`docs/benchmarks/SECURITY_BENCHMARK.md`](benchmarks/SECURITY_BENCHMARK.md). A
 *live* LLM/Toolbox head-to-head is a scoped phase-2 follow-up that needs
 external infrastructure; see the [Decision Log](#decision-log) for why the
 baseline is a declared structural model rather than a live competitor run.
@@ -3861,7 +3861,7 @@ behavior.
 needs `make compose-up` first) answers the question a design partner asks
 before routing real traffic through the gateway: how much latency does this
 add, and does it slow down database access? Full methodology in
-`docs/business/PERFORMANCE_BENCHMARK.md`; the runner is
+`docs/benchmarks/PERFORMANCE_BENCHMARK.md`; the runner is
 `querygate.performance_benchmark`.
 
 It times the same query at three tiers — raw SQL direct against Postgres
@@ -3877,7 +3877,7 @@ benchmark, it needs a real database, so it can't run in the default
 `pytest -m unit` suite; its own integration test does run automatically in
 CI's `postgres-live` job on every push/PR (checking the harness works end to
 end, not asserting a specific latency number), while the published figures in
-`docs/business/PERFORMANCE_BENCHMARK.md` come from a manual, regenerate-it-
+`docs/benchmarks/PERFORMANCE_BENCHMARK.md` come from a manual, regenerate-it-
 yourself run.
 
 ### Load benchmark: does per-request cost hold up under concurrent traffic?
@@ -3886,7 +3886,7 @@ yourself run.
 `make compose-up` first) is the performance benchmark's sibling — the second
 half of the same design-partner question ("does this add latency, *and does
 it slow down under real traffic, and does adding capacity fix it*?"). Full
-methodology in `docs/business/LOAD_BENCHMARK.md`; the runner is
+methodology in `docs/benchmarks/LOAD_BENCHMARK.md`; the runner is
 `querygate.load_benchmark`.
 
 It reuses the performance benchmark's seeded table and scenarios, and sweeps
@@ -3922,7 +3922,7 @@ improvement at all — same code, different result). Run it on an otherwise
 idle machine and treat one run as one sample, not a certified number.
 
 **Every run of either benchmark also writes a fresh, publish-ready Markdown
-results snapshot** (`docs/business/LOAD_BENCHMARK_RESULTS.md` /
+results snapshot** (`docs/benchmarks/LOAD_BENCHMARK_RESULTS.md` /
 `PERFORMANCE_BENCHMARK_RESULTS.md`, overwritten each time, `--markdown-out`
 to redirect or `--no-markdown` to skip) — data only, no interpretation, so
 there's always a shareable artifact ready the moment a run finishes, without
@@ -6955,7 +6955,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   is exactly the kind of thing that must be reliable for a security-review
   artifact. `scripts/generate_trust_page.py` (mirroring `scripts/
   generate_sbom.py`'s shape) instead composes `docs/SECURITY_POSTURE.md`,
-  `docs/COMPLIANCE_MAPPING.md`, `docs/business/SECURITY_BENCHMARK.md`,
+  `docs/COMPLIANCE_MAPPING.md`, `docs/benchmarks/SECURITY_BENCHMARK.md`,
   `SECURITY.md`'s disclosure section, and the live
   `security/dependency-audit-allowlist.json` status into one generated,
   git-committed `docs/TRUST_EVIDENCE.md` (`make trust-page`) — composes the
@@ -8518,7 +8518,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   risk misrepresenting a documented capability, which this project forbids. So
   the live baseline is scoped as phase 2; the Toolbox comparison in phase 1 is
   capability-level, drawn from Toolbox's documented design. See
-  `docs/business/SECURITY_BENCHMARK.md`.
+  `docs/benchmarks/SECURITY_BENCHMARK.md`.
 - **2026-07-22 — The tamper-evident audit ledger chains at the sink/envelope
   layer, not on the event model (TODO.md item 91, F5).** Building the
   hash-chained ledger, the choice was where the `prev_hash`/sequence/`hash` live.

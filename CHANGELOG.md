@@ -558,11 +558,11 @@ All notable changes to QueryGate are documented here.
   measures throughput/latency under concurrent load across a worker-count sweep, driving
   the real app over a real socket against a real, separately-spawned `uvicorn` process
   (not `ASGITransport` — a confound specific to concurrency measurement, see
-  `docs/business/LOAD_BENCHMARK.md`). Both are informational (not pass/fail; the
+  `docs/benchmarks/LOAD_BENCHMARK.md`). Both are informational (not pass/fail; the
   single-request tool's `--max-overhead-ms` is the one exception), need a real Postgres,
   and write a fresh, publish-ready `--markdown-out` results snapshot on every run
-  (`docs/business/PERFORMANCE_BENCHMARK_RESULTS.md` / `LOAD_BENCHMARK_RESULTS.md`). See
-  `docs/business/PERFORMANCE_BENCHMARK.md`/`LOAD_BENCHMARK.md` for full methodology.
+  (`docs/benchmarks/PERFORMANCE_BENCHMARK_RESULTS.md` / `LOAD_BENCHMARK_RESULTS.md`). See
+  `docs/benchmarks/PERFORMANCE_BENCHMARK.md`/`LOAD_BENCHMARK.md` for full methodology.
 
 - **Cumulative disclosure budget (optional, off by default)** — bounds the
   multi-query differencing that `min_group_size`'s k-anonymity floor alone does
