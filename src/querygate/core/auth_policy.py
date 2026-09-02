@@ -9,7 +9,7 @@ added a nicer door beside the static API key rather than closing it, so an
 operator who had done the whole IdP integration still had a shared secret that
 opened the admin console — and every action taken with it was attributable to a
 config entry rather than to a person. That is precisely the property the Proof
-pillar claims (`docs/business/NORTH_STAR.md`), so leaving it to convention was
+pillar claims (`CLAUDE.md`’s "North Star" section), so leaving it to convention was
 the wrong call.
 
 The control is a per-surface allowlist over `Principal.auth_method`:

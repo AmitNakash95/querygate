@@ -3,7 +3,7 @@
 Python package in ``poetry.lock``, split by whether QueryGate redistributes it.
 
 Why this exists: QueryGate is **proprietary and closed-source** (item 210,
-``docs/business/GTM_SAAS.md``), and a copyleft licence in the *redistributed*
+the commercial plan), and a copyleft licence in the *redistributed*
 set would be a blocking legal problem — a reciprocal licence whose conditions
 attach to a distributed larger work is precisely what a closed-source product
 cannot satisfy. The premise changed with the licence decision; the gate did not,
