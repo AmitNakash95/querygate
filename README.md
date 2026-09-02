@@ -43,13 +43,13 @@ below is verifiable from this repository; none of it is buried further down.
 - **Self-hosted only.** There is no hosted QueryGate, we never execute your
   queries, and offering QueryGate itself to third parties as a service is not
   something any order permits.
-- **Proprietary, sold as a paid subscription.** The licence of record is
-  [`docs/legal/EULA.en.md`](docs/legal/EULA.en.md) and it still carries unfilled
-  placeholders pending counsel. The entitlement gate, the vendor control plane
-  and the renewal countdown are implemented (`TODO.md` items 211, 212, 216);
-  **self-service activation (item 213) and the customer portal (item 217) are
-  not**, so an account is opened and a deployment enrolled by hand today.
-  See [Licence](#licence).
+- **Apache-2.0, and free forever.** No licence key, no activation, no
+  entitlement check, and **no outbound call to us from anywhere in the shipped
+  source** — no telemetry, no update check, no usage reporting. That is enforced
+  by `tests/security/test_no_phone_home.py`, not promised in prose. The policy
+  engine and the audit ledger will never be tier-gated; see
+  [`COMMERCIAL.md`](COMMERCIAL.md) for what is planned as a paid service and
+  what this project will never do.
 - **Three dialects are live-verified; two are not.** Postgres, MSSQL and MySQL
   run against real servers in CI. Snowflake and BigQuery are
   compiler/rendering-level only — QueryGate deliberately **refuses to open a
@@ -58,7 +58,7 @@ below is verifiable from this repository; none of it is buried further down.
 What *is* real: the structural guarantee below; live Postgres/MSSQL/MySQL tiers
 in CI; a maintained threat model; and a reconciliation between what the docs
 claim and what the code does that is itself gated in CI. The adversarial
-security suite is 704 tests (`make test-security`); the unit and integration
+security suite is 703 tests (`make test-security`); the unit and integration
 suites are 3,326 and 428. Every number there is reproducible — `poetry run
 pytest -m unit -q`, `-m "integration and not real_db"`, `make test-security` —
 and the adversarial count is itself CI-gated against the documents that quote
@@ -291,7 +291,7 @@ short version:
 | Contribute | [`CONTRIBUTING.md`](CONTRIBUTING.md), [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) |
 | Get help, or find out what is supported | [`SUPPORT.md`](SUPPORT.md) |
 | Report a vulnerability | [`SECURITY.md`](SECURITY.md) |
-| Understand the licence | [`LICENSE`](LICENSE), [`docs/LICENSING_FAQ.md`](docs/LICENSING_FAQ.md) |
+| Understand the licence | [`LICENSE`](LICENSE), [`COMMERCIAL.md`](COMMERCIAL.md) |
 
 Historical extraction notes are kept outside the product surface under
 `archive/extraction/`.
@@ -302,21 +302,22 @@ Historical extraction notes are kept outside the product surface under
 
 ## Licence
 
-QueryGate is **proprietary, closed-source, commercial software**, sold as a
-**paid monthly subscription** and run in your own environment. It is not open
-source and not source-available, and no version converts to an open licence on
-any date.
+QueryGate is licensed under **[Apache-2.0](LICENSE)**. Everything in this
+repository is free to use, modify, and redistribute — including in commercial
+and closed-source products — under those terms.
 
-Your rights come from the End User Licence Agreement plus your order, never from
-possession of the code. [`LICENSE`](LICENSE) is a notice that reserves all rights
-and points at the EULA — it is not itself a grant.
+That covers the whole enforcement product: the AST and its validators, **the
+policy engine**, **the audit ledger** (including the hash-chained tamper-evident
+mode and portable receipts), per-human attribution, the compiler and every
+dialect adapter, governed writes, both consoles, the MCP server and the REST API.
 
-- [`docs/legal/EULA.en.md`](docs/legal/EULA.en.md) — the licence of record
-  (Hebrew: [`EULA.he.md`](docs/legal/EULA.he.md); English governs)
-- [`docs/LICENSING_FAQ.md`](docs/LICENSING_FAQ.md) — what it means in practice,
-  including what happens when a subscription lapses and exactly what the
-  software transmits to us
-- [`docs/THIRD_PARTY_LICENSES.md`](docs/THIRD_PARTY_LICENSES.md) — every dependency's licence
+- [`COMMERCIAL.md`](COMMERCIAL.md) — what is free forever, what is planned as a
+  paid service, and the things this project will never do (a raw-SQL mode among
+  them). Written so the funding model is legible from day one rather than
+  arriving as a surprise later.
+- [`docs/THIRD_PARTY_LICENSES.md`](docs/THIRD_PARTY_LICENSES.md) — every
+  dependency's licence
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — there is **no CLA**; Apache-2.0 already
+  carries the patent grant a CLA would be asked to provide
 
-None of this is legal advice, and the EULA is not settled until reviewed by
-counsel.
+None of this is legal advice.
