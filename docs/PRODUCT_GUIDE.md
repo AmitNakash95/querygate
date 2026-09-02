@@ -1610,7 +1610,7 @@ or worked around.
 > Credentials never sit on any returned model, and that's asserted against the
 > live API schema, not by convention. And none of it is "trust us": every
 > guarantee is backed by a deny-by-default CI gate (static analysis, dependency
-> audit, SBOM, image and secret scanning, OpenAPI fuzzing, and a 704-test
+> audit, SBOM, image and secret scanning, OpenAPI fuzzing, and a 703-test
 > adversarial suite), and reviewers get a reproducible packet where each claim
 > names the command that reproduces it. The release pipeline signs the container
 > image (cosign keyless) and attaches SLSA build provenance, both
@@ -1907,7 +1907,7 @@ summary.
 
 The gates fall into three groups:
 
-- **The access boundary itself.** The adversarial security suite (704 tests,
+- **The access boundary itself.** The adversarial security suite (703 tests,
   `make test-security`) encodes specific known bypass classes as regressions —
   denied-column inference, undeclared-table smuggling, predicate-as-SQL,
   schema-discovery leaks, policy-cap breaches, audit no-leak. On top of that,
@@ -4367,6 +4367,42 @@ certification. See [Security Model](#security-model), section 6.
 Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
+
+- **2026-09-02 — QueryGate is Apache-2.0, and the entitlement gate is removed
+  from the gateway entirely.** This reverses the 2026-08-23 proprietary
+  subscription decision. The reasoning is that the product's success metric is a
+  security review, and for a self-hosted gateway that holds every database
+  credential, "you cannot read the source" is the most expensive objection there
+  is — while the three pillars' moat is architectural (no raw-SQL path, live
+  operational reach, per-human proof), not secrecy. Competitors are structurally
+  trapped by their own product identity, so publishing the source costs little
+  competitively.
+
+  **What follows, and why the gate had to go rather than merely default off.**
+  Under an OSI licence a licence check enforces nothing — anyone may fork it out,
+  and `subscription_enabled` already defaulted to false — while being the single
+  most quotable thing in the repository. An open-source *security* product
+  containing code that refuses to serve queries on billing state would make the
+  kill switch the entire launch conversation. So `subscription/`, the three
+  enforcement funnels, `SubscriptionExpiredError` and its 402, the renewal
+  banner, and 12 config fields were deleted outright (4,761 lines).
+  `tests/security/test_no_phone_home.py` reverts to its original absolute — no
+  outbound call from anywhere in the shipped source — which is a *stronger*
+  claim than the four-field disclosure it replaces, and is now asserted
+  positively rather than implied.
+
+  **The commercial model moves, it does not disappear.** The control plane stays
+  private and its products become Notary (third-party anchoring of the audit
+  chain head — paid because a self-hosted anchor attests to your own logs and so
+  proves nothing) and fleet management. `COMMERCIAL.md` states this publicly from
+  the first commit so the funding model is legible rather than a later surprise.
+  The "no hosted query execution" non-goal is unchanged and now doubly binding.
+
+  **Known cost, recorded rather than glossed:** the image ships Microsoft's
+  proprietary `msodbcsql18`, and Apache-2.0 has no third-party pass-through
+  clause while a public image reaches people who agreed to nothing. That went
+  from *partly met* to *not met* and **blocks the first public image release**
+  (item 228). The repository and the wheel are unaffected.
 
 - **2026-08-28 — Whether a subscription will renew itself is a *signed* field,
   and the countdown that reads it is decided in one function (item 216).** A

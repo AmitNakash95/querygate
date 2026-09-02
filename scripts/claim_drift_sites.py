@@ -249,12 +249,6 @@ KNOWN_OK: List[Tuple[str, str, str, str]] = [
         "licensing",
     ),
     (
-        "docs/LICENSE_NOTES.md",
-        "",
-        "Superseded-by-banner (2026-08-23): counsel notes for the BSL text that was never adopted.",
-        "licensing",
-    ),
-    (
         ".github/cla/CLA.md",
         "",
         "Retired-by-banner (2026-08-23): a CLA for outside contributors to a public repo, of which there are none.",
@@ -300,25 +294,6 @@ KNOWN_OK: List[Tuple[str, str, str, str]] = [
     # a guard that cannot explain its own history is a guard the next person
     # deletes. None is a surface a customer reads.
     (
-        "docs/CONTROL_PLANE_PLAN.md",
-        "",
-        "The transition's own design document: it enumerates the false claims to fix, "
-        "in the same way TODO.md does. Not a claim surface.",
-        "licensing",
-    ),
-    (
-        "tests/unit/test_eula.py",
-        "",
-        "The EULA gate's tests; its comments explain the BSL Change-Date gate they replaced.",
-        "licensing",
-    ),
-    (
-        "scripts/check_eula.py",
-        "",
-        "The EULA gate itself; same reasoning as its tests.",
-        "licensing",
-    ),
-    (
         "tests/unit/test_release_metadata.py",
         "",
         "Rescued the changelog binding out of the deleted BSL Change-Date test and says so.",
@@ -360,7 +335,6 @@ BANNER_EXEMPT: Dict[str, str] = {
     "docs/business/PRE_BSL_CLEANUP_PLAN.md": "SUPERSEDED",
     "docs/business/BSL_EXECUTION_PROMPT.md": "SUPERSEDED",
     "docs/business/GTM_EXECUTION_PROMPT.md": "SUPERSEDED",
-    "docs/LICENSE_NOTES.md": "SUPERSEDED",
     ".github/cla/CLA.md": "RETIRED",
     ".github/cla/README.md": "RETIRED",
 }

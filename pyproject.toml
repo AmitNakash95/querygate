@@ -9,18 +9,13 @@ authors = [{ name = "Amit Nakash" }]
 readme = "README.md"
 requires-python = ">=3.11,<4.0"
 dynamic = ["dependencies"]
-# PEP 639: ship the licence notice in the sdist and wheel. `LICENSE` is a
-# proprietary notice that reserves all rights and points at the licence of
-# record, `docs/legal/EULA.en.md` (item 210).
-#
-# There is still deliberately NO `license = "..."` SPDX expression: PEP 639
-# wants an SPDX expression there, and none of them means "proprietary, governed
-# by a separate EULA". `LicenseRef-Proprietary` would tell a compliance scanner
-# that a machine-resolvable licence document exists when it does not. What every
-# scanner, index and SBOM consumer actually reads is the classifier below, and
-# `License :: Other/Proprietary License` is now TRUE — which is the change item
-# 210 makes here. It could not be declared while a BSL draft that granted
-# nothing sat in LICENSE.
+# PEP 639: `LICENSE` is the full Apache-2.0 text and is shipped in the sdist
+# and the wheel. The SPDX expression is declared rather than omitted — the
+# opposite of the proprietary posture that preceded it — so every compliance
+# scanner, package index and SBOM consumer resolves the grant automatically
+# instead of having to read a notice. See COMMERCIAL.md for what is free
+# (all of this repository) and what is planned as a paid service.
+license = "Apache-2.0"
 license-files = ["LICENSE"]
 classifiers = [
     # Only the Python version CI actually runs is claimed. `requires-python`
@@ -31,7 +26,7 @@ classifiers = [
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
     "Intended Audience :: System Administrators",
-    "License :: Other/Proprietary License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",

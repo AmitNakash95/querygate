@@ -281,14 +281,6 @@ license-report: ## Regenerate docs/THIRD_PARTY_LICENSES.md — every poetry.lock
 license-check: ## Gate: every locked dependency is permissively licensed or individually recorded (strong copyleft is never waivable), and the report is current (drift-tested by test_third_party_licenses.py)
 	poetry run python scripts/check_licenses.py --check
 
-.PHONY: eula-check
-eula-check: ## Gate: docs/legal/EULA.{en,he}.md carry no unfilled placeholders (tolerant in dev; drift-tested by test_eula.py)
-	poetry run python scripts/check_eula.py --check
-
-.PHONY: eula-check-release
-eula-check-release: ## The pre-tag gate: refuses any unfilled placeholder in the licence of record, in either language
-	poetry run python scripts/check_eula.py --check --release
-
 .PHONY: verify-release
 verify-release: ## Verify dist/ artifact integrity against dist/SHA256SUMS (the check a consumer runs after download). Pass ARGS="--dist-dir path".
 	poetry run python scripts/verify_release.py $(ARGS)
@@ -307,7 +299,6 @@ release-check: ## Run deterministic source/package release gates and build artif
 	poetry build
 	poetry run python scripts/check_release_artifacts.py
 	$(MAKE) license-check
-	$(MAKE) eula-check
 	$(MAKE) sbom
 
 .PHONY: release-smoke

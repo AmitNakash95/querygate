@@ -124,40 +124,57 @@ def _pyproject() -> dict:
     return tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
 
-def test_the_package_declares_itself_proprietary():
-    classifiers = _pyproject()["project"]["classifiers"]
-    assert "License :: Other/Proprietary License" in classifiers, (
-        "pyproject.toml no longer declares a proprietary licence classifier; a "
-        "scanner or index would read the package as unlicensed (TODO.md item 210)"
-    )
+def test_the_package_declares_apache_2_0_in_both_places():
+    """Both licence signals must agree, and both must say Apache-2.0.
 
-
-def test_the_package_never_declares_an_open_source_licence():
-    """The unrecoverable direction: publishing a closed-source product under a
-    permissive licence signal is a grant a scanner will propagate.
-
-    Two signals, because checking only the OSI classifier left the stronger one
-    open. Under PEP 639 the `license` SPDX expression takes precedence over the
-    classifier, so `license = "Apache-2.0"` would give the product away while
-    every OSI-classifier assertion stayed green — and `pyproject.toml`'s own
-    comment says omitting that key is deliberate.
+    Two signals because either one alone is readable in isolation and they can
+    disagree: under PEP 639 the `license` SPDX expression takes precedence over
+    the classifier, so a stale `License :: Other/Proprietary License` classifier
+    beside `license = "Apache-2.0"` would leave scanners split on whether the
+    package may be used at all. This is the mirror of the guard it replaces —
+    that one existed to stop a permissive signal leaking into a proprietary
+    product; this one exists to stop a proprietary signal surviving into an open
+    one, which is the direction that now costs adoption.
     """
     project = _pyproject()["project"]
-    assert "license" not in project, (
-        "pyproject.toml declares an SPDX `license` expression. Its absence is "
-        "deliberate (see the comment there): no SPDX identifier means 'proprietary, "
-        f"governed by a separate EULA'. Found: {project.get('license')!r}"
+    assert project.get("license") == "Apache-2.0", (
+        'pyproject.toml must declare `license = "Apache-2.0"` (PEP 639). '
+        f"Found: {project.get('license')!r}"
     )
-    permissive = [
-        c
-        for c in project["classifiers"]
-        if c.startswith("License ::") and c != "License :: Other/Proprietary License"
-    ]
-    assert not permissive, f"pyproject.toml claims a non-proprietary licence: {permissive}"
+    classifiers = project["classifiers"]
+    assert "License :: OSI Approved :: Apache Software License" in classifiers, (
+        "pyproject.toml no longer declares the Apache-2.0 classifier; an index "
+        "would read the package as unlicensed"
+    )
+    stale = [c for c in classifiers if c == "License :: Other/Proprietary License"]
+    assert not stale, (
+        "pyproject.toml still carries the proprietary classifier alongside the "
+        "Apache-2.0 SPDX expression; the two signals contradict each other"
+    )
+
+
+def test_the_license_file_is_the_real_apache_text():
+    """A LICENSE that merely says "Apache-2.0" grants nothing.
+
+    The grant lives in the text, so this pins the operative clauses rather than
+    the file's name — a truncated or placeholder LICENSE would otherwise pass
+    every other assertion here.
+    """
+    text = (ROOT / "LICENSE").read_text()
+    assert "Apache License" in text and "Version 2.0, January 2004" in text
+    for clause in (
+        "2. Grant of Copyright License.",
+        "3. Grant of Patent License.",
+        "7. Disclaimer of Warranty.",
+    ):
+        assert clause in text, f"LICENSE is missing Apache-2.0 clause: {clause}"
+    assert (
+        "All rights reserved" not in text
+    ), "LICENSE still contains proprietary reservation language"
 
 
 def test_the_licence_notice_ships_in_the_distribution():
-    """`LICENSE` is the notice pointing at the EULA, and
+    """`LICENSE` carries the Apache-2.0 grant, and
     `scripts/check_release_artifacts.py` asserts it reaches the wheel, the sdist
     and the image. That chain starts here."""
     assert _pyproject()["project"]["license-files"] == ["LICENSE"]

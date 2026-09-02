@@ -1,11 +1,5 @@
 # Contributing to QueryGate
 
-> **DRAFT — the licensing and CLA sections describe terms that have not yet been
-> settled by a lawyer, and are NOT LEGAL ADVICE.** The CLA is drafted but not
-> enabled: no bot is running, and no contribution is currently being asked to
-> sign anything. See [`.github/cla/README.md`](.github/cla/README.md) for the
-> exact state.
-
 QueryGate is an agent-safe database access gateway. The one thing a caller can
 ever submit is a validated `StructuredQuery` JSON AST or a write AST — there is
 no raw-SQL field or endpoint anywhere in the codebase, and there never will be.
@@ -97,32 +91,62 @@ reconciliation rules between `TODO.md`, `ROADMAP.md`, and
 `docs/TODO_ARCHIVE.md`, and it runs in the unit suite and in the pre-commit
 hook, so drift fails fast.
 
+## What will not be accepted, no matter how good the code is
+
+This is the honest half of a contributing guide, and it is short. Everything
+here is product identity — the reason QueryGate can make a claim its
+competitors structurally cannot — not a gap waiting for a volunteer.
+
+- **A raw-SQL path, in any form.** No `execute_sql` tool, no `sql` field, no
+  passthrough endpoint, no "trusted admin" escape hatch, no template that
+  interpolates a caller string into a statement. QueryGate's entire safety
+  argument is that no caller-controlled SQL string exists to attack. A PR adding
+  one is not a feature request we are weighing; it removes the product.
+- **Execution of model-generated code.**
+- **A stored-procedure or arbitrary-procedural-SQL path.**
+- **A second query interface** — GraphQL included. A second path to the database
+  is a second path around the enforcement point.
+- **A mandatory semantic/entity-modelling step.** Point it at the live schema.
+- **Any outbound call to the project's authors** — telemetry, update checks,
+  usage reporting, licence validation. `tests/security/test_no_phone_home.py`
+  fails if one appears, and that test is not negotiable either.
+- **Emulating a capability a dialect genuinely lacks** by synthesising query
+  structure the AST never asked for. Translate mechanically where dialects
+  differ; reject and point at the primitives where one cannot. See the
+  `array_agg` and MSSQL `NULLS FIRST/LAST` precedents.
+
+If you think one of these is wrong, open an issue and argue the case — that is a
+legitimate conversation. Just do not open it as a pull request, because the code
+cannot be merged while the argument is unresolved, and writing it first wastes
+your time rather than ours.
+
 ## Licence, and why there is no CLA
 
-QueryGate is **proprietary and closed-source**, sold as a paid subscription
-(owner decision 2026-08-23, [`docs/business/GTM_SAAS.md`](docs/business/GTM_SAAS.md)).
-The licence of record is [`docs/legal/EULA.en.md`](docs/legal/EULA.en.md);
-[`LICENSE`](LICENSE) is a notice, not a grant. See the plain-language
-[licensing FAQ](docs/LICENSING_FAQ.md).
+QueryGate is licensed under **Apache-2.0**. See [`LICENSE`](LICENSE) for the
+grant and [`COMMERCIAL.md`](COMMERCIAL.md) for what is free (all of this
+repository, permanently), what is planned as a paid service, and what the
+project will never do.
 
-**The repository is private and there is no external contribution process**, so
-the Contributor Licence Agreement drafted for a public source-available
-repository has been retired along with the BSL plan. Its purpose was to let the
-project relicense outside contributions above the source-available grant; with
-no outside contributors and no source-available grant, it has nothing to do.
-`.github/cla/` is retained as history and is not in force.
+**There is no Contributor Licence Agreement, and we do not want one.** Apache-2.0
+already includes an explicit patent grant from every contributor (§3) and states
+that a contribution submitted for inclusion is licensed under those same terms
+(§5). A CLA on top of that would exist for exactly one purpose — to let the
+project relicense your work under terms you did not agree to — and since the
+whole point of `COMMERCIAL.md` is that the gateway stays Apache-2.0, asking you
+to sign away that protection would contradict the commitment it makes.
 
-This document therefore addresses **maintainers and contracted contributors**
-working inside the private repository, not the public.
+`.github/cla/` is retained as history from an abandoned source-available plan
+and is **not in force**. No bot runs, and no contribution is asked to sign
+anything.
 
-## For maintainers: the fork-PR runbook — **not currently applicable**
+By opening a pull request you are licensing your contribution under Apache-2.0.
+That is the whole agreement.
 
-> ⚠️ **The repository is private and closed-source, so there are no fork pull
-> requests.** This section is retained because the CI analysis in it is
-> independently useful and expensive to redo, and because the decision would
-> have to be made again if a contracted contributor ever works from a fork.
-> Nothing in it is pending work. The CLA step it used to open with is deleted,
-> not deferred — see "Licence, and why there is no CLA" above.
+## For maintainers: the fork-PR runbook
+
+> This applies now that the repository is public. The CI analysis below was
+> written while the repository was private and has been re-checked against the
+> workflows as they stand.
 
 ### 1. Decide what CI does for a fork PR
 

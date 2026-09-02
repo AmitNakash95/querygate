@@ -37,7 +37,7 @@ rather than believed.
 
 | Document | What it is |
 |---|---|
-| [`RELEASING.md`](RELEASING.md) | The reproducible release process: gates, SBOM, dependency audit, container signing and provenance, and the EULA placeholder gate. |
+| [`RELEASING.md`](RELEASING.md) | The reproducible release process: gates, SBOM, dependency audit, container signing and provenance. |
 | [`LOAD_TESTING.md`](LOAD_TESTING.md) | The real-Postgres load and soak harness for the concurrency and timeout guardrails. |
 | [`THIRD_PARTY_LICENCES.md`](THIRD_PARTY_LICENSES.md) | Generated inventory of every locked Python package's licence. `make license-check` gates it deny-by-default. |
 | [`CONTAINER_IMAGE_LICENCES.md`](CONTAINER_IMAGE_LICENCES.md) | The non-Python half of the shipped image (OS packages, the ODBC driver) that the Python inventory does not cover. |
@@ -45,19 +45,17 @@ rather than believed.
 
 ## Licensing
 
-**None of the licensing documents are legal advice.** The licence of record is
-[`legal/EULA.en.md`](legal/EULA.en.md) — it is in force, but its text is a draft
-pending counsel review and still carries unfilled placeholders.
-[`LICENSE`](../LICENSE) is a notice that reserves all rights and points here; it
-is not a grant.
+**None of this is legal advice.** QueryGate is licensed under
+**[Apache-2.0](../LICENSE)** — a real grant, not a notice. Everything in this
+repository is free to use, modify and redistribute, including commercially and
+inside closed-source products, under those terms.
 
 | Document | What it is |
 |---|---|
-| [`LICENSING_FAQ.md`](LICENSING_FAQ.md) | What the subscription terms mean in practice, in plain language: lapse behaviour, the four-field licence call, refunds, escrow. Where this and the EULA disagree, the **EULA** governs. |
-| [`LICENSE_NOTES.md`](LICENSE_NOTES.md) | ⚠️ **Superseded.** Drafting notes for the cancelled BSL text; retained as history only. |
-| [`DISTRIBUTION_STRATEGY.md`](DISTRIBUTION_STRATEGY.md) | How QueryGate is delivered to a customer, and the trade-offs of each option. |
-| [`LICENSE_ENFORCEMENT.md`](LICENSE_ENFORCEMENT.md) | What a self-hosted licence can and cannot enforce technically — deliberately honest about the ceiling. |
-| [`legal/`](legal/) | **The licence of record** — the EULA, in English (governing) and Hebrew. Every right to install and run QueryGate comes from here plus your order. |
+| [`../LICENSE`](../LICENSE) | The Apache-2.0 text. The grant lives here. |
+| [`../COMMERCIAL.md`](../COMMERCIAL.md) | What is free forever (all of this repository, including the policy engine and the audit ledger — neither will ever be tier-gated), what is planned as a paid service, and the permanent non-goals. |
+| [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) | Generated inventory of every locked Python package's licence, gated deny-by-default by `make license-check`. |
+| [`CONTAINER_IMAGE_LICENCES.md`](CONTAINER_IMAGE_LICENCES.md) | The non-Python half of the shipped image, including Microsoft's ODBC driver, which ships under its own proprietary terms. |
 
 ## Design and planning documents (internal working notes)
 

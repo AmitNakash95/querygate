@@ -72,60 +72,74 @@ and a half of them:**
 | Requirement | Status |
 |---|---|
 | (i) "add significant primary functionality to it in your applications" | **Met.** QueryGate is not a repackaged driver. |
-| (ii) "require distributors and external end users to agree to terms that protect it and Microsoft at least as much as this agreement" | **Partly met, and this is the change item 210 made.** See below. |
+| (ii) "require distributors and external end users to agree to terms that protect it and Microsoft at least as much as this agreement" | **Not met.** The Apache-2.0 transition removed the pass-through that partly addressed it. See below. |
 | (iii) "indemnify, defend, and hold harmless Microsoft from any claims … related to the distribution or use of your applications" | **Not addressed.** Nothing in QueryGate's licence or terms does this. |
 
-Requirement (ii) is the load-bearing one, and **the licence change improved it
-rather than leaving it where it was.** Under the cancelled BSL plan a user who
-pulled the image received QueryGate under BSL 1.1 and agreed to nothing on
-Microsoft's behalf: BSL 1.1 has no pass-through clause, no third-party-components
-section, and no mechanism for binding a downstream user to another vendor's
-terms.
+Requirement (ii) is the load-bearing one, and **the move to Apache-2.0 made it
+materially harder, not easier. This section is the honest record of that, and it
+is the one part of this repository that most needs a lawyer's eye before the
+image is published.**
 
-Under the proprietary EULA it does. `docs/legal/EULA.en.md` §2 now carries a
-**Third-party components** paragraph: the customer agrees to comply with each
-third-party component's own terms, "including any terms that protect their
-respective vendors", and those terms control over the EULA for that component.
-That is the ordinary mechanism by which a commercial product discharges a
-pass-through obligation, and it is exactly what option 1 below called for.
+Under the cancelled proprietary plan, `docs/legal/EULA.en.md` §2 carried a
+Third-party components pass-through, and — critically — the image only ever
+reached a party who had *entered* an Order. `LICENSE` said in terms that someone
+without an Order had no licence to use the software, so the pass-through reached
+every lawful user of the image and nobody else.
 
-**And one assumption, stated rather than left implicit:** EULA §2 binds a party
-who has *entered* the EULA, and `LICENSE` says in terms that someone without an
-Order "has no licence to use this software." So the pass-through reaches every
-lawful user of the image and nobody else. Whether that satisfies §2(b)(ii)'s
-"distributors and external end users" depends on the image never being
-distributed outside an Order — the current model (`docs/business/GTM_SAAS.md` §6,
-signed image only), but a premise, not a clause.
+**Open source removes both halves of that.** Apache-2.0 is a licence over
+QueryGate's own code; it has no pass-through clause, no third-party-components
+section, and no mechanism for binding a downstream recipient to another vendor's
+terms — the same gap BSL 1.1 had. And there is no longer an Order gating who may
+pull the image: once it is public, anyone can, including people who never agreed
+to anything.
 
-**Two reasons this is "partly", not "met".** First, the EULA is still a draft
-with unfilled placeholders and has not been reviewed by counsel, so no clause in
-it can be called settled. Second, requirement (iii) — the indemnity running to
-Microsoft — is still not addressed anywhere, and that is a commitment nobody can
-draft their way into without the owner deciding to make it.
+⚠️ **The specific open question.** `msodbcsql18` is Microsoft's proprietary ODBC
+driver, installed under `ACCEPT_EULA=Y` at build time and shipped inside the
+image. Its licence text is present in the image (the `dpkg path-include` that
+`scripts/check_release_artifacts.py` asserts), which satisfies the
+"licence text accompanies the binary" half. What is **not** established is
+whether publicly redistributing that driver inside an Apache-2.0 image is
+permitted at all, and whether the redistribution and indemnity requirements can
+be discharged without an Order in place. That question did not need answering
+while distribution was gated; it does now.
 
-There is also a restriction worth flagging even though it now appears comfortably
-satisfied: §2(c)(ii) forbids distributing the code "so that any part of it
-becomes subject to any license that requires that the distributable code … be
-disclosed or distributed in source code form". Under BSL 1.1 this needed an
-argument — the source was published, and the reading turned on the driver being a
-separately-installed binary. Proprietary, closed-source distribution removes the
-question rather than answering it: no QueryGate licence requires anything to be
-disclosed in source form. This is one of the few places where the licence change
-made a legal reading *simpler*.
+**Do not treat this as resolved by the licence change.** Three options, none of
+them free:
+
+1. Get the redistribution position reviewed by counsel before publishing an
+   image that contains the driver.
+2. Ship the driver in a separate, clearly-labelled image variant and make the
+   default image MSSQL-free, so the default artifact carries no third-party
+   proprietary binary at all.
+3. Do not ship the driver; document the `apt-get install msodbcsql18` step as an
+   operator action, so the person who accepts `ACCEPT_EULA=Y` is the person who
+   installs it.
+
+Option 2 or 3 removes the question rather than answering it, and either is
+cheaper than a legal opinion. Requirement (iii) — the indemnity running to
+Microsoft — remains unaddressed under any of them, and is an owner decision, not
+a drafting one.
+
+One restriction *is* now comfortably satisfied: §2(c)(ii) forbids distributing
+the code so that any part of it becomes subject to a licence requiring source
+disclosure. Apache-2.0 is permissive and imposes no such requirement on anything
+it does not itself cover, so the driver is unaffected.
 
 ## What should happen, in order of preference
 
-1. ✅ **Add a pass-through clause — done (item 210).** `docs/legal/EULA.en.md`
-   §2 "Third-party components" (and its Hebrew mirror) requires the customer to
-   comply with third-party component terms, including terms protecting their
-   vendors. **Still outstanding from this option:** a `THIRD_PARTY_NOTICES` file
-   *inside the image itself*, so a user who pulls the image and never sees the
-   repository still receives the notices. `Dockerfile` already `COPY`s `LICENSE`;
-   this is the same shape and is not done.
+1. ❌ **The pass-through clause is gone.** It lived in the EULA, which the
+   open-source transition deleted along with the proprietary model, and
+   Apache-2.0 has no equivalent. Nothing currently binds a downstream recipient
+   of the image to Microsoft's terms. **Still outstanding, and now more
+   important:** a `THIRD_PARTY_NOTICES` file *inside the image itself*, so
+   someone who pulls it and never sees this repository still receives the
+   notices. `Dockerfile` already `COPY`s `LICENSE`; this is the same shape and is
+   not done. That file is necessary but almost certainly not sufficient — see
+   the open question above.
 2. **Decide the indemnity question (§2(b)(iii)) with counsel.** It is a
    commitment to Microsoft. The owner is already weighing indemnification
    exposure and insurance for the Enterprise tier
-   (`docs/business/GTM_SAAS.md`), so this belongs in that conversation, not in a
+   so this belongs in an owner conversation, not in a
    separate one. **This is the requirement that is still not met at all.**
 3. **If either proves awkward, make the driver an opt-in layer.** MSSQL support
    is one of three dialects. A base image without `msodbcsql18` and a documented
@@ -141,7 +155,7 @@ first paid pilot's security review, which is the north-star metric.
 
 ## One interaction with a claim we make elsewhere
 
-`docs/LICENSING_FAQ.md` states that QueryGate transmits exactly four licence
+Earlier licensing documentation stated that QueryGate transmits exactly four licence
 fields and that no path exists for database credentials, query text, results,
 rows, schema, catalog, audit records or policy files — and
 `tests/security/test_no_phone_home.py` enforces that against QueryGate's own
@@ -150,20 +164,19 @@ and as a positive assertion on that package's payload. §3 of the ODBC driver's
 EULA is headed **DATA COLLECTION** and contemplates the driver enabling
 collection of data from users of applications that use it.
 
-The scope of our claim narrowed in item 210 — QueryGate now makes a licence call
+The scope of our claim narrowed once, then widened back — QueryGate briefly made a licence call
 of its own — but the boundary described here did not move: that call is ours and
 is disclosed; the driver's behaviour is Microsoft's and is not ours to
 characterise.
 
-Our claim is about **QueryGate**, and it remains true in its narrowed form:
-nothing in `src/querygate/` calls a QueryGate-controlled host except the
-subscription client of items 211-213, whose four-field payload is disclosed in
-EULA §16.1; `tests/security/test_no_phone_home.py` pins that package's declared
-payload constant to the same four fields. But a careful reviewer who reads both
-documents will ask about the driver, and the honest answer is that the driver is
-a third-party component with its own terms, whose telemetry behaviour we have not
-audited. → **Done (item 210):** stated in `docs/LICENSING_FAQ.md` under "One
-honest boundary", rather than left to be discovered.
+Our claim is about **QueryGate**, and it is now absolute: nothing in
+`src/querygate/` calls a QueryGate-controlled host at all, which
+`tests/security/test_no_phone_home.py` asserts positively. But a careful reviewer
+will ask about the driver, and the honest answer is that it is a third-party
+component with its own terms, whose telemetry behaviour we have not audited. Say
+that rather than let it be discovered — and note that it is an argument for
+options 2 and 3 above, since a QueryGate image that ships no Microsoft driver
+carries no unaudited third-party telemetry surface either.
 
 ## How to reproduce
 
