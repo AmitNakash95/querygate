@@ -57,8 +57,6 @@ from querygate.execution.service import (
     VerdictResult,
 )
 from querygate.policy.loader import get_policy
-from querygate.subscription.models import NoticeSeverity, RenewalState
-from querygate.subscription.observability import current_notice
 from querygate.query_ast.models import StructuredQuery
 from querygate.core.scopes import ADMIN_RELOAD_CONFIG_SCOPE, QUERY_APPROVE_SCOPE, QUERY_CANCEL_SCOPE
 from querygate.secrets.resolvers import build_secret_resolver_registry
@@ -72,41 +70,6 @@ from typing import Any, Dict
 
 class TablesListResult(pyd.BaseModel):
     tables: List[str]
-
-
-class SubscriptionNoticeResult(pyd.BaseModel):
-    """The renewal countdown the two UIs banner (TODO.md item 216).
-
-    Authenticated, and that is what earns it the day count and the exact date —
-    `/health` and the Prometheus gauge carry a three-value enum precisely
-    because they are reachable without credentials.
-
-    Still deliberately narrow even here: **no org id, deployment id, serial or
-    plan.** Every principal with any credential can read this, including an
-    analyst in `access_ui` whose queries are what stop, and none of those
-    identifiers helps them act. What does help is how long they have, what
-    exactly stops, and where to renew.
-    """
-
-    #: None when there is nothing to warn about. The UI hides the banner.
-    notice: Optional["SubscriptionNoticeBody"] = None
-
-
-class SubscriptionNoticeBody(pyd.BaseModel):
-    # The enums themselves, not a third and fourth copy of their vocabularies.
-    # They are StrEnums, so the OpenAPI schema is byte-identical; the difference
-    # is that adding a `RenewalState` member can no longer pass verification and
-    # then raise a 500 here, which both consoles swallow — leaving the banner
-    # silent for exactly the customers being warned.
-    severity: NoticeSeverity
-    days_remaining: int
-    grace_days_remaining: Optional[int] = None
-    expires_at: datetime
-    grace_expires_at: Optional[datetime] = None
-    renewal_state: RenewalState
-    renewal_url: Optional[str] = None
-    headline: str
-    detail: str
 
 
 class TemplateRunRequest(pyd.BaseModel):
@@ -237,36 +200,6 @@ def build_router(
     get_principal: Callable[..., Principal], cfg: AppConfig, prefix: str = "/api/v1"
 ) -> APIRouter:
     router = APIRouter(prefix=prefix)
-
-    @router.get("/subscription", response_model=SubscriptionNoticeResult)
-    async def subscription_notice(principal: Principal = Depends(get_principal)):
-        """The renewal countdown, for any authenticated principal.
-
-        No scope requirement, deliberately. `access_ui` is where the analyst
-        whose queries are about to start failing with a 402 is looking, and they
-        hold no admin scope; a warning only an admin can see is a warning the
-        person affected finds out about from an error.
-
-        Declared before `/{connection}/...` — a bare `/subscription` is one
-        segment and those are two, so there is no shadowing, but the ordering
-        keeps it obvious.
-        """
-        notice = current_notice()
-        if notice is None:
-            return SubscriptionNoticeResult()
-        return SubscriptionNoticeResult(
-            notice=SubscriptionNoticeBody(
-                severity=notice.severity,
-                days_remaining=notice.days_remaining,
-                grace_days_remaining=notice.grace_days_remaining,
-                expires_at=notice.expires_at,
-                grace_expires_at=notice.grace_expires_at,
-                renewal_state=notice.renewal_state,
-                renewal_url=notice.renewal_url,
-                headline=notice.headline,
-                detail=notice.detail,
-            )
-        )
 
     @router.get("/connections", response_model=List[PublicConnectionInfo])
     async def list_connections(principal: Principal = Depends(get_principal)):

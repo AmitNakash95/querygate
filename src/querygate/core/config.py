@@ -407,31 +407,6 @@ class AppConfig(BaseSettings):
     # Persisted audit events are separate from the always-on structured
     # stdout audit log. JSONL is append-only and intended for a persistent
     # volume or collection by the customer's log/SIEM agent.
-    # --- Subscription (TODO.md item 211) -------------------------------------
-    #
-    # NOTE: observe-vs-enforce is deliberately NOT here. It is a field in the
-    # *signed* entitlement, because a config flag would be a customer-settable
-    # bypass of the control this whole package exists to be. These settings
-    # decide only where an entitlement is fetched from and who this deployment
-    # says it is — never whether the gate is allowed to refuse.
-    subscription_enabled: bool = pyd.Field(default=False)
-    subscription_mode: Literal["http", "offline"] = pyd.Field(default="http")
-    subscription_endpoint: str = pyd.Field(default="")
-    subscription_deployment_id: str = pyd.Field(default="")
-    subscription_org_id: str = pyd.Field(default="")
-    subscription_deployment_key: str = pyd.Field(default="")
-    #: Where the out-of-band entitlement lives for an air-gapped deployment
-    #: (EULA §16.5 — where the Order provides for one, no transmission occurs).
-    subscription_offline_file: Optional[str] = pyd.Field(default=None)
-    #: Cached signed bytes, re-verified on every read; and the wall-clock
-    #: high-water mark. Both survive a restart so it does not re-enter grace.
-    subscription_cache_file: Optional[str] = pyd.Field(default=None)
-    subscription_clock_mark_file: Optional[str] = pyd.Field(default=None)
-    #: The offline root public key (base64 Ed25519) that signs the key manifest.
-    subscription_root_public_key: str = pyd.Field(default="")
-    subscription_key_manifest_file: Optional[str] = pyd.Field(default=None)
-    subscription_refresh_seconds: float = pyd.Field(default=86400.0, gt=0)
-
     audit_sink_backend: AuditSinkBackend = pyd.Field(default=AuditSinkBackend.NONE)
     audit_jsonl_path: str = pyd.Field(default="var/audit/querygate-audit.jsonl")
     audit_jsonl_fsync: bool = pyd.Field(default=False)

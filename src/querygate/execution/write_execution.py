@@ -38,7 +38,6 @@ import sqlalchemy as sa
 from sqlalchemy.exc import DataError, IntegrityError, StatementError
 
 from querygate.audit.events import AuditSurface
-from querygate.execution.subscription_gate import check_write_funnel
 from querygate.audit.logger import audit_query
 from querygate.compiler.sqlalchemy_compiler import _compile_where
 from querygate.compiler.write_compiler import compile_write
@@ -49,7 +48,6 @@ from querygate.core.config import config as app_config
 from querygate.core.exceptions import (
     ApprovalRequiredError,
     QueryValidationError,
-    SubscriptionExpiredError,
     public_error_message,
 )
 from querygate.execution.approval import TOKEN_KIND_GRANT, verify_approval_token, write_fingerprint
@@ -129,7 +127,6 @@ class WriteExecutionService:
         # `session_scope`, so each entry point carries its own call — a gate only
         # in `StructuredQueryService` would leave every governed
         # INSERT/UPDATE/DELETE running.
-        check_write_funnel()
         start = time.monotonic()
         policy = get_policy(self._connection_id, principal=self._principal)
         sql = ""
@@ -214,7 +211,6 @@ class WriteExecutionService:
     async def _execute_many_atomically(
         self, statements: List[WriteStatement]
     ) -> List[WriteBatchItemResult]:
-        check_write_funnel()
         policy = get_policy(self._connection_id, principal=self._principal)
         dialect = self._connection_dialect()
         cap = policy.write.max_affected_rows
@@ -308,10 +304,6 @@ class WriteExecutionService:
                     except Exception as retry_exc:  # shaped into the item error below
                         exc = retry_exc  # type: ignore[assignment]
             return self._batch_error(statement, exc)
-        except SubscriptionExpiredError:
-            # As the read path: a whole-deployment billing state, never a
-            # per-statement error string inside an HTTP 200.
-            raise
         except Exception as exc:
             return self._batch_error(statement, exc)
 

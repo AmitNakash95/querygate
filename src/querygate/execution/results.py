@@ -8,7 +8,7 @@ un-annotated candidate *field* and class creation raises `PydanticUserError`.
 
 `service.py` is the read enforcement funnel — `_validate_and_compile` is the one
 call site covering execute/explain/verdict/batch, and it is where the
-subscription gate lands (TODO.md item 211). That is exactly the module worth
+write path lands. That is exactly the module worth
 compiling, so the twelve response models it used to define moved here, leaving
 `service.py` free of `BaseModel` definitions and therefore compilable.
 
@@ -25,7 +25,7 @@ pins the split.
 
 Both funnels are covered here, not just the read side: `write_execution.py` is
 item 211's *other* gate site, and leaving its two models behind would have
-shipped the write subscription gate as readable bytecode while the read gate was
+shipped the write path as readable bytecode while the read path was
 compiled — the stated motive half-achieved in the place it matters most.
 
 `service.py` and `write_execution.py` each re-export their own names, so existing

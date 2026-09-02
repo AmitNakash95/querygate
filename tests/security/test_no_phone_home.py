@@ -1,31 +1,34 @@
-"""No part of QueryGate's data plane calls its vendor — and the one part that
-does calls it with four fields that are not the customer's data.
+"""No part of QueryGate calls its vendor. There is no exemption.
 
-**The claim changed shape in item 210, and this file is what keeps the new one
-honest.** The old absolute — "no outbound calls to us, ever ... no kill switch,
-no time bomb, and no check that can refuse to start or block a query" — was true
-of a product with no subscription. QueryGate is now sold as one, so items
-211-213 add a client that *does* call the vendor and an entitlement check that
-*can* refuse a query. Deleting this file at that point would have been the cheap
-reaction, and it would have thrown away the two assertions that become *more*
-valuable under a subscription, not less:
+**The claim has reverted to its original absolute, and this file is what keeps
+it honest.** Item 210 narrowed the guard to exempt `src/querygate/subscription/`
+because the product was being sold as a proprietary subscription and that client
+genuinely did call a licence API with four disclosed fields. The open-source
+decision removed the subscription client from the gateway entirely: entitlement
+issuance now lives only in the private control plane, which the gateway never
+contacts.
 
-  1. **The gateway itself still never calls home.** A beacon originating in the
-     request pipeline, the compiler, the catalog, or the audit sinks would
-     contradict the product's central claim that credentials and data never
-     leave — subscription or not. So the guard is *narrowed* to exempt exactly
-     `src/querygate/subscription/`, and nothing else.
-  2. **What the exempt module may transmit is enumerated, not trusted.**
-     `docs/legal/EULA.en.md` §16.1 discloses four fields and §16.2 says no other
-     transmission path exists. That disclosure is the mechanism
-     `docs/business/GTM_SAAS.md` §8 sells, so it is pinned here as a positive
-     assertion rather than left as prose.
+So the absolute is back — **no outbound call to us, from anywhere in the shipped
+source, ever. No kill switch, no time bomb, no check that can refuse to start or
+block a query.** That is a stronger claim than the four-field disclosure it
+replaces, and it is asserted here positively rather than assumed:
+`test_the_subscription_exemption_is_empty` fails if any module becomes exempt
+again.
 
-Source-level rather than behavioural, deliberately: the claim is about code that
-must *not* exist, and no runtime test can prove the absence of a call site it
-never happens to execute. This is the posture
-`test_every_key_the_script_touches_shares_one_hash_slot` takes for the same
-reason.
+Two things are deliberately kept rather than deleted with the client:
+
+  1. **The exemption machinery, asserted empty.** Keeping it costs nothing and
+     means the guard cannot be widened silently — re-arming it requires making a
+     test that says "nothing is exempt" go red.
+  2. **The payload-contract checker.** It is exercised on every run against
+     planted synthetic sources, so it is live code, not dead code, and it
+     re-arms automatically if anything resembling a client ever returns.
+
+One trap, found the hard way when the client was removed: deleting the package
+leaves `subscription/__pycache__/` behind, so `SUBSCRIPTION_PKG.exists()` stays
+true while nothing ships from it. Every guard keyed off existence stayed armed
+for a package that was gone. Use `_subscription_package_ships()`, which looks
+for real `*.py` sources.
 """
 
 from __future__ import annotations
@@ -111,6 +114,18 @@ def _python_sources(*, include_subscription: bool = True) -> list[Path]:
     if include_subscription:
         return paths
     return [p for p in paths if not _is_subscription_module(p)]
+
+
+def _subscription_package_ships() -> bool:
+    """True only when the package has real Python sources.
+
+    NOT `SUBSCRIPTION_PKG.exists()`. Deleting the package leaves
+    `subscription/__pycache__/` behind, so the directory still exists while
+    nothing ships from it — and every guard below that keys off existence
+    silently stays armed for a package that is gone. Measured: that is exactly
+    what happened when the subscription client was removed.
+    """
+    return SUBSCRIPTION_PKG.is_dir() and any(SUBSCRIPTION_PKG.rglob("*.py"))
 
 
 def test_no_vendor_hostname_appears_anywhere_in_the_shipped_source():
@@ -316,8 +331,29 @@ def test_the_subscription_exemption_is_narrow():
         f"{len(exempt)} modules are exempt from the phone-home guard; a licence "
         f"client is not that big. Exempt: {sorted(p.name for p in exempt)}"
     )
-    if not SUBSCRIPTION_PKG.exists():
-        assert exempt == set(), "subscription/ does not exist, so nothing may be exempt"
+    if not _subscription_package_ships():
+        assert exempt == set(), "subscription/ does not ship, so nothing may be exempt"
+
+
+def test_the_subscription_exemption_is_empty():
+    """The gateway ships no vendor-calling client, so nothing may be exempt.
+
+    This is the assertion that makes the module docstring's absolute checkable.
+    Re-introducing any exempt module — a licence client, a telemetry beacon, an
+    update checker — turns this red, which is the point: widening the guard has
+    to be a deliberate act with a failing test in front of it, not a quiet
+    addition under an exemption that already exists.
+    """
+    assert not _subscription_package_ships(), (
+        "src/querygate/subscription/ ships Python again. The gateway is "
+        "open-source and must not contain a vendor-calling client; entitlement "
+        "issuance belongs in the private control plane."
+    )
+    exempt = set(_python_sources()) - set(_python_sources(include_subscription=False))
+    assert exempt == set(), (
+        f"{len(exempt)} module(s) are exempt from the phone-home guard, but the "
+        f"exemption must be empty: {sorted(p.name for p in exempt)}"
+    )
 
 
 def test_the_exemption_is_path_scoped_and_not_a_pattern_hole():
@@ -901,7 +937,7 @@ def test_the_live_subscription_package_satisfies_the_contract():
     exercised against planted sources on every run, so the skip is a missing
     *subject*, not a missing *guard*.
     """
-    if not SUBSCRIPTION_PKG.exists():
+    if not _subscription_package_ships():
         pytest.skip("item 211 has not shipped; the contract is detector-tested above")
     assert payload_contract_violations(SUBSCRIPTION_PKG) == []
 
@@ -917,7 +953,7 @@ def test_the_subscription_client_declares_only_the_disclosed_fields():
     assertion. What lives here is the constant and its binding to the EULA, next
     to the exemption that makes the promise necessary.
     """
-    if not SUBSCRIPTION_PKG.exists():
+    if not _subscription_package_ships():
         pytest.skip(
             "item 211 has not shipped; DISCLOSED_PAYLOAD_FIELDS is its stated "
             "acceptance criterion (see TODO.md item 211)"
