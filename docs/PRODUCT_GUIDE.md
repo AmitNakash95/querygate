@@ -4476,7 +4476,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   `license-files`, `check_release_artifacts.py`'s wheel/sdist/image assertions
   and the `Dockerfile`'s `COPY LICENSE` all require the file to exist, so it
   becomes a *notice* that reserves all rights and points at
-  `docs/legal/EULA.en.md`, never a grant. That distinction is now asserted, not
+  the EULA, never a grant. That distinction is now asserted, not
   conventional — `test_eula.py` fails if `LICENSE` stops naming the EULA or
   regains a BSL parameter. **Second, `tests/security/test_no_phone_home.py` was
   narrowed, not deleted.** Items 211-213 add a client that *does* call the
@@ -4493,7 +4493,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   than hedged.** "No telemetry of any kind … no outbound calls to us, ever … no
   kill switch, no time bomb, and no check that can refuse to start or block a
   query" is now false in every clause, and softening it would have produced a
-  document that is technically defensible and reads as evasive. `LICENSING_FAQ.md`
+  document that is technically defensible and reads as evasive. the licensing FAQ
   instead states plainly that there is a term and the software enforces it, then
   bounds it precisely (a failed refresh never blocks; cold start fails open;
   ~45 days of warnings; health, metrics, licence status and audit retrieval
@@ -4675,7 +4675,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   it: everything is visible, runnable, and evaluable under one licence, and
   the restriction is on **resale** — providing QueryGate itself to third parties on a hosted, managed, or embedded basis — never on **capability or scale** — the
   right axis for an enforcement product, since a crippled security tool is
-  dismissed rather than evaluated. Revisit only via a NORTH_STAR-level
+  dismissed rather than evaluated. Revisit only via a product-identity-level
   decision, the same bar CLAUDE.md non-negotiable #8 sets for the non-goals
   list.
 - **2026-08-21 — The product's category name is deliberately left undecided,

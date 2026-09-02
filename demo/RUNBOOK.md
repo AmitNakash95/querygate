@@ -24,8 +24,6 @@ back up in the morning (the data survives).
 ```bash
 make pitch-status      # five lines: healthy / up / up / up / 0 agent backends
 make pitch-selfcheck   # asserts the demo's actual claims, not just liveness
-make pitch-deck-check  # asserts the demo deck's own claims (policy values, sourced
-                       # figures, no retired numbers) and the deck server's boundary
 
 ```
 
@@ -385,10 +383,8 @@ only deployment that exists right now. We are moving to a managed service, and
 the self-hosted option stays available through that transition — so a buyer
 whose security posture requires it is not stranded.
 
-Say this plainly rather than letting them infer permanence. Two reasons: the
-slide deck used to promise data stayed local "permanently" and that is no longer
-the plan, and a security-led buyer will build their approval around wherever the
-credential lives. Better they hear the roadmap from you now than discover it at
+Say this plainly rather than letting them infer permanence. A security-led
+evaluator will build their approval around wherever the credential lives. Better they hear the roadmap from you now than discover it at
 renewal.
 
 If they push on what changes under SaaS: the structural guarantee does not — the

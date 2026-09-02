@@ -13,10 +13,6 @@ make pitch-selfcheck   # asserts the demo's claims are actually true right now
 open http://127.0.0.1:8900
 ```
 
-Presenting to investors rather than driving the demo yourself? `make pitch-deck`
-serves **[deck/](deck/)** on :8901 — a 22-slide live deck with five of these
-scenarios runnable from inside the slides.
-
 Then read **[RUNBOOK.md](RUNBOOK.md)** — the talk track, the numbers, the hard
 questions and how to answer them honestly, and what to do if something breaks.
 
@@ -38,7 +34,6 @@ On-stage proofs, both about ten seconds:
 | [baseline_mcp/](baseline_mcp/) | The counter-example: a naive `execute_sql` MCP server on :8811. |
 | [config/](config/) | QueryGate's demo connection + **policy.demo.yaml** (Act 2), and the measured evidence in `VERIFIED.md`. |
 | [control/](control/) | The control UI and its backend on :8900. |
-| [deck/](deck/) | The demo deck on :8901 — live scenarios embedded in the slides. |
 | [agent/](agent/) | Live-agent encore — real Claude session wired to both servers. |
 | [slides/](slides/) | One-page answers to the questions that come up in the room (today: why not a database firewall). |
 

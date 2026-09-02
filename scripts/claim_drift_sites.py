@@ -145,7 +145,7 @@ _CLASSES: Dict[str, ClaimClass] = {
 # to key on path and needle alone, so a whole-file exemption granted for the
 # licensing sweep silently blinded that file to `cost-estimation`,
 # `worm-resumable`, `four-eyes`, `admin-ui` and `disclosure-budget` too — item
-# 210 added eight such entries, one of them over `docs/CONTROL_PLANE_PLAN.md`, a
+# 210 added eight such entries, one of them over the control-plane plan, a
 # live design document. A reviewer caught it. Use `"*"` only where the reason
 # genuinely holds for every class: this scanner's own pattern table, and the
 # worklist files, which describe drift rather than claiming anything.
