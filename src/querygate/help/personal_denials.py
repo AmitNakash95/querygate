@@ -157,11 +157,6 @@ _DENIAL_GUIDANCE: Dict[str, str] = {
     "approval_required": "This request needs human-in-the-loop approval before it can run.",
     "not_found": "The referenced connection or resource does not exist, or isn't visible to you.",
     "db_error": "The database itself rejected or failed the request.",
-    "subscription_expired": (
-        "This QueryGate deployment's subscription has expired. This is a billing "
-        "state, not a policy decision — your access is unchanged and will resume "
-        "on renewal. Ask your QueryGate administrator to renew."
-    ),
 }
 _UNKNOWN_GUIDANCE = "This request was rejected; the specific reason wasn't recorded."
 

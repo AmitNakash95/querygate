@@ -262,34 +262,6 @@ class AuthorizationError(Exception):
         super().__init__(f"Missing required scope: {required_scope!r}")
 
 
-class SubscriptionExpiredError(Exception):
-    """The paid term and its grace window have both fully elapsed.
-
-    **Deliberately not a `ValueError` or a `PolicyViolationError.`** Existing
-    handling maps those to HTTP 422 and labels them `policy`, which would tell a
-    customer their own policy refused a query it actually permits — and would
-    write that into the tamper-evident ledger, permanently. This is a billing
-    state, renders as HTTP 402, and says so.
-
-    Lives here rather than in `subscription/` because `api/_errors.py` and
-    `mcp/exceptions.py` import only from `core.exceptions`, and the
-    forbidden-edge guard in `tests/unit/test_subscription_boundaries.py` keeps
-    it that way.
-    """
-
-    def __init__(self, renewal_url: str | None = None) -> None:
-        self.renewal_url = renewal_url
-        detail = (
-            f" Renew at {renewal_url} to restore service."
-            if renewal_url
-            else " Contact your QueryGate administrator to renew."
-        )
-        super().__init__(
-            "This QueryGate subscription has expired, so governed queries, writes "
-            "and schema discovery are refused." + detail
-        )
-
-
 def public_error_message(exc: Exception) -> str:
     """Return a client-safe message without exposing unexpected internals.
 
@@ -311,7 +283,6 @@ def public_error_message(exc: Exception) -> str:
             # Without this entry the 402 body renders as "An unexpected error
             # occurred", and item 216's "the message names the renewal URL" is
             # unsatisfiable — both transports render every message through here.
-            SubscriptionExpiredError,
         ),
     ):
         return str(exc)

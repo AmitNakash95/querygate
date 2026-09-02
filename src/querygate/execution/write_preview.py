@@ -25,7 +25,6 @@ import pydantic as pyd
 import sqlalchemy as sa
 
 from querygate.compiler.sqlalchemy_compiler import _compile_where
-from querygate.execution.subscription_gate import check_write_funnel
 from querygate.compiler.write_compiler import _coerce_row, compile_write
 from querygate.connections.engine import session_scope
 from querygate.connections.visibility import resolve_visible_connection
@@ -93,7 +92,6 @@ class WritePreviewService:
     async def preview(
         self, statement: WriteStatement, *, include_diff: bool = False
     ) -> WritePreview:
-        check_write_funnel()
         policy = get_policy(self._connection_id, principal=self._principal)
         validate_write_policy(statement, policy, self._connection_id)
         table = await validate_write_schema(statement, self._connection_id, self._principal)

@@ -43,7 +43,6 @@ from querygate.execution.disclosure_budget import clear_redis_disclosure_budget_
 from querygate.execution.quota import clear_redis_quota_limiter
 from querygate.health import HealthMonitor
 from querygate.metrics import CONTENT_TYPE_LATEST, render_latest
-from querygate.subscription.observability import current_signal, publish_signal
 
 
 def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
@@ -183,21 +182,6 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
             await credential_lease_monitor.start()
         app.state.credential_lease_monitor = credential_lease_monitor
 
-        # The subscription refresher (item 211). Started last of the monitors so
-        # a start-up failure here is unambiguous, and holding its own httpx
-        # client so the one outbound call this product makes has a single owner.
-        subscription_manager = None
-        subscription_http_client = None
-        if conf.subscription_enabled:
-            from querygate.subscription.bootstrap import build_manager
-
-            if conf.subscription_mode == "http":
-                subscription_http_client = httpx.AsyncClient()
-            subscription_manager = build_manager(conf, client=subscription_http_client)
-            await subscription_manager.start()
-        app.state.subscription_manager = subscription_manager
-        app.state.subscription_http_client = subscription_http_client
-
         redis_client = None
         if conf.concurrency_backend == ConcurrencyBackend.REDIS:
             import redis.asyncio as redis_asyncio
@@ -308,10 +292,6 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
                 await catalog_usage_learning_monitor.stop()
             if credential_lease_monitor is not None:
                 await credential_lease_monitor.stop()
-            if subscription_manager is not None:
-                await subscription_manager.stop()
-            if subscription_http_client is not None:
-                await subscription_http_client.aclose()
             await health_monitor.stop()
             reset_audit_sink()
             if worm_flush_monitor is not None:
@@ -525,18 +505,7 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
             # readiness probes, so it returns aggregate counts rather than
             # connection ids, database topology, or driver error details.
             "connections": connection_counts,
-            # A coarse enum and nothing more (TODO.md item 216): ok |
-            # renewal_due | expired. This endpoint is unauthenticated by design
-            # for orchestrator probes, so an expiry date, a day count, a plan or
-            # an org id here would tell any scanner exactly when this customer's
-            # gateway stops serving. The countdown lives on the authenticated
-            # banner, the renewal email and `querygate-license status`.
-            "subscription": current_signal().value,
         }
-        # An expired subscription is deliberately **not** a 503. The process is
-        # healthy and is refusing on a billing decision; returning "unavailable"
-        # would make an orchestrator kill and restart the pod in a loop, turning
-        # a renewal conversation into an outage that looks like a crash.
         return JSONResponse(
             content=body,
             status_code=(
@@ -549,14 +518,12 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
         @application.get("/metrics", tags=["health"])
         async def metrics(principal: Principal = Depends(principal_dependency)) -> Response:
             require_scope(principal, ADMIN_METRICS_READ_SCOPE)
-            publish_signal()
             return Response(content=render_latest(), media_type=CONTENT_TYPE_LATEST)
 
     else:
 
         @application.get("/metrics", tags=["health"])
         async def metrics_unauthenticated() -> Response:
-            publish_signal()
             return Response(content=render_latest(), media_type=CONTENT_TYPE_LATEST)
 
     return application

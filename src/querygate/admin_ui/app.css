@@ -447,7 +447,7 @@ dialog form > small { display: block; margin-top: 15px; text-align: center; }
   .session-summary .status-chip { display: none; }
   .principal-chip { max-width: 110px; }
   .view { padding: 24px 16px 36px; }
-  .banner, .renewal-banner { margin-inline: 16px; }
+  .banner { margin-inline: 16px; }
   .section-intro { align-items: flex-start; flex-direction: column; }
   .hero-card { min-height: 440px; }
   .stats-grid { grid-template-columns: 1fr 1fr; }
@@ -491,8 +491,6 @@ dialog form > small { display: block; margin-top: 15px; text-align: center; }
    words, and severity only changes how loud it looks. Both palettes are the
    ones the rest of the UI already uses, so contrast is the same bar the
    existing .banner meets rather than a new one introduced here. */
-.renewal-banner { margin: 22px clamp(24px, 4vw, 56px) 0; padding: 14px 18px; border: 1px solid var(--warning); border-radius: 6px; background: var(--warning-soft); color: var(--warning); }
-.renewal-banner[data-severity="critical"], .renewal-banner[data-severity="expired"] { border-color: var(--bad); background: var(--bad-soft); color: var(--bad); }
 .renewal-headline { margin: 0; font-size: 14px; font-weight: 700; }
 .renewal-detail { margin: 6px 0 0; color: var(--ink); font-size: 13px; line-height: 1.5; }
 .renewal-dates { margin: 6px 0 0; color: var(--muted); font: 11px/1.5 var(--font-mono); }
