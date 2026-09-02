@@ -52,7 +52,6 @@ from querygate.core.exceptions import (
     QueueDepthExceededError,
     QueueFullError,
     QuotaExceededError,
-    SubscriptionExpiredError,
     public_error_message,
 )
 from querygate.core.logging import get_logger, log_execution
@@ -66,11 +65,6 @@ from querygate.execution.approval import (
     verify_approval_token,
 )
 from querygate.execution.concurrency import concurrency_slot
-from querygate.execution.subscription_gate import (
-    check_read_admission,
-    check_read_funnel,
-    check_schema_discovery_funnel,
-)
 from querygate.execution.cost_estimation import (
     QueryCostEstimate,
     cost_estimate_violations,
@@ -416,7 +410,6 @@ class StructuredQueryService:
         # four ways an ad-hoc AST reaches a database", which is exactly the set
         # that must stop when the term has elapsed — `explain`, `verdict` and
         # their batch forms reach here without going through `execute`.
-        check_read_funnel()
         policy = self._get_policy()
         # TODO.md item 195: the templates-only narrowing runs first in this
         # function — before the structural caps, policy validation and schema
@@ -836,12 +829,6 @@ class StructuredQueryService:
         # exceptions that except clause catches.
         policy: Optional[Policy] = None
         try:
-            # The subscription gate runs once per request and FIRST — ahead of the
-            # quota reservation and the concurrency slot below. An expired
-            # deployment must not spend a caller's quota or hold a slot for a
-            # request it is going to refuse anyway. Observe mode returns here and
-            # emits a metric instead (TODO.md item 211).
-            check_read_admission()
             policy = self._get_policy()
             # Per-principal rate/byte quota (TODO.md item 50) — checked before
             # queuing or touching the database, so a rate-limited caller doesn't
@@ -1097,14 +1084,7 @@ class StructuredQueryService:
                     else (
                         "denied"
                         if error_category in ("policy", "schema", "not_found", "quota")
-                        # A billing state, recorded as its own decision rather
-                        # than as "unknown" — which is what the ledger would
-                        # otherwise carry, permanently, for every refused query.
-                        else (
-                            "subscription_expired"
-                            if error_category == "subscription_expired"
-                            else "unknown"
-                        )
+                        else "unknown"
                     )
                 ),
                 rejected=True,
@@ -1227,13 +1207,6 @@ class StructuredQueryService:
                     except Exception as retry_exc:  # shaped into the item error below
                         exc = retry_exc  # type: ignore[assignment]
             return self._batch_error_item(exc)
-        # Re-raised ahead of every batch/verdict catch-all below. An expired
-        # subscription is a whole-deployment state, not a per-item outcome:
-        # swallowing it here would return HTTP 200 with a per-item error
-        # string, so a caller sees N individual failures instead of one 402,
-        # and every retry re-runs the batch.
-        except SubscriptionExpiredError:
-            raise
         except Exception as exc:
             return self._batch_error_item(exc)
 
@@ -1284,10 +1257,6 @@ class StructuredQueryService:
             try:
                 result = await self.explain(query)
                 results.append(BatchExplainItemResult(**result.model_dump()))
-            except SubscriptionExpiredError:
-                # See `_execute_batch_item`: a deployment-wide state must not be
-                # reported as a per-query explain failure inside a 200.
-                raise
             except Exception as exc:
                 results.append(BatchExplainItemResult(error=public_error_message(exc)))
         return results
@@ -1389,16 +1358,6 @@ class StructuredQueryService:
                         _scope_connections,
                         _connection_resolver,
                     ) = await self._validate_and_compile(query)
-                except SubscriptionExpiredError:
-                    # The catch-all below is deliberate and documented — every
-                    # shape-level rejection collapses to "not-available-to-you"
-                    # so a verdict cannot be used to probe policy or schema. An
-                    # expired subscription is neither: swallowing it here returns
-                    # HTTP 200 `{"allowed": false, "reason": "not-available-to-you"}`
-                    # and writes `policy_decision="denied"` into the
-                    # tamper-evident ledger — telling the customer, permanently,
-                    # that their own policy refused a query it actually permits.
-                    raise
                 except Exception as exc:
                     audit_query(
                         connection_id=self._connection_id,
@@ -1515,10 +1474,6 @@ class StructuredQueryService:
             try:
                 result = await self.verdict(query)
                 results.append(BatchVerdictItemResult(**result.model_dump()))
-            except SubscriptionExpiredError:
-                # As `verdict` itself: a deployment-wide billing state must not
-                # become a per-query `error` string inside an HTTP 200.
-                raise
             except Exception as exc:
                 results.append(BatchVerdictItemResult(error=public_error_message(exc)))
         return results
@@ -1527,16 +1482,11 @@ class StructuredQueryService:
     async def list_tables(self) -> List[str]:
         """Known/reflected table names for this connection, filtered by policy.
 
-        Gated on the subscription: this reaches the live database via
-        `list_live_tables` and carries no AST, so it passes through neither the
-        read nor the write funnel. Schema enumeration is product, not
-        diagnostics — an expired deployment enumerates nothing.
 
         Prefers already-reflected metadata + any `known_tables` seed list on
         the connection profile; falls back to a live INFORMATION_SCHEMA query
         when neither is available.
         """
-        check_schema_discovery_funnel()
         policy = self._get_policy()
         profile = get_registry().get(self._connection_id)
         metadata = get_metadata(self._connection_id)
@@ -1562,7 +1512,6 @@ class StructuredQueryService:
         `verbose_provenance` is set — see `catalog.retrieval.search_catalog`.
         """
 
-        check_schema_discovery_funnel()
         policy = self._get_policy()
         try:
             return search_catalog(
@@ -1580,7 +1529,6 @@ class StructuredQueryService:
     async def describe_table(
         self, table_name: str, *, verbose_provenance: bool = False
     ) -> TableDescription:
-        check_schema_discovery_funnel()
         policy = self._get_policy()
         try:
             sanitize_table_name(table_name)
