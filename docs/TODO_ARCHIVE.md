@@ -15080,6 +15080,76 @@ operator would be relying on.
 Documented in `examples/policy.example.yaml` (which now sets it `true` on the
 demo connection) and in the `PRODUCT_GUIDE.md` Decision Log.
 
+### 227. ClusterFuzzLite coverage is shallow because pydantic-core is native ✅ DONE
+
+**Effort: S.** Found while verifying the ClusterFuzzLite integration added in
+`chore(supply-chain)` (2026-09-01), not by a reviewer — the fuzzer was green and
+the defect was only visible in its coverage counter.
+
+**Why it matters:** `fuzz/fuzz_structured_query.py` targets
+`StructuredQuery.model_validate`, which dispatches almost immediately into
+`pydantic-core`. That is compiled Rust; Atheris instruments Python bytecode and
+cannot see inside it. **Measured:** 2,745,141 executions plateaued at **31
+coverage features**, and the coverage-guided search therefore degrades towards
+blind random input. A clean run currently means "no crash on random bytes", not
+"the input space was explored" — and the danger is that a green fuzzing badge
+gets read as the stronger claim. (Rewiring instrumentation does not fix this:
+replacing `instrument_all()` with `instrument_imports()` was measured *worse*,
+2 features, with libFuzzer warning the target looked uninstrumented.)
+
+**Definition of done:** at least one additional fuzz target whose work happens
+in *Python*, where coverage feedback is real — the strongest candidates are
+`validation/policy_validation.py` (pure Python, operates on an already-built
+AST, and is a genuine enforcement boundary) and
+`compiler/sqlalchemy_compiler.py` fed a valid AST. Report the coverage-feature
+count for each target in the PR so the improvement is measured rather than
+asserted, and keep the existing model target — its value is crash-resistance on
+hostile bytes, which is real even with weak coverage. Update the honest-limit
+comment at the top of `fuzz/fuzz_structured_query.py` and Appendix C of
+an internal publication plan once the numbers change.
+
+**How it shipped (2026-09-03), and the first attempt was wrong.**
+
+The item's premise — target Python code, get real coverage feedback — was
+correct in principle and insufficient in practice. `fuzz_policy_validation.py`
+targets `validate_structural_caps`: pure Python, a real enforcement point
+(`max_cte_count`, `max_subquery_depth`), no I/O. 18,128 functions instrumented.
+It still measured **29 features over 10,993,940 executions** — no better than
+the Rust-bound target it was written to beat.
+
+The validator was not invisible; it was **unreachable**. Random bytes
+essentially never satisfy the `StructuredQuery` model, so the fuzzer never got
+past the gate and the corpus stalled at five inputs totalling seven bytes. Every
+execution died at JSON or model validation.
+
+`fuzz/make_seed_corpus.py` generates ten validated ASTs — simple, aggregate,
+CTE-bearing and depth-nested — zipped to
+`$OUT/fuzz_policy_validation_seed_corpus.zip` at build time, so the fuzzer starts
+*inside* the boundary and mutates outward.
+
+    fuzz_structured_query (pydantic-core bound)     31 features
+    fuzz_policy_validation, no seed corpus          29 features
+    fuzz_policy_validation, WITH seed corpus       377 features   (13x)
+
+Seeded, the corpus grows to 39 inputs / 8.9 KB and is still finding new coverage
+at 4.6M executions. No crashes.
+
+**Two packaging defects found on the way, both silent:**
+
+1. `ModuleNotFoundError: No module named 'examples'` at startup.
+   `querygate.policy.models` transitively pulls `core/config.py`, which resolves
+   the `examples` package through `importlib.resources` at MODULE scope —
+   invisible to PyInstaller's static analysis. The binary died before libFuzzer
+   ever ran, which reports as "no crashes" forever. `build.sh` now passes
+   `--collect-data examples --hidden-import examples`.
+2. Both targets' `--selftest` corpora used `"from"` where the AST field is
+   `"from_table"`, so every input was rejected at the model gate and the
+   selftests passed while exercising nothing below it — the same
+   unreachable-subject failure as the main finding, one layer up.
+
+**Standing rule for this target:** if you change it, re-measure. A fuzz target
+that cannot reach its subject reports success indefinitely.
+
 ### 228. Microsoft ODBC driver redistribution in a PUBLIC image ✅ DONE
 
 **Effort: S to remove the question; M to answer it. BLOCKS the first public
