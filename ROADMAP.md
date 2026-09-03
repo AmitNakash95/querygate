@@ -170,7 +170,7 @@ human-SSO/identity stream; these start at 210.
 - [ ] **218** — Setup guides and quickstart docs for the SaaS motion.
 - [x] **228** — Resolve msodbcsql18 redistribution in a public image (blocks
       the first public image release; repository and wheel unaffected)
-- [ ] **227** — Deepen ClusterFuzzLite: add a fuzz target whose work is in
+- [x] **227** — Deepen ClusterFuzzLite: add a fuzz target whose work is in
       Python, since pydantic-core is native and coverage feedback on the
       model target is measured shallow (31 features / 2.7M execs)
 - [ ] **221** — Move validator bodies out of the model classes so the

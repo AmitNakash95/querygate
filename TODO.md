@@ -249,7 +249,7 @@ order-of-magnitude, not commitments.
 | 224 | Bring the pre-existing console surfaces up to the renewal banner's accessibility bar — `#global-banner` is a `hidden` `role="status"` element in both consoles, and neither isolates bidirectional text in database-supplied identifiers | M | 216 |
 | 225 | An entitlement schema-version bump has no compatibility window — `verify.py` rejects any version but its own and the refresh request carries no client version, so the next bump silently removes the countdown from skewed deployments | S | 216 |
 | 226 | `build_provider` in `billing.py` still special-cases construction at the registry, unlike the email registry beside it | XS | 212 |
-| 227 | ClusterFuzzLite coverage is shallow because `pydantic-core` is native — the model fuzz target plateaued at 31 coverage features over 2.7M executions, so a clean run means "no crash on random bytes", not "the input space was explored" | S | — |
+| 227 | ✅ ClusterFuzzLite coverage is shallow because `pydantic-core` is native — the model fuzz target plateaued at 31 coverage features over 2.7M executions, so a clean run means "no crash on random bytes", not "the input space was explored" | S | — |
 | 228 | ✅ Microsoft's proprietary `msodbcsql18` ships inside the image, but Apache-2.0 has no third-party pass-through and a public image reaches people who agreed to nothing — **blocks the first public image release** | S | 196 |
 | 221 | Move validator bodies out of the model classes into compilable sibling modules — 30 validators / 602 lines of enforcement logic (join form, window scope, CTE names, set ops, credential shape) currently ship readable because a module defining `BaseModel` cannot be Cython-compiled | M | 214 |
 | 220 | ✅ Deny-by-default at table and column granularity: a `Policy` allow-list with no allow-all fallback, so an empty `allowed_tables` denies instead of allowing. Opt-in (default off) so no existing deployment changes behaviour; the starter policy turns it on | M | — |
@@ -4607,33 +4607,11 @@ anyone writes here will copy whichever they read first.
 branch; `test_the_registry_constructs_every_provider_from_settings`'s billing
 sibling iterating `known_providers()` with no branching in the test either.
 
-### 227. ClusterFuzzLite coverage is shallow because pydantic-core is native — deepen the fuzz target
+### 227. ClusterFuzzLite coverage is shallow because pydantic-core is native ✅ DONE
 
-**Effort: S.** Found while verifying the ClusterFuzzLite integration added in
-`chore(supply-chain)` (2026-09-01), not by a reviewer — the fuzzer was green and
-the defect was only visible in its coverage counter.
-
-**Why it matters:** `fuzz/fuzz_structured_query.py` targets
-`StructuredQuery.model_validate`, which dispatches almost immediately into
-`pydantic-core`. That is compiled Rust; Atheris instruments Python bytecode and
-cannot see inside it. **Measured:** 2,745,141 executions plateaued at **31
-coverage features**, and the coverage-guided search therefore degrades towards
-blind random input. A clean run currently means "no crash on random bytes", not
-"the input space was explored" — and the danger is that a green fuzzing badge
-gets read as the stronger claim. (Rewiring instrumentation does not fix this:
-replacing `instrument_all()` with `instrument_imports()` was measured *worse*,
-2 features, with libFuzzer warning the target looked uninstrumented.)
-
-**Definition of done:** at least one additional fuzz target whose work happens
-in *Python*, where coverage feedback is real — the strongest candidates are
-`validation/policy_validation.py` (pure Python, operates on an already-built
-AST, and is a genuine enforcement boundary) and
-`compiler/sqlalchemy_compiler.py` fed a valid AST. Report the coverage-feature
-count for each target in the PR so the improvement is measured rather than
-asserted, and keep the existing model target — its value is crash-resistance on
-hostile bytes, which is real even with weak coverage. Update the honest-limit
-comment at the top of `fuzz/fuzz_structured_query.py` and Appendix C of
-an internal publication plan once the numbers change.
+Added `fuzz/fuzz_policy_validation.py` targeting `validate_structural_caps`
+plus a seed corpus: **31 → 377 coverage features**, measured.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 227).
 
 ### 228. Microsoft ODBC driver redistribution in a PUBLIC image ✅ DONE
 
