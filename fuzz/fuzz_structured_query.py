@@ -58,7 +58,9 @@ import sys
 # by rewiring. It means: treat a clean run as evidence that the boundary does
 # not crash on random bytes, NOT as evidence that the input space was explored.
 # The hand-written corpus in tests/security/test_malformed_input_fuzzing.py
-# remains the load-bearing coverage of this boundary. See TODO.md item 227.
+# remains the load-bearing coverage of THIS boundary. Item 227 added
+# fuzz_policy_validation.py, which reaches 377 features against the structural
+# caps once seeded — that is where coverage-guided fuzzing actually pays here.
 try:
     import atheris
 
@@ -118,12 +120,12 @@ def _selftest() -> int:
         b"[]",
         b"null",
         b"\xff\xfe",
-        b'{"table": 1}',
-        b'{"table": "T", "select": ["T.C"]}',
-        b'{"table": "T", "select": [{"col": "T.C", "fn": "sum"}]}',
+        b'{"from_table": 1}',
+        b'{"from_table": "T", "select": ["T.C"]}',
+        b'{"from_table": "T", "select": [{"col": "T.C", "fn": "sum"}]}',
         b"[" * 200 + b"]" * 200,
-        b'{"table": "T", "select": ["T.C"], "where": ' + b'{"and": [' * 50 + b"]}" * 50 + b"}",
-        b'{"table": "T", "top_n": {"n": 1' + b"0" * 400 + b"}}",
+        b'{"from_table": "T", "select": ["T.C"], "where": ' + b'{"and": [' * 50 + b"]}" * 50 + b"}",
+        b'{"from_table": "T", "top_n": {"n": 1' + b"0" * 400 + b"}}",
     ]
     for item in corpus:
         consume(item)
