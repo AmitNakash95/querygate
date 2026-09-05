@@ -43,9 +43,27 @@ for _ in $(seq 1 30); do
 done
 
 curl --fail --silent "$BASE_URL/health" >/dev/null
-curl --fail --silent "$BASE_URL/api/v1/connections" >/dev/null
+
+# The image self-configures on first boot (TODO.md item 215): it generates an
+# admin API key, writes it to /app/var/admin-api-key at mode 0600, and REQUIRES
+# it thereafter. Before that, every request here was unauthenticated and passed.
+#
+# This script was not updated with it, because item 215 landed on a branch whose
+# CI never ran the smoke job — so the first authenticated build was PR #45,
+# where /api/v1/connections returned 401 and curl exited 22. Reading the key the
+# way docs/INSTALL.md tells an operator to keeps the smoke honest: it exercises
+# the documented first-run path rather than a bypass.
+ADMIN_KEY="$(docker exec "$APP_CONTAINER" cat /app/var/admin-api-key)"
+if [ -z "$ADMIN_KEY" ]; then
+    echo "release smoke: no admin key was generated at /app/var/admin-api-key" >&2
+    exit 1
+fi
+
+curl --fail --silent -H "Authorization: Bearer $ADMIN_KEY" \
+    "$BASE_URL/api/v1/connections" >/dev/null
 
 response=$(curl --fail --silent \
+    -H "Authorization: Bearer $ADMIN_KEY" \
     -H 'Content-Type: application/json' \
     -d '{"from":"customers","select":["customers.id","customers.name"],"limit":2}' \
     "$BASE_URL/api/v1/demo/query")
@@ -66,6 +84,7 @@ PY
 # total is the canonical case, and its correctness is self-evident from the rows:
 # the last row's running total equals the sum of every row's value.
 window_response=$(curl --fail --silent \
+    -H "Authorization: Bearer $ADMIN_KEY" \
     -H 'Content-Type: application/json' \
     -d '{"from":"order_items","select":["order_items.id","order_items.quantity",{"fn":"sum","arg":{"col":"order_items.quantity"},"over":{"order_by":[{"col":"order_items.id"}],"frame":{"mode":"rows","start":{"bound":"unbounded_preceding"},"end":{"bound":"current_row"}}},"as":"running_quantity"}],"order_by":[{"col":"order_items.id"}],"limit":10}' \
     "$BASE_URL/api/v1/demo/query")
@@ -90,6 +109,7 @@ PY
 # correctness is self-evident from the rows: every returned pair really does
 # satisfy the band, and a product always bands against itself.
 join_response=$(curl --fail --silent \
+    -H "Authorization: Bearer $ADMIN_KEY" \
     -H 'Content-Type: application/json' \
     -d '{"from":"products","from_alias":"p","select":["p.id","p.price","band.id","band.price"],"joins":[{"table":"products","alias":"band","condition":{"and":[{"col":"p.price","op":"gte","value_col":"band.price"},{"col":"p.price","op":"lte","value_expr":{"left":{"col":"band.price"},"op":"*","right":{"literal":2}}}]}}],"order_by":[{"col":"p.id"},{"col":"band.id"}],"limit":50}' \
     "$BASE_URL/api/v1/demo/query")
@@ -120,10 +140,12 @@ DELETE_BODY="{\"op\":\"delete\",\"table\":\"orders\",\"where\":{\"col\":\"orders
 
 # Dry-run preview mutates nothing.
 curl --fail --silent -H 'Content-Type: application/json' -d "$INSERT_BODY" \
+    -H "Authorization: Bearer $ADMIN_KEY" \
     "$BASE_URL/api/v1/demo/write/preview" >/dev/null
 
 # Execute the insert.
 exec_response=$(curl --fail --silent -H 'Content-Type: application/json' -d "$INSERT_BODY" \
+    -H "Authorization: Bearer $ADMIN_KEY" \
     "$BASE_URL/api/v1/demo/write/execute")
 EXEC_RESPONSE="$exec_response" python3 -c '
 import json, os
@@ -134,14 +156,17 @@ assert p["executed"] is True, p
 
 # Verify the row landed.
 verify=$(curl --fail --silent -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer $ADMIN_KEY" \
     -d "{\"from\":\"orders\",\"select\":[\"orders.id\"],\"where\":{\"col\":\"orders.id\",\"op\":\"eq\",\"value\":${SMOKE_ID}}}" \
     "$BASE_URL/api/v1/demo/query")
 VERIFY="$verify" python3 -c 'import json,os; assert json.loads(os.environ["VERIFY"])["row_count"] == 1'
 
 # Clean up with a governed delete and verify it is gone (leaves the seed intact).
 curl --fail --silent -H 'Content-Type: application/json' -d "$DELETE_BODY" \
+    -H "Authorization: Bearer $ADMIN_KEY" \
     "$BASE_URL/api/v1/demo/write/execute" >/dev/null
 verify2=$(curl --fail --silent -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer $ADMIN_KEY" \
     -d "{\"from\":\"orders\",\"select\":[\"orders.id\"],\"where\":{\"col\":\"orders.id\",\"op\":\"eq\",\"value\":${SMOKE_ID}}}" \
     "$BASE_URL/api/v1/demo/query")
 VERIFY2="$verify2" python3 -c 'import json,os; assert json.loads(os.environ["VERIFY2"])["row_count"] == 0'
