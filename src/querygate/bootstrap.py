@@ -164,11 +164,23 @@ def first_boot(var_dir: Path, *, config_dir: Path | None = None) -> BootstrapRes
     candidate = secrets.token_urlsafe(_KEY_BYTES)
     if _write_once(key_path, candidate + "\n", mode=_SECRET_MODE):
         generated = candidate
-        logger.warning(
+        # False positive: semgrep's logger-credential-disclosure rule matches on
+        # the WORDS "admin API key" in the message template, not on a logged
+        # value. The only interpolated argument is `key_path` — a filesystem
+        # path. The key itself is written to that file with mode 0600 and is
+        # deliberately never logged, which is the whole point of the warning.
+        #
+        # `# fmt: off` pins the suppression to the match line: semgrep anchors a
+        # multi-line match to its FIRST line, so black reflowing this call would
+        # move the comment off `logger.warning(` and silently un-suppress it.
+        # Same reasoning as performance_benchmark.py's two suppressions.
+        # fmt: off
+        logger.warning(  # nosemgrep: python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure
             "QueryGate generated an admin API key on first boot and wrote it to %s. "
             "Copy it now and store it in your secret manager; it is not shown again.",
             key_path,
         )
+        # fmt: on
 
     return BootstrapResult(generated_admin_key=generated, seeded=tuple(seeded))
 

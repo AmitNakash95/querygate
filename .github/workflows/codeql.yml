@@ -17,6 +17,16 @@
 # 59k-line codebase will surface a backlog that needs triage before it can be a
 # gate. Promote it to blocking (`continue-on-error: false` is already the
 # default; add a required status check) once that backlog is at zero.
+# EXPECTED TO FAIL WHILE THIS REPOSITORY IS PRIVATE. Do not chase it.
+#
+# Measured on PR #45 (2026-09-05): both language jobs extract and analyse
+# successfully — the python job ran 5m52s of real extraction — and then fail at
+# the UPLOAD step with "Code scanning is not enabled for this repository".
+# `GET /repos/{owner}/{repo}/code-scanning/default-setup` returns HTTP 403.
+#
+# Code scanning is free on PUBLIC repositories and requires paid GitHub Advanced
+# Security on private ones. This workflow is correct as written and goes green on
+# publication; nothing here needs changing to make that happen.
 name: CodeQL
 
 on:

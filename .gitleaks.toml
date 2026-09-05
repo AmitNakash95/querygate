@@ -82,4 +82,16 @@ regexes = [
   # in api/auth.py trips the generic-api-key entropy heuristic on the identifier
   # `cfg.api_key_subject`. Reviewed 2026-07-22 — no secret, just field wiring.
   '''cfg\.api_key_subject''',
+  # Two more of the same shape, in the control plane. Reviewed 2026-09-05 while
+  # PR #45 made this job run for the first time since they landed; both are
+  # `generic-api-key` entropy matches on an identifier, not a value.
+  #
+  #   control_plane/billing.py: `payload, signature, self._secret, tolerance=...`
+  #     — an ATTRIBUTE passed to stripe.Webhook.construct_event. The secret is
+  #     read from settings at construction; nothing literal appears here.
+  #
+  #   control_plane/signing.py: `_key: Ed25519PrivateKey`
+  #     — a dataclass field TYPE ANNOTATION. It has no value at all.
+  '''self\._secret, tolerance=''',
+  '''_key: Ed25519PrivateKey''',
 ]
