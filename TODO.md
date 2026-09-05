@@ -251,6 +251,7 @@ order-of-magnitude, not commitments.
 | 226 | `build_provider` in `billing.py` still special-cases construction at the registry, unlike the email registry beside it | XS | 212 |
 | 227 | ✅ ClusterFuzzLite coverage is shallow because `pydantic-core` is native — the model fuzz target plateaued at 31 coverage features over 2.7M executions, so a clean run means "no crash on random bytes", not "the input space was explored" | S | — |
 | 228 | ✅ Microsoft's proprietary `msodbcsql18` ships inside the image, but Apache-2.0 has no third-party pass-through and a public image reaches people who agreed to nothing — **blocks the first public image release** | S | 196 |
+| 229 | The control plane emails customers that lapse causes HTTP 402 refusals — the open-source gateway has no gate, so the sentence describes something that cannot happen; its product-side counterpart and the three agreement tests are gone | M | 228 |
 | 221 | Move validator bodies out of the model classes into compilable sibling modules — 30 validators / 602 lines of enforcement logic (join form, window scope, CTE names, set ops, credential shape) currently ship readable because a module defining `BaseModel` cannot be Cython-compiled | M | 214 |
 | 220 | ✅ Deny-by-default at table and column granularity: a `Policy` allow-list with no allow-all fallback, so an empty `allowed_tables` denies instead of allowing. Opt-in (default off) so no existing deployment changes behaviour; the starter policy turns it on | M | — |
 
@@ -4619,3 +4620,35 @@ The default image no longer ships `msodbcsql18`; MSSQL moved to an opt-in
 `production-mssql` build target, so nothing proprietary is redistributed.
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 228).
 
+### 229. The control plane's lapse messaging is now factually wrong, and its product counterpart is gone
+
+**Effort: M. Private control-plane repo only — does NOT block the public
+release.** Found 2026-09-05 by CI on PR #45, which ran the control-plane suite
+for the first time since the entitlement gate was removed.
+
+**Why it matters:** `control_plane/notifications.py`'s `LAPSE_CONSEQUENCE` tells
+a customer, in a renewal email:
+
+> "At expiry, governed queries, writes and schema discovery are refused with
+> HTTP 402 (over MCP, the error code SUBSCRIPTION_EXPIRED). Audit retrieval and
+> configuration changes are not gated."
+
+**None of that happens any more.** The gateway ships Apache-2.0 with no
+entitlement gate, no 402, and no `SUBSCRIPTION_EXPIRED` code. Emailing a
+customer a consequence the software cannot produce is worse than saying nothing,
+and it is exactly the class of claim `claim-verify` exists to catch — this one
+just lives in a repo that skill does not scan.
+
+The breakage is wider than one string. This service was built as one half of a
+pair: `issuance.py` signs an entitlement, `notifications.py` describes what
+happens when it lapses, and three tests existed solely to keep the two codebases
+in agreement on two domain separators, the schema version and the disclosed
+field list. Those tests are removed (they imported a module that no longer
+exists); the *coupling* they guarded is what actually needs rethinking.
+
+**Definition of done:** decide what this service is now — `COMMERCIAL.md` says
+Notary (third-party anchoring) and fleet management, neither of which gates a
+query — then make the customer-facing text describe that, and re-establish a
+cross-check against whatever verifier ends up owning the signature format. Until
+then, **do not send a renewal email from this service**: `notice_job.py` will
+happily deliver the false sentence above.
