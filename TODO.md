@@ -251,6 +251,7 @@ order-of-magnitude, not commitments.
 | 226 | Moot after the Apache-2.0 decision (see item 210) | — | 212 |
 | 227 | ✅ ClusterFuzzLite coverage is shallow because `pydantic-core` is native — the model fuzz target plateaued at 31 coverage features over 2.7M executions, so a clean run means "no crash on random bytes", not "the input space was explored" | S | — |
 | 228 | ✅ Microsoft's proprietary `msodbcsql18` ships inside the image, but Apache-2.0 has no third-party pass-through and a public image reaches people who agreed to nothing — **blocks the first public image release** | S | 196 |
+| 229 | Internal control-plane tracking item (see item 212); not part of this distribution | — | 228 |
 | 221 | Move validator bodies out of the model classes into compilable sibling modules — 30 validators / 602 lines of enforcement logic (join form, window scope, CTE names, set ops, credential shape) currently ship readable because a module defining `BaseModel` cannot be Cython-compiled | M | 214 |
 | 220 | ✅ Deny-by-default at table and column granularity: a `Policy` allow-list with no allow-all fallback, so an empty `allowed_tables` denies instead of allowing. Opt-in (default off) so no existing deployment changes behaviour; the starter policy turns it on | M | — |
 
@@ -4043,3 +4044,6 @@ The default image no longer ships `msodbcsql18`; MSSQL moved to an opt-in
 `production-mssql` build target, so nothing proprietary is redistributed.
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 228).
 
+### 229. Control-plane messaging reconciliation after the subscription reversal — TRACKED PRIVATELY
+
+Internal control-plane tracking item (see item 212); not part of this distribution.
