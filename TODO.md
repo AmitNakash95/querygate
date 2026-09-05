@@ -4646,12 +4646,11 @@ in agreement on two domain separators, the schema version and the disclosed
 field list. Those tests are removed (they imported a module that no longer
 exists); the *coupling* they guarded is what actually needs rethinking.
 
-**Where the prior design lives:** `docs/CONTROL_PLANE_PLAN.md` (719 lines) was
-deleted in the Apache-2.0 transition because it describes the entitlement model
-this item is retiring. It is not lost — recover it with
-`git show 27ce5fe^:docs/CONTROL_PLANE_PLAN.md` from this repository, which stays
-private and is frozen as the historical record. Read it before redesigning, so
-the decisions it already settled are not re-litigated.
+**Where the prior design lives:** the 719-line control-plane design document was
+removed in the Apache-2.0 transition, because it describes the entitlement model
+this item retires. It is not lost: it remains in the private repository's history
+at commit `27ce5fe^`, which is frozen as the historical record. Read it before
+redesigning, so the decisions it already settled are not re-litigated.
 
 **Definition of done:** decide what this service is now — `COMMERCIAL.md` says
 Notary (third-party anchoring) and fleet management, neither of which gates a
