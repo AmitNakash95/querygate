@@ -256,7 +256,15 @@ def test_main_hands_the_staged_artifacts_to_the_checksum_manifest(tmp_path, monk
     # The staged copy must land in the patched dist/, not the repo's — an
     # early-bound default here previously wrote into the real one.
     assert (dist / "THIRD_PARTY_LICENSES.md").is_file()
-    assert not (generate_sbom.ROOT / "dist" / "SHA256SUMS").samefile(dist / "SHA256SUMS")
+    # Compare RESOLVED PATHS, not inodes. `Path.samefile()` stats both sides and
+    # raises FileNotFoundError when either is missing — and the repo's own
+    # dist/SHA256SUMS only exists on a machine that has previously run a build,
+    # since dist/ is gitignored. That made this test pass locally and fail in
+    # every clean CI checkout with a FileNotFoundError that looked nothing like
+    # the assertion it came from. Path comparison expresses the same intent
+    # ("a different file") and needs neither side to exist.
+    assert (dist / "SHA256SUMS").is_file()
+    assert (dist / "SHA256SUMS").resolve() != (generate_sbom.ROOT / "dist" / "SHA256SUMS").resolve()
     listed = {line.split("  ", 1)[1] for line in (dist / "SHA256SUMS").read_text().splitlines()}
     assert "THIRD_PARTY_LICENSES.md" in listed
     assert listed == {wheel.name, sdist.name, f"querygate-{version}.cdx.json", report.name}
