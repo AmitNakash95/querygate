@@ -835,7 +835,7 @@ Three runnable MCP integration examples (LangChain/LangGraph, LlamaIndex, OpenAI
 itself is an external vendor engagement and calendar-time cost, not
 solo-engineer effort.**
 
-**Why it matters:** an internal go-to-market analysis already lists
+**Why it matters:** this project's own honest accounting already lists
 "independent threat-model review, formal certification, or external
 penetration testing" under things not safe to claim yet. No amount of
 internal adversarial testing (item 28) substitutes for third-party
@@ -879,7 +879,7 @@ quota per-replica unless the Redis quota backend is configured (item 50 phase
 shared), the multi-replica zero-downtime config-reload contract, multi-zone/
 multi-region topology, and a backup/restore + RTO/RPO DR procedure. Chart HA
 invariants are asserted against `helm template` in
-`tests/unit/test_helm_ha_deployment.py`. the go-to-market analysis claims reconciled. The
+`tests/unit/test_helm_ha_deployment.py`. The
 live multi-region failover *drill* is the operator's step (checklist in HA_DR).
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 56).
@@ -921,7 +921,7 @@ scope. Until it ships, this item is not fully `✅ DONE` and stays inline here.
 and QA scenarios (item 36) into a repeatable, publishable comparison, not
 new attack development.
 
-**Why it matters:** the go-to-market analysis's adversarial
+**Why it matters:** the adversarial
 five-minute demo is currently a sales narrative performed live. Turning it
 into a repeatable, published benchmark (attack corpus, catch rate, latency
 overhead versus a raw-SQL agent baseline and Google's Toolbox where a fair
@@ -2115,7 +2115,7 @@ are draft-only by charter.
 
 ### 132. Reconcile stale shipped-status claims left behind by items 90–93 ✅ DONE
 
-Fixed the drift across the go-to-market analysis, `README.md`, and `TODO.md` itself
+Fixed the drift across internal sales/positioning materials, `README.md`, and `TODO.md` itself
 left behind by items 90–93 (and, surfaced along the way, items 45/50/56/58)
 describing shipped capability as open or partial; a post-build claim-reviewer
 audit caught three further stale spots in the same pass.
@@ -2341,7 +2341,7 @@ original calling principal, no SDK `RequestStateSecurity` wiring) and why.
 ### 152. Sales/landing pages don't reflect items 19 (MySQL) / 134 (WORM retention) shipping ✅ DONE
 
 Reconciled `sales/index.html`, `landing/security.html`, `landing/index.html`,
-`landing/sandbox.html`, `README.md`, and the go-to-market analysis's
+`landing/sandbox.html`, `README.md`, and internal sales materials'
 dialect and WORM-retention claims against what items 19/134 phase 1 actually
 shipped (MySQL support; S3 Object Lock WORM retention with the phase-2
 managed-search caveat kept explicit). **Full write-up:**
@@ -2742,7 +2742,7 @@ identical `reset_engines()`-doesn't-dispose gap (item 2).
 ### 176. Three claim-accuracy drifts found while fixing the item-134 stale WORM-search line ✅ DONE
 
 `sales/index.html`'s two sales-guardrail lists, `CUSTOMER_README.md`,
-an internal go-to-market analysis and TODO.md's own Quick-scan row for item 134
+internal sales materials and TODO.md's own Quick-scan row for item 134
 now describe the shipped `GET /api/v1/admin/observability/worm-search` endpoint
 instead of denying it exists — each scoped to what actually ships: a bounded
 API over the S3 WORM archive, with no UI of its own, no server-side table
@@ -3248,7 +3248,7 @@ than folded in because none is about item 134:
    uncommitted work.
 7. **`landing/security.html:502` omits the item-184 non-exhaustive-paging
    caveat** that `CUSTOMER_README.md`, `sales/index.html`,
-   an internal go-to-market analysis and README now carry. Omission, not a false
+   internal sales materials and README now carry. Omission, not a false
    statement — but the public security page is exactly who needs it.
 
 8. **`src/querygate/execution/disclosure_budget.py:25-34` and

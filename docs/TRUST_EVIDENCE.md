@@ -501,9 +501,9 @@ remainder.
 guardrails behave against a corpus of boundary attacks — and how a naive
 raw-SQL-forwarding gateway behaves against the same attacks.**
 
-This document turns the adversarial "five-minute demo" from
-the go-to-market plan (internal) — historically performed live by a
-salesperson — into a numbers-on-the-page artifact anyone can regenerate. It is
+This document turns the adversarial "five-minute demo" — historically
+performed live by a salesperson — into a numbers-on-the-page artifact anyone
+can regenerate. It is
 the evidence behind the claim that structurally forbidding raw SQL is a
 categorically different posture from filtering or trusting a model-generated
 SQL string.
