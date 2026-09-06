@@ -4,7 +4,7 @@ SHELL         := /bin/bash
 # ─── Help ─────────────────────────────────────────────────────────────────────
 .PHONY: help
 help:
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
+	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}' \
 		| sort
 
@@ -63,6 +63,10 @@ scope-catalog: ## Regenerate docs/SCOPE_CATALOG.md from core/scopes.py (drift-te
 .PHONY: worklist-check
 worklist-check: ## Verify TODO.md / ROADMAP.md / TODO_ARCHIVE.md reconcile (drift-tested by test_worklist_consistency.py)
 	python3 scripts/check_worklist.py
+
+.PHONY: suite-count-sync
+suite-count-sync: ## Rewrite every published adversarial-suite count to what `pytest -m security` collects (gate: test_security_suite_count_claims.py)
+	poetry run python scripts/sync_suite_count.py
 
 .PHONY: worklist-sync
 worklist-sync: ## Regenerate the derived Quick-scan ✅ column + bare ROADMAP checkboxes from the TODO.md headings
@@ -165,14 +169,14 @@ test-cov: ## Run tests with coverage report
 # ─── Code quality ─────────────────────────────────────────────────────────────
 .PHONY: format
 format: ## Format code with Black
-	poetry run black src/ tests/ examples/
+	poetry run black src/ tests/ examples/ scripts/
 
 .PHONY: fmt
 fmt: format ## Alias for format
 
 .PHONY: format-check
 format-check: ## Check formatting without making changes
-	poetry run black --check src/ tests/ examples/
+	poetry run black --check src/ tests/ examples/ scripts/
 
 .PHONY: lint
 lint: format-check ## Alias for format-check (extend with ruff/mypy when added)
@@ -269,6 +273,14 @@ mcp-extension-schema: ## Regenerate the io.github.agitmit/structured-query-ast M
 sbom: ## Generate a CycloneDX SBOM, dependency vulnerability report, and SHA256SUMS from dist/ (run `poetry build` first)
 	poetry run python scripts/generate_sbom.py
 
+.PHONY: license-report
+license-report: ## Regenerate docs/THIRD_PARTY_LICENSES.md — every poetry.lock package's licence, split by whether QueryGate redistributes it
+	poetry run python scripts/check_licenses.py --write
+
+.PHONY: license-check
+license-check: ## Gate: every locked dependency is permissively licensed or individually recorded (strong copyleft is never waivable), and the report is current (drift-tested by test_third_party_licenses.py)
+	poetry run python scripts/check_licenses.py --check
+
 .PHONY: verify-release
 verify-release: ## Verify dist/ artifact integrity against dist/SHA256SUMS (the check a consumer runs after download). Pass ARGS="--dist-dir path".
 	poetry run python scripts/verify_release.py $(ARGS)
@@ -286,6 +298,7 @@ release-check: ## Run deterministic source/package release gates and build artif
 	poetry run python -m querygate.catalog_cli adaptive-learning-test
 	poetry build
 	poetry run python scripts/check_release_artifacts.py
+	$(MAKE) license-check
 	$(MAKE) sbom
 
 .PHONY: release-smoke
@@ -320,3 +333,7 @@ clean: ## Remove .venv, __pycache__, .pytest_cache, coverage artifacts
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	find . -type d -name ".pytest_cache" -exec rm -rf {} + 2>/dev/null || true
 	rm -rf htmlcov .coverage
+
+# ─── Partner demo (demo/) ─────────────────────────────────────────────────────
+-include demo/db/Makefile.include
+-include demo/Makefile.include

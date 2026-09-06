@@ -14,7 +14,7 @@ Subcommands:
 - ``list`` — list the corpus cases without running them.
 
 The benchmark is offline and deterministic (no DB, no network, no LLM); see
-``docs/business/SECURITY_BENCHMARK.md`` for methodology and comparison scope.
+``docs/benchmarks/SECURITY_BENCHMARK.md`` for methodology and comparison scope.
 """
 
 from __future__ import annotations
@@ -75,7 +75,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     print(
         "* Structural model of a gateway that forwards a model-generated SQL string\n"
         "  with no AST contract — not a live competitor run. See\n"
-        "  docs/business/SECURITY_BENCHMARK.md for methodology and scope."
+        "  docs/benchmarks/SECURITY_BENCHMARK.md for methodology and scope."
     )
     if report.ok:
         print("\nRESULT: clean — every attack caught, no regressions.")

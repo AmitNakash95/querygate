@@ -11,6 +11,9 @@
 .coverage*
 archive
 build
+# The vendor control plane (item 212) never ships to a customer. The
+# Dockerfile's COPY allowlist already excludes it; this survives an edit to it.
+control-plane
 dist
 docs
 htmlcov
@@ -23,3 +26,4 @@ var
 *.sqlite
 *.sqlite3
 *.log
+demo

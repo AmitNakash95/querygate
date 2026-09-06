@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+
+import httpx
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -47,10 +49,60 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
     """Build and return the configured FastAPI application."""
     conf = cfg or default_config
 
+    # First boot runs HERE, not in the lifespan, and the key it generates is
+    # wired into `api_keys` before `build_principal_dependency` reads them.
+    #
+    # This was a critical defect in the shipped image (TODO.md item 230). Item
+    # 215 correctly closed the anonymous bypass for `is_hardened_image`, and
+    # first boot correctly generated an admin key and told the operator to copy
+    # it — but nothing ever added that key to `cfg.api_keys`. `read_admin_key`
+    # existed, said in its own docstring that it was "used to satisfy production
+    # auth", and had unit tests, yet had no production caller.
+    #
+    # The result: `docker run <registry>/querygate:latest` produced a deployment
+    # whose ApiKeyAuthenticator held an EMPTY key list, so every authenticated
+    # request 401'd forever while the startup log told the operator to copy a key
+    # that would never work. The one-command install was unusable.
+    #
+    # Ordering is the whole fix: the lifespan runs when the server starts
+    # serving, but `build_principal_dependency(conf)` runs during create_app, so
+    # a key generated in the lifespan is always too late.
+    _first_boot_result = None
+    if conf.is_hardened_image:
+        from querygate.bootstrap import first_boot, read_admin_key
+
+        _first_boot_result = first_boot(Path(conf.var_dir))
+        if not conf.api_keys:
+            _admin_key = read_admin_key(Path(conf.var_dir))
+            if _admin_key:
+                conf = conf.model_copy(update={"api_keys": [_admin_key]})
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         log = get_logger()
         log.info("querygate.startup", environment=conf.environment)
+
+        # First boot, before ANY store is constructed (item 215). Seeds
+        # connections/policy/catalog only when absent and generates an admin key
+        # exactly once. Every write is create-if-absent, so a restart, a rebuild,
+        # a replica and a crash-loop all reach the same state without
+        # regenerating — silently rotating a key on a rebuilt image would turn a
+        # routine upgrade into an unplanned re-activation.
+        if conf.is_hardened_image and _first_boot_result is not None:
+            result = _first_boot_result
+            if result.is_first_boot:
+                log.info("querygate.first_boot", seeded=list(result.seeded))
+                if result.generated_admin_key:
+                    # Printed once, to the operator's terminal. There is no
+                    # writable secret backend on a fresh install — `env:` is the
+                    # only registered resolver and is not writable from a
+                    # request — so this is the honest delivery mechanism, and
+                    # the log line says so rather than implying a vault.
+                    log.warning(
+                        "querygate.first_boot.admin_key_generated",
+                        path=str(Path(conf.var_dir) / "admin-api-key"),
+                    )
+
         mcp_task: Optional[asyncio.Task] = None
 
         # Started before configure_audit_sink() so the WORM sink's buffer
@@ -85,7 +137,27 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
                 retention_days=conf.audit_worm_retention_days,
                 interval_seconds=conf.audit_worm_flush_interval_seconds,
                 ledger_key=worm_ledger_key,
+                endpoint_url=conf.audit_worm_s3_endpoint_url,
             )
+            if conf.audit_worm_s3_endpoint_url:
+                # TODO.md item 201: an S3-compatible endpoint is only a WORM
+                # archive if that store actually implements Object Lock. We
+                # cannot verify it here without a write, and the failure is
+                # silent and total — objects that look archived but are
+                # ordinary deletable blobs — so say so once at startup.
+                log.warning(
+                    "audit.worm.custom_endpoint",
+                    detail=(
+                        "AUDIT_WORM_S3_ENDPOINT_URL is set — WORM retention is only "
+                        "real if this store implements S3 Object Lock. AWS S3 itself "
+                        "REJECTS a PutObject carrying Object Lock headers against a "
+                        "bucket without Object Lock (surfacing as a counted flush "
+                        "failure), but an S3-compatible store that ignores those "
+                        "headers would accept the write and produce ordinary, "
+                        "deletable objects. Verify COMPLIANCE-mode retention against "
+                        "this store before relying on the archive for compliance."
+                    ),
+                )
             await worm_flush_monitor.start()
         app.state.worm_flush_monitor = worm_flush_monitor
 
@@ -175,6 +247,33 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
             # replicas is INCOMPLETE, and narrowing a connection from an
             # incomplete list breaks the shapes the other replicas saw. Shared
             # and durable, so the window also survives a rolling deploy.
+            # ...and item 199's SSO state. Different failure mode again: a
+            # per-replica session store does not multiply a budget or split a
+            # window, it signs people OUT at random, because the replica that
+            # answers their next request never saw them log in. Sessions, in-
+            # flight logins, device grants and issued tokens all move together —
+            # a device token that only works on one replica is the same defect.
+            if conf.sso_enabled:
+                from querygate.identity.device import (
+                    set_device_grant_store,
+                    set_issued_token_store,
+                )
+                from querygate.identity.redis_sessions import (
+                    RedisDeviceGrantStore,
+                    RedisIssuedTokenStore,
+                    RedisLoginFlowStore,
+                    RedisSessionStore,
+                )
+                from querygate.identity.sessions import (
+                    set_login_flow_store,
+                    set_session_store,
+                )
+
+                set_session_store(RedisSessionStore(redis_client))
+                set_login_flow_store(RedisLoginFlowStore(redis_client))
+                set_device_grant_store(RedisDeviceGrantStore(redis_client))
+                set_issued_token_store(RedisIssuedTokenStore(redis_client))
+
             if conf.observed_shapes_enabled:
                 from querygate.admin.observed_shapes import (
                     init_redis_observed_shape_store,
@@ -240,16 +339,43 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
                 # reading from the previous deployment's Redis keys while
                 # reporting a `shared-durable` scope it never configured.
                 clear_redis_observed_shape_store()
+                if conf.sso_enabled:
+                    # Drop back to the in-process stores before the client
+                    # closes, so nothing can reach a dead connection during
+                    # shutdown and report "not signed in" as though the session
+                    # had expired.
+                    from querygate.identity.device import (
+                        set_device_grant_store,
+                        set_issued_token_store,
+                    )
+                    from querygate.identity.sessions import (
+                        set_login_flow_store,
+                        set_session_store,
+                    )
+
+                    set_session_store(None)
+                    set_login_flow_store(None)
+                    set_device_grant_store(None)
+                    set_issued_token_store(None)
                 await redis_client.aclose()
 
     application = FastAPI(
         title="QueryGate",
         summary="Agent-safe database access gateway",
         version=conf.app_version,
-        debug=conf.is_local,
+        debug=conf.is_local and not conf.is_hardened_image,
         lifespan=lifespan,
-        openapi_url=f"{conf.api_v1_prefix}/openapi.json" if conf.is_local else None,
-        docs_url=f"{conf.api_v1_prefix}/docs" if conf.is_local else None,
+        # Off in the shipped image regardless of environment (item 215): a
+        # public schema plus FastAPI's debug traceback page is a reconnaissance
+        # surface an operator did not ask for by choosing a log level.
+        openapi_url=(
+            f"{conf.api_v1_prefix}/openapi.json"
+            if conf.is_local and not conf.is_hardened_image
+            else None
+        ),
+        docs_url=(
+            f"{conf.api_v1_prefix}/docs" if conf.is_local and not conf.is_hardened_image else None
+        ),
         redoc_url=f"{conf.api_v1_prefix}/redoc" if conf.is_local else None,
     )
 
@@ -288,6 +414,62 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
     application.include_router(
         build_admin_ui_router(principal_dependency, conf, prefix=conf.api_v1_prefix)
     )
+    if conf.sso_enabled:
+        # Human sign-in (TODO.md item 199). Mounted only when SSO is enabled, so
+        # a deployment that has not turned it on exposes no login surface at all
+        # — not even an endpoint that 404s with a distinguishable body.
+        from querygate.api.admin_identity_routes import build_admin_identity_router
+        from querygate.api.sso_routes import build_sso_router
+        from querygate.identity.config_store import ensure_identity_store
+
+        # Load identity.yaml here, at construction, so a missing or malformed
+        # file (a bad scope name in a mapping rule, an issuer that isn't https,
+        # two OIDC providers sharing a subject namespace) refuses to start
+        # instead of starting cleanly and 500-ing on the first person who tries
+        # to sign in. Same posture as the connections/policy stores, whose
+        # validation an operator likewise wants at boot.
+        ensure_identity_store(conf)
+
+        application.include_router(
+            build_sso_router(principal_dependency, conf, prefix=conf.api_v1_prefix)
+        )
+        application.include_router(
+            build_admin_identity_router(principal_dependency, conf, prefix=conf.api_v1_prefix)
+        )
+
+        if conf.dev_idp_enabled:
+            # QueryGate's own throwaway OpenID Connect provider, so the real
+            # redirect flow runs offline (TODO.md item 199 phase 1b). Mounted
+            # only when explicitly enabled AND the environment is local; the
+            # router builder refuses on its own if either is untrue, and the
+            # config validator refuses to start at all.
+            from querygate.identity.config_store import get_identity_store
+            from querygate.identity.dev_idp import (
+                DevIdentityProvider,
+                DevPersona,
+                build_dev_idp_router,
+                derive_personas,
+            )
+
+            identity_store = get_identity_store()
+            dev_profile = identity_store.dev_provider()
+            if dev_profile is not None:
+                personas = [
+                    DevPersona(
+                        sub=user.sub,
+                        name=user.name or user.sub,
+                        email=user.email or f"{user.sub}@localhost",
+                        claims={**({"groups": user.groups} if user.groups else {}), **user.claims},
+                        describes=user.describes,
+                    )
+                    for user in dev_profile.users
+                ] or derive_personas(identity_store, dev_profile.id)
+                application.state.dev_idp = DevIdentityProvider(
+                    issuer=dev_profile.issuer, personas=personas
+                )
+                application.include_router(
+                    build_dev_idp_router(conf, dev_profile.id, dev_profile.issuer)
+                )
 
     admin_ui_dir = Path(__file__).resolve().parent.parent / "admin_ui"
     application.mount("/admin", StaticFiles(directory=admin_ui_dir, html=True), name="admin-ui")

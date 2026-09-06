@@ -98,12 +98,22 @@ def admission_headers(
 _ACTIONABLE = (
     NotFoundError,
     PolicyViolationError,
+    # A billing state, not a fault: without this the mask turns the 402 into a
+    # generic 500 and the caller learns nothing actionable.
     ConcurrencyLimitError,
     QueryValidationError,
     ConfigValidationError,
     AuthorizationError,
     ServiceDisabledError,
 )
+
+
+#: Hoisted out of the `except` clause below rather than written inline as
+#: `except (HTTPException, *_ACTIONABLE):`. A starred expression inside an
+#: `except` is valid Python but Cython rejects it outright ("starred expression
+#: is not allowed here"), and this module sits on the REST error path that
+#: TODO.md item 214 wants compiled. Same tuple, same behaviour, one binding.
+_PASS_THROUGH = (HTTPException, *_ACTIONABLE)
 
 
 @contextmanager
@@ -117,7 +127,7 @@ def mask_unexpected() -> Iterator[None]:
     """
     try:
         yield
-    except (HTTPException, *_ACTIONABLE):
+    except _PASS_THROUGH:
         raise
     except Exception:
         log.exception("rest.unexpected_error")

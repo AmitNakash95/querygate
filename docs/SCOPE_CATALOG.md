@@ -78,6 +78,13 @@ scope, only a valid identity.
 |---|---|
 | `query:cancel` | Cancel another principal's in-flight async query (self-cancellation needs no scope) |
 
+### Admin · Identity
+
+| Scope | Gates |
+|---|---|
+| `admin:identity:read` | List sign-in providers, local accounts, active sessions, and issued device tokens |
+| `admin:identity:write` | Manage local accounts and revoke a person's sessions and device tokens |
+
 ## Recommended role bundles
 
 Advisory groupings — QueryGate enforces individual scopes, not roles. Register each as a role in your IdP and grant it the listed scopes; provisioning a user is then a role assignment.
@@ -137,6 +144,13 @@ Backup/restore and retention of catalog content.
 
 - `catalog:export`
 - `catalog:delete`
+
+### Identity Administrator
+
+Manages who can sign in: local accounts, active sessions, and issued device tokens. Deliberately separate from the config roles — minting an account is a different privilege from changing what a connection exposes.
+
+- `admin:identity:read`
+- `admin:identity:write`
 
 ### Query Approver
 

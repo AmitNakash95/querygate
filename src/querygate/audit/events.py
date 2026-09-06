@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union, get_args
 
 import pydantic as pyd
 
@@ -61,6 +61,19 @@ ConfigChangeAction = Literal[
     # CredentialLeaseMonitor), distinct from "apply"/"rollback" which are
     # always a human/API-key principal's explicit action.
     "lease_refresh",
+]
+AuthenticationAction = Literal[
+    "sso.login",
+    "sso.logout",
+    "local.login",
+    "device.authorize",
+    "device.approve",
+    "device.deny",
+    "device.token_issued",
+    "session.revoke",
+    "local_user.create",
+    "local_user.update",
+    "local_user.delete",
 ]
 CatalogGovernanceAction = Literal[
     "generate",
@@ -241,13 +254,76 @@ class ConnectionProbeEvent(pyd.BaseModel):
     model_config = pyd.ConfigDict(extra="forbid")
 
 
+class AuthenticationEvent(pyd.BaseModel):
+    """Versioned event for the human-identity plane (querygate/identity/):
+    an SSO or local sign-in, a sign-out, a device-grant approval, and every
+    change to a local account.
+
+    Same redaction posture as its siblings, and one addition that matters here:
+    this event records **who and what, never the proof**. There is no field
+    capable of holding a password, a TOTP code or secret, an OIDC client
+    secret, an authorization code, an ID token, a session token, a device code,
+    or an issued access token — nor the claim set the IdP asserted. What is
+    retained is the subject, the provider, the auth method, the resolved scopes,
+    and a stable `error_category` for a failure. That is enough to answer "who
+    signed in, from where, holding what, and when" — which is the question an
+    auditor asks — without the trail becoming a credential store.
+    """
+
+    schema_version: str = "1"
+    event_id: str = pyd.Field(default_factory=lambda: str(uuid.uuid4()))
+    occurred_at: datetime = pyd.Field(default_factory=lambda: datetime.now(timezone.utc))
+    event_type: Literal["identity.authentication"] = "identity.authentication"
+    correlation_id: Optional[str] = None
+    surface: AuditSurface = "internal"
+    action: AuthenticationAction
+    # The identity provider the person signed in through, e.g. "entra" or the
+    # local provider's id. Never the issuer URL, which is deployment topology.
+    provider_id: Optional[str] = None
+    principal_id: Optional[str] = None
+    auth_method: str = "unknown"
+    principal_scopes: List[str] = pyd.Field(default_factory=list)
+    # True when a second factor was actually presented and verified.
+    mfa_used: Optional[bool] = None
+    # Self-declared name of the tool in a device grant ("querygate-cli"). Bounded
+    # and treated as a label, never trusted as identity.
+    client_name: Optional[str] = None
+    # For an admin action against another account: which account was affected.
+    target_principal_id: Optional[str] = None
+    outcome: Literal["success", "rejected"]
+    error_category: Optional[str] = None
+    duration_ms: int = pyd.Field(default=0, ge=0)
+
+    model_config = pyd.ConfigDict(extra="forbid")
+
+
 # Sinks (see audit/sinks.py) persist every kind of event through the same
 # configured backend — one durable audit trail for query attempts,
-# config-governance actions, catalog-governance actions, and connection
-# probes.
+# config-governance actions, catalog-governance actions, connection probes,
+# and authentication events.
 PersistableEvent = Union[
-    AuditEvent, ConfigChangeEvent, CatalogGovernanceEvent, ConnectionProbeEvent
+    AuditEvent,
+    ConfigChangeEvent,
+    CatalogGovernanceEvent,
+    ConnectionProbeEvent,
+    AuthenticationEvent,
 ]
+
+
+def persistable_event_types() -> Tuple[str, ...]:
+    """The `event_type` discriminator each `PersistableEvent` member declares.
+
+    Read off the canonical union rather than hand-listed, so every consumer that
+    needs "the set of event types that exist" (the WORM search filter, the admin
+    UI's audit filter) derives it from one place and a new member becomes
+    filterable everywhere with no edit. Previously `api/admin_ui_routes.py` kept
+    its own hand-written frozenset of these strings, which is exactly the drift
+    this removes.
+    """
+    return tuple(
+        get_args(member.model_fields["event_type"].annotation)[0]
+        for member in get_args(PersistableEvent)
+    )
 
 
 def _select_shape(item: object) -> Dict[str, Any]:

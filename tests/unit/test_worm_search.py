@@ -53,6 +53,7 @@ def _bounds(**overrides) -> WormSearchBounds:
         default_limit=50,
         max_limit=500,
         request_timeout_seconds=20.0,
+        max_query_shape_depth=64,
     )
     kwargs.update(overrides)
     return WormSearchBounds(**kwargs)
@@ -983,6 +984,26 @@ class TestSeedChainStateFromPredecessor:
     indirectly (via the graceful-degradation behavior, not an iteration
     count)."""
 
+    def test_a_deeply_nested_predecessor_line_is_not_raised(self):
+        """TODO.md item 194 defect (2) on the SEED WALK specifically. The
+        line loop's own handler does not cover this path: the seed walk has
+        its own `json.loads`, reached when a resumed page seeds its chain
+        state from a preceding line. A RecursionError here escaped
+        `search_worm_archive` exactly like the line loop's did."""
+        good = _chain_lines([_event("a", minute=0)])[0]
+        nested = "[" * 1000 + "]" * 1000
+        # See the line-loop test: a successful parse returns the identical
+        # tuple this asserts, so without pinning the premise this test goes
+        # vacuous the moment the recursion limit changes.
+        with pytest.raises(RecursionError):
+            json.loads(nested)
+
+        prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
+            [nested, good], 1, ledger_key=None
+        )
+
+        assert (prev_hash, prev_seq, exhausted) == (None, None, False)
+
     def test_finds_the_predecessor_within_the_bound(self):
         events = _chain_lines([_event("a", minute=0), _event("b", minute=1)])
         prev_hash, prev_seq, exhausted = worm_search_module._seed_chain_state_from_predecessor(
@@ -1664,6 +1685,677 @@ class TestPagination:
         assert result.next_cursor is not None
 
 
+class TestDayListingTruncationIsResumable:
+    """TODO.md item 184. When one calendar day holds more segments than
+    `max_objects_scanned`, `_list_day_keys` returns the first N with
+    `stopped_early=True`. The day-truncation cursor must then resume
+    EXCLUSIVELY after the last key actually consumed — a cursor pointing back
+    at the start of the same day makes every segment past key N permanently
+    unreachable and turns a good-faith pager into an infinite loop."""
+
+    @staticmethod
+    async def _drain(*, bounds_kwargs: dict, max_laps: int = 25):
+        """Follow next_cursor to exhaustion, asserting the chain terminates
+        and that no cursor is ever reissued (the infinite-loop symptom)."""
+        seen_cursors = set()
+        connections = []
+        laps = 0
+        cursor = None
+        while True:
+            laps += 1
+            assert (
+                laps <= max_laps
+            ), f"cursor chain did not terminate within {max_laps} laps — collected {connections}"
+            result = await search_worm_archive(
+                bucket=_BUCKET,
+                prefix=_PREFIX,
+                region="us-east-1",
+                flush_interval_seconds=60,
+                start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+                end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+                cursor=cursor,
+                bounds=_bounds(**bounds_kwargs),
+            )
+            connections.extend(e.connection_id for e in result.events)
+            if result.next_cursor is None:
+                assert result.truncated is False
+                return connections, laps
+            assert result.next_cursor not in seen_cursors, (
+                "next_cursor repeated — the pager would loop forever "
+                f"(lap {laps}, cursor {result.next_cursor!r})"
+            )
+            seen_cursors.add(result.next_cursor)
+            cursor = result.next_cursor
+
+    @pytest.mark.parametrize("default_limit", [50, 2, 1])
+    async def test_a_day_truncated_by_the_object_budget_pages_to_exhaustion(
+        self, s3, default_limit
+    ):
+        """Item 184's first acceptance criterion: 5 single-event segments in
+        one day with max_objects_scanned=2, followed to exhaustion, yield all
+        5 events exactly once with no cursor repeating.
+
+        Parametrized over `default_limit` because the original fix — and the
+        original version of this test — only ever exercised the ONE exit where
+        the day's key loop runs to completion and falls through to
+        `if listing_truncated:`. At `default_limit=1` the page fills on the
+        last LISTED key instead, taking `_next_position_cursor`, which knew
+        nothing about the truncated listing and advanced to the next day:
+        three of five records were silently unreachable and the final page
+        reported `truncated=False`. All four reviewers found this
+        independently; it reproduced as `['c0','c1']` before the follow-up
+        fix. A single un-parametrized value is why a green suite hid it."""
+        for minute in range(5):
+            _put_events(
+                s3,
+                f"{_PREFIX}2026/03/15/20260315T12000{minute}-000001.jsonl",
+                [_event(f"c{minute}", minute=minute)],
+            )
+
+        connections, _ = await self._drain(
+            bounds_kwargs={"max_objects_scanned": 2, "default_limit": default_limit}
+        )
+
+        assert sorted(connections) == ["c0", "c1", "c2", "c3", "c4"]
+
+    @pytest.mark.parametrize("default_limit", [3, 2])
+    async def test_multi_event_segments_behind_a_truncated_listing_page_exactly_once(
+        self, s3, default_limit
+    ):
+        """The architecture reviewer's Variant B: multi-event segments make a
+        page fill MID-object as well as at an object boundary, so the
+        mid-object line cursor and the page-filled cursor both have to carry
+        the day's `after` marker. Without it a resumed page re-lists the day
+        from its start, `keys.index(resume_key)` misses, no object is
+        consumed, and the scan oscillates between two cursors re-delivering
+        the events between them."""
+        for minute in range(5):
+            _put_events(
+                s3,
+                f"{_PREFIX}2026/03/15/20260315T12000{minute}-000001.jsonl",
+                [_event(f"c{minute}a", minute=minute), _event(f"c{minute}b", minute=minute)],
+            )
+
+        connections, _ = await self._drain(
+            bounds_kwargs={"max_objects_scanned": 2, "default_limit": default_limit}
+        )
+
+        assert sorted(connections) == sorted(
+            [f"c{m}{half}" for m in range(5) for half in ("a", "b")]
+        )
+
+    async def test_an_oversized_object_behind_a_truncated_listing_stays_on_its_day(
+        self, s3, monkeypatch
+    ):
+        """The oversized-object exit is a third way control leaves a day whose
+        listing was cut short. It must not advance to the next day either — an
+        object over `_MAX_OBJECT_BYTES` is skipped, but the segments the
+        listing never reached are still owed to the caller.
+
+        The oversized object is deliberately the LAST key the truncated
+        listing returns. An earlier version of this test placed it third,
+        where `max_objects_scanned=2` never listed it, so the assertion was
+        satisfied by the ordinary fall-through and the exit was untested."""
+        # Above a one-event chained segment (~700 B) and below the planted body,
+        # so only the intended object trips the cap.
+        monkeypatch.setattr(worm_search_module, "_MAX_OBJECT_BYTES", 4096)
+        _put_events(
+            s3,
+            f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
+            [_event("c0", minute=0)],
+        )
+        oversized_key = f"{_PREFIX}2026/03/15/20260315T120000-000002.jsonl"
+        _put_segment(s3, oversized_key, ["x" * 8192])
+        for minute in (1, 2):
+            _put_events(
+                s3,
+                f"{_PREFIX}2026/03/15/20260315T12000{minute}-000001.jsonl",
+                [_event(f"c{minute}", minute=minute)],
+            )
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(max_objects_scanned=2),
+        )
+
+        assert result.truncated is True
+        payload = json.loads(base64.urlsafe_b64decode(result.next_cursor))
+        assert payload["day"] == "2026-03-15", "the scan abandoned a day it had not finished"
+        assert payload["key"] is None
+        assert payload["after"] == oversized_key, "the day resumed before what it already read"
+
+    async def test_the_chain_break_counter_counts_one_break_once_across_a_cursor_chain(self, s3):
+        """Item 184's second acceptance criterion: one broken segment behind a
+        day-truncating object budget must move
+        querygate_audit_worm_search_chain_breaks_total by exactly 1 across the
+        WHOLE cursor chain. Re-listing the day from its start on every lap
+        re-counts the same break once per lap, so the counter's magnitude would
+        track how long the pager ran rather than how many segments broke."""
+        broken = _chain_lines(
+            [_event("b0", minute=0), _event("b1", minute=1), _event("b2", minute=2)]
+        )
+        del broken[1]
+        _put_segment(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", broken)
+        for minute in range(1, 5):
+            _put_events(
+                s3,
+                f"{_PREFIX}2026/03/15/20260315T12000{minute}-000001.jsonl",
+                [_event(f"c{minute}", minute=minute)],
+            )
+
+        before_breaks = _sample("querygate_audit_worm_search_chain_breaks_total", {})
+
+        await self._drain(bounds_kwargs={"max_objects_scanned": 2})
+
+        assert _sample("querygate_audit_worm_search_chain_breaks_total", {}) == before_breaks + 1
+
+    async def test_a_day_truncation_cursor_resumes_after_the_last_consumed_key(self, s3):
+        """The cursor's own payload, not just the paging outcome: a
+        day-truncated page must carry an exclusive `after` marker naming the
+        last key it consumed, and no `key`. Asserted directly so the encoding
+        contract cannot regress silently behind a still-passing pager."""
+        for minute in range(4):
+            _put_events(
+                s3,
+                f"{_PREFIX}2026/03/15/20260315T12000{minute}-000001.jsonl",
+                [_event(f"c{minute}", minute=minute)],
+            )
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(max_objects_scanned=2),
+        )
+
+        assert result.truncated is True
+        payload = json.loads(base64.urlsafe_b64decode(result.next_cursor))
+        assert payload["key"] is None
+        assert payload["after"] == f"{_PREFIX}2026/03/15/20260315T120001-000001.jsonl"
+
+    async def test_a_resumed_day_advances_its_marker_strictly_forward(self, s3):
+        """Consecutive laps over one over-budget day must move the marker
+        strictly forward. Going backwards re-delivers segments and re-counts
+        their integrity findings, which is symptom 3 of item 184's write-up.
+
+        Named for what it covers: the object-budget disjunct at the top of the
+        key loop is NOT reachable within the marker-carrying day, because
+        `_list_day_keys` is capped at `max_objects_scanned`, so the counter can
+        only reach the cap after the last listed key is consumed and the loop
+        has already ended. An earlier version of this test claimed that exit."""
+        for minute in range(5):
+            _put_events(
+                s3,
+                f"{_PREFIX}2026/03/15/20260315T12000{minute}-000001.jsonl",
+                [_event(f"c{minute}", minute=minute)],
+            )
+        first = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(max_objects_scanned=2),
+        )
+        marker = json.loads(base64.urlsafe_b64decode(first.next_cursor))["after"]
+
+        second = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            cursor=first.next_cursor,
+            bounds=_bounds(max_objects_scanned=2),
+        )
+
+        payload = json.loads(base64.urlsafe_b64decode(second.next_cursor))
+        assert payload["after"] is not None
+        assert payload["after"] > marker, "the resumed page went backwards"
+
+    async def test_an_over_long_after_marker_is_rejected_not_handed_to_s3(self, s3):
+        """`after` is the only cursor field that reaches the AWS wire, so it
+        is held to S3's own key ceiling rather than trusted (WS-194-1)."""
+        forged = base64.urlsafe_b64encode(
+            json.dumps(
+                {
+                    "day": "2026-03-15",
+                    "key": None,
+                    "line": 0,
+                    "after": "k" * 2000,
+                    "fp": worm_search_module._filters_fingerprint(
+                        datetime(2026, 3, 15, tzinfo=timezone.utc),
+                        datetime(2026, 3, 16, tzinfo=timezone.utc),
+                        None,
+                        None,
+                        None,
+                    ),
+                }
+            ).encode()
+        ).decode()
+
+        with pytest.raises(QueryValidationError) as excinfo:
+            await search_worm_archive(
+                bucket=_BUCKET,
+                prefix=_PREFIX,
+                region="us-east-1",
+                flush_interval_seconds=60,
+                start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+                end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+                cursor=forged,
+                bounds=_bounds(),
+            )
+
+        # Every decode failure collapses into one generic public message, so
+        # without checking the cause this would also pass if the cursor were
+        # rejected for an unrelated reason (a fingerprint or `day` change).
+        assert "S3 key length" in str(excinfo.value.__cause__)
+
+    async def test_a_surrogate_after_marker_is_a_422_not_a_masked_500(self, s3):
+        """A lone surrogate survives `json.loads` as a `str`, so an
+        `isinstance` check passes it — then botocore's percent-encoding
+        raises `UnicodeEncodeError`, which escapes as the masked 500 item 194
+        exists to eliminate AND lets any caller move the `error` counter."""
+        before_error = _sample("querygate_audit_worm_search_requests_total", {"outcome": "error"})
+        forged = base64.urlsafe_b64encode(
+            json.dumps(
+                {
+                    "day": "2026-03-15",
+                    "key": None,
+                    "line": 0,
+                    "after": "\ud800",
+                    "fp": worm_search_module._filters_fingerprint(
+                        datetime(2026, 3, 15, tzinfo=timezone.utc),
+                        datetime(2026, 3, 16, tzinfo=timezone.utc),
+                        None,
+                        None,
+                        None,
+                    ),
+                }
+            ).encode()
+        ).decode()
+
+        with pytest.raises(QueryValidationError) as excinfo:
+            await search_worm_archive(
+                bucket=_BUCKET,
+                prefix=_PREFIX,
+                region="us-east-1",
+                flush_interval_seconds=60,
+                start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+                end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+                cursor=forged,
+                bounds=_bounds(),
+            )
+
+        assert "not UTF-8 encodable" in str(excinfo.value.__cause__)
+        assert (
+            _sample("querygate_audit_worm_search_requests_total", {"outcome": "error"})
+            == before_error
+        ), "a forged cursor moved the S3-failure counter"
+
+    async def test_an_object_past_the_per_object_line_cap_pages_to_exhaustion(
+        self, s3, monkeypatch
+    ):
+        """WS-134-1. `last_line` used to be `min(len(lines), cap)` — an
+        ABSOLUTE ceiling rather than a per-page budget. A resumed page whose
+        `consume_from` already equalled the cap recomputed the same
+        `last_line`, consumed nothing, and re-emitted a byte-identical cursor
+        forever, making every line past the cap and every later object and day
+        permanently unreachable. Reachable with no forgery by raising
+        AUDIT_WORM_MAX_BUFFERED_EVENTS above the cap, and by anyone holding
+        s3:PutObject with a ~1 MB body of newlines.
+
+        The pre-existing test for this exit asserted only that the FIRST page
+        truncates; it never followed the cursor, which is why a
+        non-advancing cursor sat here undetected."""
+        monkeypatch.setattr(worm_search_module, "_MAX_LINES_PER_OBJECT", 2)
+        _put_events(
+            s3,
+            f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
+            [_event(f"c{i}", minute=i) for i in range(5)],
+        )
+
+        connections, _ = await self._drain(bounds_kwargs={})
+
+        assert sorted(connections) == ["c0", "c1", "c2", "c3", "c4"]
+
+    async def test_a_resumed_page_keeps_its_marker_when_the_deadline_stops_it_mid_object(
+        self, s3, monkeypatch
+    ):
+        """WS-184-2 / TCR-13. The line-loop deadline exit was the one in-day
+        cursor still emitted without the day's `after` marker, so a resumed
+        page re-listed the day from its start, could not find its own key, and
+        walked BACKWARD to the start of the previous window — re-delivering
+        records and, with a consistently exhausted budget, cycling between two
+        cursors forever. Both other reviewers found it independently."""
+        for minute in range(5):
+            _put_events(
+                s3,
+                f"{_PREFIX}2026/03/15/20260315T12000{minute}-000001.jsonl",
+                [_event(f"c{minute}", minute=minute)],
+            )
+        window = dict(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+        )
+        first = await search_worm_archive(**window, bounds=_bounds(max_objects_scanned=2))
+        marker = json.loads(base64.urlsafe_b64decode(first.next_cursor))["after"]
+        assert marker is not None
+
+        # Expire the clock the moment the resumed page opens its first object,
+        # so the deadline fires inside the LINE loop rather than between
+        # objects. Keyed to an application event, not a call count.
+        real_get = worm_search_module._get_object_text
+        clock = {"now": time.monotonic()}
+
+        async def expiring_get(*args, **kwargs):
+            result = await real_get(*args, **kwargs)
+            clock["now"] += 10_000
+            return result
+
+        monkeypatch.setattr(worm_search_module, "_get_object_text", expiring_get)
+        monkeypatch.setattr(worm_search_module.time, "monotonic", lambda: clock["now"])
+
+        second = await search_worm_archive(
+            **window, cursor=first.next_cursor, bounds=_bounds(max_objects_scanned=2)
+        )
+
+        assert second.truncated is True
+        payload = json.loads(base64.urlsafe_b64decode(second.next_cursor))
+        assert payload["after"] == marker, "the resumed page lost its listing window"
+
+    async def test_a_pre_item_184_cursor_without_an_after_marker_still_decodes(self, s3):
+        """Backward compatibility: a cursor issued before item 184 has no
+        `after` field at all. It must still decode and resume at its day's
+        start rather than being rejected as malformed."""
+        _put_events(
+            s3,
+            f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl",
+            [_event("a", minute=0)],
+        )
+        legacy = base64.urlsafe_b64encode(
+            json.dumps(
+                {
+                    "day": "2026-03-15",
+                    "key": None,
+                    "line": 0,
+                    "fp": worm_search_module._filters_fingerprint(
+                        datetime(2026, 3, 15, tzinfo=timezone.utc),
+                        datetime(2026, 3, 16, tzinfo=timezone.utc),
+                        None,
+                        None,
+                        None,
+                    ),
+                }
+            ).encode()
+        ).decode()
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            cursor=legacy,
+            bounds=_bounds(),
+        )
+
+        assert [e.connection_id for e in result.events] == ["a"]
+
+    async def test_a_non_string_after_marker_is_rejected_not_handed_to_s3(self, s3):
+        """`after` is attacker-reachable in a hand-crafted cursor and flows
+        straight into a `StartAfter` listing argument. A non-string must be
+        rejected as an invalid cursor (4xx) rather than reaching boto3 and
+        surfacing as a masked 500."""
+        forged = base64.urlsafe_b64encode(
+            json.dumps(
+                {
+                    "day": "2026-03-15",
+                    "key": None,
+                    "line": 0,
+                    "after": {"not": "a string"},
+                    "fp": worm_search_module._filters_fingerprint(
+                        datetime(2026, 3, 15, tzinfo=timezone.utc),
+                        datetime(2026, 3, 16, tzinfo=timezone.utc),
+                        None,
+                        None,
+                        None,
+                    ),
+                }
+            ).encode()
+        ).decode()
+
+        with pytest.raises(QueryValidationError):
+            await search_worm_archive(
+                bucket=_BUCKET,
+                prefix=_PREFIX,
+                region="us-east-1",
+                flush_interval_seconds=60,
+                start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+                end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+                cursor=forged,
+                bounds=_bounds(),
+            )
+
+
+class TestCorruptLinesAreCountedNotRaised:
+    """TODO.md item 194 defects (1) and (2). Each of these lines is supposed
+    to be COUNTED (`malformed`/`unverified`) and skipped. Before the fix each
+    instead raised out of `search_worm_archive`, hit the route's
+    `mask_unexpected()` and became a generic HTTP 500 — costing availability
+    plus every genuine record the page had already accumulated. Because a
+    WORM object is immutable, one bad object poisoned every future search
+    whose window covered that day, permanently."""
+
+    async def test_a_non_ascii_hash_is_counted_unverified_not_raised(self, s3):
+        """Defect (1), the one that needs no attacker: `_get_object_text`
+        decodes with errors="replace", so a single corrupted byte inside a
+        genuine segment's `hash` becomes U+FFFD, and `hmac.compare_digest`
+        raises TypeError on a non-ASCII str."""
+        line = json.loads(_chain_lines([_event("a", minute=0)])[0])
+        line["hash"] = line["hash"][:-1] + "\ufffd"
+        _put_segment(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", [json.dumps(line)])
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+        )
+
+        assert result.unverified == 1
+        assert result.events == []
+
+    async def test_a_deeply_nested_line_is_counted_malformed_not_raised(self, s3):
+        """Defect (2): `json.loads` raises RecursionError (a RuntimeError, so
+        NOT caught by `except json.JSONDecodeError`) on a deeply-nested line.
+        1,000 nested arrays is a ~2 KB line — four orders of magnitude under
+        _MAX_OBJECT_BYTES, so the byte bounds are no defence at all."""
+        nested = "[" * 1000 + "]" * 1000
+        # Pin the premise: if the recursion limit ever rises, `json.loads`
+        # SUCCEEDS, returns a list, and the line is still counted `malformed`
+        # (not envelope-shaped) — so every assertion below would pass while
+        # covering nothing. Fail loudly on a changed premise instead.
+        with pytest.raises(RecursionError):
+            json.loads(nested)
+        _put_segment(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", [nested])
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+        )
+
+        assert result.malformed == 1
+        assert result.events == []
+
+    async def test_a_deeply_nested_line_does_not_discard_the_rest_of_the_page(self, s3):
+        """The availability half of the defect: a genuine record sharing the
+        segment with a poisoned line must still be returned. A raised
+        RecursionError discarded the whole page, so this fails differently
+        from the counting test above and is worth its own case."""
+        nested = "[" * 1000 + "]" * 1000
+        with pytest.raises(RecursionError):
+            json.loads(nested)
+        good = _chain_lines([_event("survivor", minute=0)])
+        _put_segment(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", [nested] + good)
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+        )
+
+        assert result.malformed == 1
+        assert [e.connection_id for e in result.events] == ["survivor"]
+
+
+class TestQueryShapeDepthCap:
+    """TODO.md item 194 defect 3. `query_shape` is a plain `Dict[str, Any]` —
+    the one field the event schemas' `extra="forbid"` cannot constrain — so an
+    unbounded screener walk over it raised `RecursionError` out of the line
+    loop, discarding a page's already-accumulated genuine records as a masked
+    500. The cap FAILS CLOSED, because the screener is a security control
+    whose `True` means *reject*."""
+
+    @staticmethod
+    def _nested(depth: int, *, as_list: bool):
+        """A `query_shape` nested `depth` levels. The LIST form is the
+        expensive one — a generator frame plus a call frame per level, roughly
+        3x the dict cost — so it is what a cap must be sized against."""
+        node: object = "leaf"
+        for _ in range(depth):
+            node = [node] if as_list else {"k": node}
+        return {"from": "customers", "deep": node}
+
+    @pytest.mark.parametrize("as_list", [True, False])
+    async def test_a_query_shape_past_the_cap_is_malformed_not_returned(self, s3, as_list):
+        """Fails closed: over the cap is `malformed`, the same outcome a
+        denylisted key gets — never "screened clean and returned"."""
+        event = _event("a", minute=0)
+        event.query_shape = self._nested(200, as_list=as_list)
+        _put_events(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", [event])
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(max_query_shape_depth=64),
+        )
+
+        assert result.malformed == 1
+        assert result.events == []
+
+    async def test_a_legitimately_shaped_query_shape_is_still_returned(self, s3):
+        """The cap must not reject ordinary content. `Policy.max_where_depth`
+        defaults to 5, so a realistic `query_shape` sits an order of magnitude
+        under the default cap of 64."""
+        event = _event("a", minute=0)
+        event.query_shape = self._nested(8, as_list=True)
+        _put_events(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", [event])
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(),
+        )
+
+        assert result.malformed == 0
+        assert [e.connection_id for e in result.events] == ["a"]
+
+    async def test_a_forbidden_key_below_the_cap_is_still_caught(self, s3):
+        """The cap must not become a way to smuggle content past the screener:
+        a denylisted key nested just under the limit is still rejected. A cap
+        implemented as `return False` on over-depth would turn a resource
+        bound into a screening bypass; this pins the other direction."""
+        event = _event("a", minute=0)
+        node: object = {"connection_string": "postgresql://u:p@h/db"}
+        for _ in range(20):
+            node = [node]
+        event.query_shape = {"from": "customers", "deep": node}
+        _put_events(s3, f"{_PREFIX}2026/03/15/20260315T120000-000001.jsonl", [event])
+
+        result = await search_worm_archive(
+            bucket=_BUCKET,
+            prefix=_PREFIX,
+            region="us-east-1",
+            flush_interval_seconds=60,
+            start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+            end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            bounds=_bounds(max_query_shape_depth=64),
+        )
+
+        assert result.malformed == 1
+        assert result.events == []
+
+    @pytest.mark.parametrize("as_list", [True, False])
+    def test_a_query_shape_at_the_configured_ceiling_does_not_raise(self, as_list):
+        """The ceiling on the config field must be a value the walk actually
+        survives, not merely a plausible-looking number. Exercised at exactly
+        `_MAX_QUERY_SHAPE_DEPTH_CEILING` in the LIST form, which is the
+        expensive branch the cap is sized against."""
+        ceiling = worm_search_module._MAX_QUERY_SHAPE_DEPTH_CEILING
+        shape = self._nested(ceiling + 50, as_list=as_list)
+
+        assert worm_search_module._contains_forbidden_content(shape, max_depth=ceiling) is True
+
+    def test_the_config_ceiling_is_enforced_on_the_bounds_model(self):
+        """A bounds object built in-process must not be able to exceed what an
+        operator is allowed to configure — otherwise the ceiling is advisory."""
+        with pytest.raises(pyd.ValidationError):
+            _bounds(max_query_shape_depth=worm_search_module._MAX_QUERY_SHAPE_DEPTH_CEILING + 1)
+
+    def test_the_config_default_is_the_agreed_value(self):
+        """Pins the owner's decision (2026-08-24): default 64, configurable."""
+        cfg = AppConfig(environment="localhost", mcp_enabled=False)
+
+        assert cfg.audit_worm_search_max_query_shape_depth == 64
+        assert worm_search_module._bounds_from_config(cfg).max_query_shape_depth == 64
+
+    def test_a_configured_depth_reaches_the_screener(self):
+        """The config value must actually arrive — not be read and discarded."""
+        cfg = AppConfig(
+            environment="localhost",
+            mcp_enabled=False,
+            audit_worm_search_max_query_shape_depth=7,
+        )
+
+        assert worm_search_module._bounds_from_config(cfg).max_query_shape_depth == 7
+
+
 class TestBoundsRejection:
     def test_a_default_limit_above_the_max_limit_is_a_configuration_error(self):
         """A misconfigured default above the documented ceiling would
@@ -1678,6 +2370,7 @@ class TestBoundsRejection:
                 default_limit=1000,
                 max_limit=10,
                 request_timeout_seconds=1,
+                max_query_shape_depth=64,
             )
 
     async def test_missing_start_time_is_rejected(self, s3):
@@ -2280,6 +2973,47 @@ class TestBuildWormSearchResult:
         )
         kwargs.update(overrides)
         return AppConfig(**kwargs)
+
+    async def test_the_configured_s3_endpoint_reaches_the_search_client(self, s3):
+        """TODO.md item 201. The flush monitor and the managed search must
+        read the SAME `audit_worm_s3_endpoint_url`, or an archive would be
+        written to one store and searched at another — silently returning
+        empty results against a perfectly intact archive."""
+        captured = {}
+        real_client = boto3.client
+
+        def spy(service, **kwargs):
+            captured.update(kwargs)
+            return real_client(service, **kwargs)
+
+        cfg = self._config(audit_worm_s3_endpoint_url="https://s3.amazonaws.com")
+        with patch("boto3.client", spy):
+            await build_worm_search_result(
+                cfg,
+                start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+                end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            )
+
+        assert captured["endpoint_url"] == "https://s3.amazonaws.com"
+
+    async def test_no_configured_endpoint_leaves_the_search_client_on_aws(self, s3):
+        """The empty default must reach boto3 as None, not "" — boto3 treats
+        an empty string as a real (invalid) endpoint."""
+        captured = {}
+        real_client = boto3.client
+
+        def spy(service, **kwargs):
+            captured.update(kwargs)
+            return real_client(service, **kwargs)
+
+        with patch("boto3.client", spy):
+            await build_worm_search_result(
+                self._config(),
+                start_time=datetime(2026, 3, 15, tzinfo=timezone.utc),
+                end_time=datetime(2026, 3, 16, tzinfo=timezone.utc),
+            )
+
+        assert captured["endpoint_url"] is None
 
     async def test_disabled_backend_reports_honestly_without_touching_s3(self):
         cfg = self._config(audit_sink_backend="none")

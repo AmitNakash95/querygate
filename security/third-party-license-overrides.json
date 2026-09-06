@@ -1,0 +1,47 @@
+[
+  {
+    "package": "async-timeout",
+    "version": "5.0.1",
+    "license": "Apache Software License",
+    "unreadable_reason": "marker-excluded",
+    "reason": "Locked only under the marker `python_full_version < \"3.11.3\"`, so it is not installed on this project's interpreter and its metadata cannot be read locally.",
+    "evidence": "PyPI metadata for async-timeout 5.0.1 declares `License :: OSI Approved :: Apache Software License` (`https://pypi.org/pypi/async-timeout/5.0.1/json`, read 2026-08-21).",
+    "added": "2026-08-21"
+  },
+  {
+    "package": "colorama",
+    "version": "0.4.6",
+    "license": "BSD License",
+    "unreadable_reason": "marker-excluded",
+    "reason": "Locked only under `platform_system == \"Windows\" or sys_platform == \"win32\"`, so it is not installed on Linux or macOS.",
+    "evidence": "PyPI metadata for colorama 0.4.6 declares `License :: OSI Approved :: BSD License` (`https://pypi.org/pypi/colorama/0.4.6/json`, read 2026-08-21). The classifier is the generic BSD one, so this record does not claim a specific 2- or 3-clause variant.",
+    "added": "2026-08-21"
+  },
+  {
+    "package": "google-crc32c",
+    "version": "1.8.0",
+    "license": "Apache-2.0",
+    "unreadable_reason": "no-licence-metadata",
+    "reason": "Installed, but its wheel metadata declares no `License-Expression`, no `License ::` classifier, and no `License` field — only a `License-File` pointer.",
+    "evidence": "The bundled `google_crc32c-1.8.0.dist-info/licenses/LICENSE` is the verbatim Apache License, Version 2.0 text (read from the installed distribution, 2026-08-21).",
+    "added": "2026-08-21"
+  },
+  {
+    "package": "pywin32",
+    "version": "312",
+    "license": "Python Software Foundation License",
+    "unreadable_reason": "marker-excluded",
+    "reason": "Locked only under `sys_platform == \"win32\"`, so it is not installed on Linux or macOS.",
+    "evidence": "PyPI metadata for pywin32 312 declares `License :: OSI Approved :: Python Software Foundation License` and `License: PSF` (`https://pypi.org/pypi/pywin32/312/json`, read 2026-08-21).",
+    "added": "2026-08-21"
+  },
+  {
+    "package": "win32-setctime",
+    "version": "1.2.0",
+    "license": "MIT License",
+    "unreadable_reason": "marker-excluded",
+    "reason": "Locked only under `sys_platform == \"win32\"`, so it is not installed on Linux or macOS.",
+    "evidence": "PyPI metadata for win32-setctime 1.2.0 declares `License :: OSI Approved :: MIT License` and `License: MIT license` (`https://pypi.org/pypi/win32-setctime/1.2.0/json`, read 2026-08-21).",
+    "added": "2026-08-21"
+  }
+]

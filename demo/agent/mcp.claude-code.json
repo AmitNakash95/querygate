@@ -1,0 +1,16 @@
+{
+  "_comment": "Live-agent backup path for the partner demo. Run Claude Code from demo/agent/ so it picks this up: `cd demo/agent && claude`. Both servers must already be running (make pitch-up).",
+  "mcpServers": {
+    "unsafe-postgres": {
+      "type": "http",
+      "url": "http://127.0.0.1:8811/mcp"
+    },
+    "querygate": {
+      "type": "http",
+      "url": "http://127.0.0.1:8010/mcp",
+      "headers": {
+        "Authorization": "Bearer pitch-demo-key"
+      }
+    }
+  }
+}

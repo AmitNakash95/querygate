@@ -21,7 +21,7 @@ server, showed the same *shape* (throughput rises, peaks, then falls off)
 but a dramatically different *magnitude* — the in-process version showed
 REST throughput collapsing to roughly a tenth of the raw-SQL baseline at the
 highest concurrency tested; the real-socket version showed a much gentler
-dip from its own peak (see `docs/business/LOAD_BENCHMARK.md` for the fuller
+dip from its own peak (see `docs/benchmarks/LOAD_BENCHMARK.md` for the fuller
 writeup — deliberately not restated here with specific numbers, since a
 number from one machine at one moment isn't a reproducible claim). Same
 underlying single-process ceiling, but the in-process harness's

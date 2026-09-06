@@ -64,7 +64,7 @@ itself, or a claim whose test proves something narrower than the prose.
    - Security boundary/control: `docs/THREAT_MODEL.md`,
      `docs/SECURITY_POSTURE.md`, and the relevant section of
      `docs/PRODUCT_GUIDE.md`.
-   - Product identity or a non-goal: `docs/business/NORTH_STAR.md`.
+   - Product identity or a non-goal: `CLAUDE.md`’s "North Star" section.
    - AST/compiler work in items 99–106:
      `docs/ENGINE_EXPRESSIVENESS_PLAN.md`.
    - Release, packaging, deployment, or CI: `docs/RELEASING.md`.

@@ -18,7 +18,7 @@ import yaml
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from querygate.api._errors import require_scope
-from querygate.audit.events import PersistableEvent
+from querygate.audit.events import PersistableEvent, persistable_event_types
 from querygate.audit.file_reader import AuditFileReadBounded, iter_lines_reverse
 from querygate.audit.ledger import resolve_ledger_key, unwrap_envelope, verify_envelope_hash
 from querygate.connections.registry import get_registry
@@ -31,9 +31,11 @@ from querygate.policy.models import GUARDRAIL_FIELDS
 from querygate.templates.models import QueryTemplateFile
 
 _AUDIT_EVENT_ADAPTER = pyd.TypeAdapter(PersistableEvent)
-_AUDIT_EVENT_TYPES = frozenset(
-    {"query.execution", "config.governance", "catalog.governance", "connection.probe"}
-)
+# Derived from the canonical `PersistableEvent` union, not hand-listed: a new
+# event type (item 199's `identity.authentication` was the first to test this)
+# becomes filterable here the moment it joins the union, instead of silently
+# 422-ing because this set was not updated alongside it.
+_AUDIT_EVENT_TYPES = frozenset(persistable_event_types())
 
 
 class PolicyDocumentRequest(pyd.BaseModel):

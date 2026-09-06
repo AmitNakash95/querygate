@@ -39,6 +39,29 @@ paths = [
   '''tests/integration/setup_mssql_test_db\.py$''',
   # This config file itself references the very strings it allowlists.
   '''\.gitleaks\.toml$''',
+  # The partner-demo stack (see demo/README.md). Reviewed 2026-08-23 before
+  # allowlisting, per this file's deny-by-default rule; findings:
+  #   * gitleaks --no-git over the whole tree returned exactly ONE hit in
+  #     demo/ -- an `Authorization: Bearer pitch-demo-key` line in
+  #     demo/config/VERIFIED.md, which documents a real curl invocation.
+  #   * Every credential literal under demo/ is a throwaway that appears
+  #     NOWHERE else in the repo: the three *_demo_pw_only Postgres roles
+  #     (demo/db/02_roles.sql) and the pitch-demo-key / pitch-demo-admin-key
+  #     MCP/admin keys (demo/config/env.demo). They authorise nothing beyond
+  #     a 127.0.0.1-bound container holding a synthetic database that
+  #     `make pitch-db-reset` recreates from scratch.
+  #   * No private key, cloud key, GitHub/Slack token, or JWT anywhere in
+  #     demo/. No non-loopback host outside RFC 2606 example.com.
+  #   * All PII is synthetic BY CONSTRUCTION and verified against the seeded
+  #     data, not just the generator: 0 of 250,012 rows fall outside the
+  #     SSA-reserved 900-999 SSN range, RFC 2606 @example.invalid, or the
+  #     NANP fictional 555-01xx block.
+  #   * `sup3rSecretProdPw` in demo/baseline_mcp/test_guard.py is an invented
+  #     fixture asserting the DSN guard does NOT echo a password into an
+  #     error message -- it is the test, not a secret.
+  # demo/config/var/ and demo/.run/ are gitignored runtime state, not covered
+  # here and not intended to be committed.
+  '''demo/.*''',
 ]
 
 # Specific dev-only fixture values that may appear outside the paths above
@@ -59,4 +82,16 @@ regexes = [
   # in api/auth.py trips the generic-api-key entropy heuristic on the identifier
   # `cfg.api_key_subject`. Reviewed 2026-07-22 — no secret, just field wiring.
   '''cfg\.api_key_subject''',
+  # Two more of the same shape, in the control plane. Reviewed 2026-09-05 while
+  # PR #45 made this job run for the first time since they landed; both are
+  # `generic-api-key` entropy matches on an identifier, not a value.
+  #
+  #   control_plane/billing.py: `payload, signature, self._secret, tolerance=...`
+  #     — an ATTRIBUTE passed to stripe.Webhook.construct_event. The secret is
+  #     read from settings at construction; nothing literal appears here.
+  #
+  #   control_plane/signing.py: `_key: Ed25519PrivateKey`
+  #     — a dataclass field TYPE ANNOTATION. It has no value at all.
+  '''self\._secret, tolerance=''',
+  '''_key: Ed25519PrivateKey''',
 ]

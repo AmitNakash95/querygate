@@ -11,7 +11,6 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, Union
 
-import pydantic as pyd
 import sqlalchemy as sa
 from sqlalchemy.exc import DataError, ProgrammingError
 
@@ -22,14 +21,11 @@ from querygate.catalog.models import (
     CatalogDraftObjectType,
     CatalogDraftTarget,
     CatalogUsageSignalKind,
-    SensitivityClass,
     agent_visible,
     visible_relationships,
 )
 from querygate.catalog.retrieval import (
-    CatalogCitation,
     CatalogSearchResponse,
-    CompactCatalogCitation,
     policy_hidden_identifier_tokens,
     policy_safe_catalog_aliases,
     policy_safe_catalog_text,
@@ -133,125 +129,26 @@ def _join_relationship_pair(join: JoinSpec) -> Optional[Tuple[str, str]]:
     return None
 
 
-class TableCatalogInfo(pyd.BaseModel):
-    """Curated table-level metadata from an optional catalog overlay (see
-    `querygate/catalog/`) — display-only, never used for policy enforcement.
-    `relationships` is pre-filtered to targets the caller's resolved policy
-    allows (see `catalog.models.visible_relationships`).
-    """
-
-    description: Optional[str] = None
-    aliases: List[str] = pyd.Field(default_factory=list)
-    sensitivity: SensitivityClass = SensitivityClass.NONE
-    default_aggregation: Optional[str] = None
-    allow_samples: bool = False
-    relationships: List["RelationshipCatalogInfo"] = pyd.Field(default_factory=list)
-    provenance: Union[CatalogCitation, CompactCatalogCitation]
-
-
-class RelationshipCatalogInfo(pyd.BaseModel):
-    to_table: str
-    column: str
-    to_column: str
-    description: Optional[str] = None
-    provenance: Union[CatalogCitation, CompactCatalogCitation]
-
-
-class ColumnCatalogInfo(pyd.BaseModel):
-    description: Optional[str] = None
-    aliases: List[str] = pyd.Field(default_factory=list)
-    sensitivity: SensitivityClass = SensitivityClass.NONE
-    allow_samples: bool = False
-    provenance: Union[CatalogCitation, CompactCatalogCitation]
-
-
-class ColumnInfo(pyd.BaseModel):
-    name: str
-    type: str
-    nullable: bool
-    description: Optional[str] = None
-    catalog: Optional[ColumnCatalogInfo] = None
-
-
-class TableDescription(pyd.BaseModel):
-    name: str
-    columns: List[ColumnInfo]
-    description: Optional[str] = None
-    catalog: Optional[TableCatalogInfo] = None
-
-
-class StructuredQueryResult(pyd.BaseModel):
-    rows: List[dict]
-    row_count: int
-    truncated: bool
-    limit: int
-    offset: int
-    # Agent-visible admission info (TODO.md item 35 phase 1). Optional so
-    # existing direct-construction call sites (tests, `execute_many`'s error
-    # path) don't need to supply them.
-    admission_id: Optional[str] = None
-    queue_wait_ms: Optional[int] = None
-
-
-class ExplainResult(pyd.BaseModel):
-    sql: str
-    params: Optional[str] = None
-    tables: List[str]
-    limit: int
-
-
-class VerdictPlan(pyd.BaseModel):
-    """Only present when `Policy.verdict_include_plan` opts in; omitted by
-    default since the compiled SQL and touched-table list are themselves a
-    discovery channel for a caller who couldn't otherwise see this schema."""
-
-    sql: str
-    tables: List[str]
-
-
-class VerdictResult(pyd.BaseModel):
-    """TODO.md item 133: would `query` be allowed for this principal, without
-    executing it. `reason`/`message` are deliberately coarse — see
-    `StructuredQueryService.verdict`'s docstring for why a denial never
-    distinguishes policy from schema."""
-
-    allowed: bool
-    reason: Optional[Literal["not-available-to-you"]] = None
-    message: Optional[str] = None
-    plan: Optional[VerdictPlan] = None
-
-
-class BatchVerdictItemResult(pyd.BaseModel):
-    allowed: Optional[bool] = None
-    reason: Optional[Literal["not-available-to-you"]] = None
-    message: Optional[str] = None
-    plan: Optional[VerdictPlan] = None
-    # A system-level failure (quota exhausted, connection at capacity) rather
-    # than a verdict about the query's shape — mirrors BatchExplainItemResult's
-    # per-item error tolerance.
-    error: Optional[str] = None
-
-
-class BatchQueryItemResult(pyd.BaseModel):
-    rows: Optional[List[dict]] = None
-    row_count: Optional[int] = None
-    truncated: Optional[bool] = None
-    limit: Optional[int] = None
-    offset: Optional[int] = None
-    admission_id: Optional[str] = None
-    admission_state: Optional[str] = None
-    queue_wait_ms: Optional[int] = None
-    error: Optional[str] = None
-    # Populated only when `error` is specifically an ApprovalRequiredError
-    # (TODO.md item 92/128) — lets a caller distinguish "this item needs
-    # human approval" from any other rejection without parsing `error`'s
-    # free-text message, and carries what a caller needs to request it (the
-    # MCP MRTR port builds one InputRequiredResult input_request per item
-    # that sets these; REST's single-query path already surfaces the same
-    # two fields via ApprovalRequiredError's 428 response).
-    approval_fingerprint: Optional[str] = None
-    approval_reasons: Optional[List[str]] = None
-
+# Response and catalog-info models live in `results.py` so this module defines
+# no `pydantic.BaseModel` subclass and can therefore be Cython-compiled — see
+# that module's docstring and TODO.md item 214. Re-exported here so existing
+# `from querygate.execution.service import StructuredQueryResult` imports keep
+# working; `__all__` is not used in this module, so the names below are the
+# public surface either way.
+from querygate.execution.results import (  # noqa: E402
+    BatchExplainItemResult,
+    BatchQueryItemResult,
+    BatchVerdictItemResult,
+    ColumnCatalogInfo,
+    ColumnInfo,
+    ExplainResult,
+    RelationshipCatalogInfo,
+    StructuredQueryResult,
+    TableCatalogInfo,
+    TableDescription,
+    VerdictPlan,
+    VerdictResult,
+)
 
 # An injected, transport-specific way to obtain an in-query approval token when
 # a batch query trips the approval gate (item 92). Given the offending query and
@@ -260,14 +157,6 @@ class BatchQueryItemResult(pyd.BaseModel):
 # `Context.elicit` (interactive human approval); the service itself stays
 # transport-agnostic and never imports MCP.
 ApprovalResolver = Callable[["StructuredQuery", ApprovalRequiredError], Awaitable[Optional[str]]]
-
-
-class BatchExplainItemResult(pyd.BaseModel):
-    sql: Optional[str] = None
-    params: Optional[str] = None
-    tables: Optional[List[str]] = None
-    limit: Optional[int] = None
-    error: Optional[str] = None
 
 
 def _clean_row_values(row: dict) -> dict:
@@ -517,6 +406,10 @@ class StructuredQueryService:
     async def _validate_and_compile(
         self, query: StructuredQuery
     ) -> Tuple[sa.Select, int, dict, str, Policy, Dict[int, Dict[str, str]], ConnectionResolver]:
+        # The read funnel. This function's own comment below names it as "the
+        # four ways an ad-hoc AST reaches a database", which is exactly the set
+        # that must stop when the term has elapsed — `explain`, `verdict` and
+        # their batch forms reach here without going through `execute`.
         policy = self._get_policy()
         # TODO.md item 195: the templates-only narrowing runs first in this
         # function — before the structural caps, policy validation and schema
@@ -1588,6 +1481,7 @@ class StructuredQueryService:
     @log_execution
     async def list_tables(self) -> List[str]:
         """Known/reflected table names for this connection, filtered by policy.
+
 
         Prefers already-reflected metadata + any `known_tables` seed list on
         the connection profile; falls back to a live INFORMATION_SCHEMA query

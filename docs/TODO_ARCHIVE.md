@@ -1237,7 +1237,13 @@ all. `docs/THREAT_MODEL.md`'s QG-08 row and residual-risk section were
 updated; `help/service.py`'s redacted policy summary now reports these new
 guardrail values (including `cost_estimation_mode`) like every other cap.
 
-**Phase 2 — MSSQL estimated-plan equivalent, not started:** SQL Server's
+**Phase 2 — MSSQL estimated-plan equivalent — SHIPPED** (this paragraph
+described it as "not started"; corrected 2026-08-21, TODO.md item 190 #5).
+`estimate_mssql_query_cost` lives in `execution/cost_estimation.py`, is
+dispatched by `StructuredQueryService._estimate_cost`, and is live-tested by
+`tests/integration/test_mssql_cost_estimation.py`. The design constraint the
+rest of this paragraph describes is exactly why it took the shape it did, so
+it is kept verbatim below rather than deleted: SQL Server's
 `SET SHOWPLAN_XML ON` can't be prefixed onto an already-compiled statement
 the way Postgres's inline `EXPLAIN (FORMAT JSON) <query>` can — once
 SHOWPLAN mode is set, it must be the *only* statement in its batch (the
@@ -3996,7 +4002,7 @@ queries a principal can have *in flight at once*, not how many it can run
 *over time*. A well-behaved agent that never exceeds its concurrency limit
 can still issue tens of thousands of sequential queries an hour, exhausting
 DB capacity or a customer's cost budget — the multi-tenant cost-governance
-story enterprise buyers in `docs/business/GO_TO_MARKET.md`'s target segment
+story enterprise buyers in the go-to-market analysis's target segment
 will ask for directly.
 
 **What to do:** Add a per-principal (and optionally per-connection)
@@ -4128,7 +4134,7 @@ risk — rather than leaving the inference category silently unaddressed.
 cross-instance concurrency state; the new work was failover behavior and a
 documented recovery procedure, not a new deployment topology from scratch.
 
-**Why it mattered:** `docs/business/GO_TO_MARKET.md` explicitly said not to
+**Why it mattered:** an internal go-to-market analysis explicitly said not to
 claim "a production Helm/Kubernetes reference deployment" yet. Item 29's
 reference stack is not the same claim as proven multi-instance failover —
 enterprise buyers evaluating this for production traffic ask for an HA/DR story
@@ -4163,7 +4169,7 @@ specifically, not just a docker-compose file or a single Helm chart.
   (Git-as-config-backup, governance PVC snapshot, audit-via-log-aggregator), and
   reference RTO (≈ minutes) / RPO (≈ zero for config) targets, plus a failover
   drill checklist for the one step only the operator can run.
-- Cross-links from `deploy/README.md` and `deploy/runbook.md`; GO_TO_MARKET
+- Cross-links from `deploy/README.md` and `deploy/runbook.md`; the go-to-market analysis
   claims reconciled (HA/DR deployment now "safe to claim now" with the quota and
   live-drill caveats; only an enterprise *SLA* remains "do not claim").
 
@@ -6024,7 +6030,7 @@ strengthens attribution.
 
 ### 91. Tamper-evident hash-chained audit ledger + per-query compliance receipts ✅ DONE
 
-**Feature ref: F5. Completes the Proof pillar (`docs/business/NORTH_STAR.md`)
+**Feature ref: F5. Completes the Proof pillar (`CLAUDE.md`’s "North Star" section)
 with item 90 — attribution (who, on whose behalf, under which policy) plus
 tamper-evidence (and the record proving it wasn't edited).**
 
@@ -6455,7 +6461,7 @@ engine to 10/10 expressiveness for a fluent SQL author **without weakening any
 safety invariant** — the deepening of the North Star **Structural** pillar (the
 "no raw SQL, ever" bet only wins if the AST rarely walls off a real SQL author).
 The deep, authoritative design/test/validation spec lives in
-**[docs/ENGINE_EXPRESSIVENESS_PLAN.md](docs/ENGINE_EXPRESSIVENESS_PLAN.md)** — each
+**[docs/ENGINE_EXPRESSIVENESS_PLAN.md](ENGINE_EXPRESSIVENESS_PLAN.md)** — each
 item below is scoped there (§4) with its AST shape, compiler seam, validation
 wiring, caps, dialect handling, adversarial cases, and per-item Definition of
 Done. Build them in the order 99 → 106; the plan's §3 checklist and §5 canonical
@@ -8590,7 +8596,7 @@ server-side defense:
 > — [Streamable HTTP § Server Validation](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)
 
 **Why it matters more for QueryGate than for a typical MCP server.** The P4
-leverage move (`docs/business/MARKET_DOMINATION_ANALYSIS.md` §7) is to sit
+leverage move (an internal competitive analysis §7) is to sit
 *behind* MCP gateways and proxies as the enforcement point they can't be. That
 is exactly the deployment where this mismatch is a real confused-deputy: a
 fronting gateway authorizes `Mcp-Name: list_tables` for a low-privilege
@@ -8665,8 +8671,8 @@ claim — were run in parallel; each is recorded here with its finding ID):
 
 Claim-reviewer also caught this write-up's own test count drifting ("eight"
 vs. the seven tests that existed at that point) and flagged that the adjacent
-`docs/business/` strategy docs (`MARKET_DOMINATION_ANALYSIS.md`,
-`COMPETITOR_MCP_GATEWAYS.md`, `NORTH_STAR.md`) still described item 127 as
+`docs/business/` strategy docs (an internal competitive analysis,
+`COMPETITOR_MCP_GATEWAYS.md`, `CLAUDE.md`’s "North Star" section) still described item 127 as
 unshipped — both corrected.
 
 **Coverage.** 13 test functions (14 test items — one is parametrized ×2) in
@@ -8803,7 +8809,7 @@ the real v2 `MCPServer` end to end (`streamable_http_app`, `tools/list`,
 `connections, schema, query, write, help, templates`) updated for the v2
 forward-ref resolution mechanics; `docs/PRODUCT_GUIDE.md`'s architecture
 section, item-127/128 narrative, tools list, and Decision Log updated;
-`docs/business/NORTH_STAR.md`'s "MCP protocol currency" gap marked CLOSED
+`CLAUDE.md`’s "North Star" section's "MCP protocol currency" gap marked CLOSED
 2026-08-06.
 
 **Effort:** L (as scoped). **Depends on:** 90, 92, 93 (all shipped), and the
@@ -9219,7 +9225,7 @@ all shipped, but several surfaces still described them as open or partial.
 
 **What shipped — every claim verified against the code before editing:**
 
-- `docs/business/GO_TO_MARKET.md`'s "Safe to claim now" list gained four
+- the go-to-market analysis's "Safe to claim now" list gained four
   bullets for items 90 (delegated agent identity, dual-identity audit, MCP
   OAuth resource-server conformance RFC 9728/8707/6750), 91 (tamper-evident
   hash-chained audit ledger + per-query receipts, `AUDIT_SINK_BACKEND=jsonl_chained`),
@@ -9265,19 +9271,19 @@ spots surfaced by, but not part of, this same reconciliation pass — all fixed
 in the same commit: README's approval section still claimed MCP elicitation
 approval as "the one remaining piece" three lines below a heading this item
 had just marked complete, when `mcp/elicitation.py` had shipped it weeks
-earlier; GO_TO_MARKET's "do not claim yet" list still said "signed
+earlier; the go-to-market analysis's "do not claim yet" list still said "signed
 release/SBOM distribution" in blanket form when `sales/index.html` already
 carried the precise, reconciled framing (mechanism built and CI-tested,
 no release cut through it yet) — reused verbatim; and item 56's own HA/DR body
-carried the identical stale quota phrase GO_TO_MARKET's copy had just been
+carried the identical stale quota phrase the go-to-market analysis's copy had just been
 corrected away from.
 
 **Effort:** S. **Depends on:** none.
 
 ### 133. The verdict endpoint — expose the decision without the execution (play P4) ✅ DONE
 
-**Surfaced 2026-07-30 by `competitive-scan`.** `MARKET_DOMINATION_ANALYSIS.md`
-§7 names P4 as one of the two leverage moves, `NORTH_STAR.md` lists it under
+**Surfaced 2026-07-30 by `competitive-scan`.** an internal competitive analysis
+§7 names P4 as one of the two leverage moves, `CLAUDE.md`’s "North Star" section lists it under
 "the two leverage moves", `COMPETITORS.md` tells us to build it, and
 `COMPETITOR_MCP_GATEWAYS.md`'s Decision leads with it.
 
@@ -9393,7 +9399,7 @@ vocabulary; scope-completeness).
 
 ### 134. Compliance-grade (WORM) audit retention + managed search ✅ DONE
 
-**Surfaced 2026-07-30 by `competitive-scan`.** `GO_TO_MARKET.md`'s "Do not
+**Surfaced 2026-07-30 by `competitive-scan`.** the go-to-market analysis's "Do not
 claim yet" list had named compliance-grade/WORM audit retention and managed
 search since early on. Item 91's hash-chained ledger detects tampering in
 what was kept; this item closes the other half a regulated (fintech/
@@ -10310,7 +10316,7 @@ rejection counter.
 today and never enforced. Immuta's flagship primitive — purpose-based access,
 where a caller must declare *why* it needs the data from an allowed set of
 purposes, and that purpose narrows what it can see — is real and, per the
-2026-07-22 survey (`docs/business/MARKET_DOMINATION_ANALYSIS.md` F7), "barely
+2026-07-22 survey (an internal competitive analysis F7), "barely
 exists elsewhere": the access proxies log a justification string at best; no
 MCP gateway or DB-vendor server enforces a declared purpose at all.
 
@@ -10463,7 +10469,7 @@ suites pass on the final tree.
 already assembles a defensible security-posture packet — SBOM, item-54
 compliance mapping, item-58 benchmark results, threat-model coverage,
 credential-redaction evidence — but only ad hoc, hand-rebuilt per prospect
-engagement. `docs/business/NORTH_STAR.md`'s own stated posture is "we are
+engagement. `CLAUDE.md`’s "North Star" section's own stated posture is "we are
 not behind on capability, we are behind on evidence and market presence,"
 and the one defined success metric is a design partner's security team
 signing off; the artifact that shortens that review cycle doesn't persist
@@ -10484,7 +10490,7 @@ reading `docs/*.md` at request time would work in a dev checkout and fail in
 the actually-shipped product. `scripts/generate_trust_page.py` (mirroring
 `scripts/generate_sbom.py`'s shape) instead composes
 `docs/SECURITY_POSTURE.md`, `docs/COMPLIANCE_MAPPING.md`,
-`docs/business/SECURITY_BENCHMARK.md`, `SECURITY.md`'s disclosure section,
+`docs/benchmarks/SECURITY_BENCHMARK.md`, `SECURITY.md`'s disclosure section,
 and the live `security/dependency-audit-allowlist.json` status **verbatim**
 (no lossy summarization — no new evidence or claim) into one generated,
 git-committed `docs/TRUST_EVIDENCE.md`, regenerated with `make trust-page`.
@@ -10501,7 +10507,7 @@ the drift-guard test fail for the expected reason; reverted (regenerated via
 `make trust-page`) and the full unit suite passes on the final tree.
 
 **Explicitly out of scope (per the item's own scope, honored as-is):** no
-HTML/CSS marketing page — that's `pitch-sync`/`GO_TO_MARKET.md`'s job, and
+HTML/CSS marketing page — that's `pitch-sync`/the go-to-market analysis's job, and
 `landing/security.html` already exists for that purpose; no unearned SOC 2 /
 ISO / third-party-pentest claims (nothing here asserts one).
 
@@ -11014,9 +11020,9 @@ managed search" and listed only Postgres/SQL Server as supported dialects —
 both false as of items 19 phase 1 and 134 phase 1. Ran the `pitch-sync`
 skill to reconcile every dialect/WORM mention across `sales/index.html`,
 `landing/security.html`, `landing/index.html`, and `landing/sandbox.html`
-against `docs/business/GO_TO_MARKET.md`'s framing.
+against the go-to-market analysis's framing.
 
-**Correction to the item's own premise:** `GO_TO_MARKET.md` was *not*
+**Correction to the item's own premise:** an internal go-to-market analysis was *not*
 fully correct going in — item 134's commit had updated its WORM claim
 correctly, but item 19's commit never touched it, so its "safe to claim
 now" list still read "Postgres and SQL Server support" with no MySQL
@@ -11053,7 +11059,7 @@ bounded-grep for it.
 - `landing/sandbox.html`: the demo-to-real handoff line.
 - `README.md`: the opening one-line pitch ("Postgres or MSSQL database" →
   "Postgres, MSSQL, or MySQL database").
-- `docs/business/GO_TO_MARKET.md`: "safe to claim now" dialect line fixed
+- an internal go-to-market analysis: "safe to claim now" dialect line fixed
   to include MySQL (was missed by item 19's own commit).
 
 **Verified against real code, not just plausible wording**, before
@@ -13369,7 +13375,7 @@ outside `docs/` and `archive/` for the same class of denial ("no managed
 search", "search interface over", "managed search … not started") found no
 fourth surface, and this write-up originally concluded "the class is closed".
 **That conclusion was wrong, and the sweep's own exclusion is why:**
-`docs/business/GO_TO_MARKET.md` lives under `docs/`, and it carries its own
+an internal go-to-market analysis lives under `docs/`, and it carries its own
 "Safe to claim / Do not claim yet" lists — structurally the same artifact as
 `sales/index.html`, which this item did fix. It was still telling a seller the
 endpoint does not exist. Caught 2026-08-12 by `claim-reviewer` re-auditing this
@@ -13731,7 +13737,7 @@ and only one is buildable. (a) **Declared purpose as a token** — shipped, item
 and narrowing the effective policy via `for_purpose`. (b) **The
 natural-language ask** (`StructuredQuery.intent`, free text) — deliberately
 **not** governable and must stay that way: enforcing it means inspecting a
-string and judging its meaning, which contradicts NORTH_STAR.md's "by
+string and judging its meaning, which contradicts CLAUDE.md’s "North Star" section's "by
 construction, never by inspecting a string," makes a deterministic gate
 probabilistic, opens a prompt-injection surface inside the control plane, and
 is self-attested by the exact party being governed (an agent that would
@@ -13762,7 +13768,7 @@ upgrades item 145 from a config knob into a materially stronger one: a
 purpose would then bound not only what a caller may see per query but how
 much it may triangulate per window. Immuta *enforces* a declared purpose —
 gating on a declared reason from an allowed set, rather than merely logging a
-justification string — which `MARKET_DOMINATION_ANALYSIS.md` F7 found "barely
+justification string — which an internal competitive analysis F7 found "barely
 exists" elsewhere.
 
 **Be precise about what our own briefs actually establish here, because it is
@@ -14044,6 +14050,246 @@ walk needed to learn about co-required fields.
 security 480 — all passing.
 
 **Effort:** L. **Depends on:** 88, 145 (both shipped).
+### 184. A day holding more segments than `max_objects_scanned` returns a cursor that never advances, so part of the WORM archive is unreachable and both integrity counters inflate without bound ✅ DONE
+
+**Renumbered from 179 to 184 on 2026-08-12** when the item-177 branch and the
+disclosure-budget branch were merged into `main`. Both had been cut from the
+same base and each allocated 179 and 180 independently, so the two numbers
+genuinely collided. The disclosure budget kept 179/180 because it is shipped
+code referenced from ~30 files; these two were filed-only, so renumbering them
+was the cheaper and safer side. This is the sole deviation from CLAUDE.md's
+"item numbers are permanent" rule and is recorded in the PRODUCT_GUIDE
+Decision Log. Nothing outside TODO.md/ROADMAP.md/`docs/TODO_ARCHIVE.md`
+referenced the old numbers except two `metrics.py` comments, updated in the
+same merge.
+
+**Surfaced 2026-08-11 by three of the four `auditors` reviewers
+(`security-invariant-reviewer`, `architecture-boundary-reviewer`,
+`test-contract-reviewer`, independently) auditing item 177's own commit.**
+Pre-existing since item 134 phase 2 — item 177 neither caused it nor touched
+the code path; it is filed separately because the fix is a **cursor format
+change**, which deserves its own scoping and tests rather than riding in on a
+metrics commit.
+
+`_list_day_keys` is called with `max_keys=bounds.max_objects_scanned` and no
+`StartAfter`. When one day directory holds strictly more keys than that
+budget it returns the first N with `stopped_early=True`. The key loop then
+consumes exactly those N objects without re-tripping the
+`objects_scanned >= max` guard (checked at the top of each iteration, so it
+fires only at `idx == N`, which is out of range), falls through to
+`if listing_truncated:` and returns
+`next_cursor = _encode_cursor(day, None, 0, fingerprint)` — **the start of the
+same day**, discarding the within-day position. Replaying that cursor sets
+`resume_key = None`, so `start_index` stays 0, the same N keys are listed and
+fetched again, the same events are returned again, and the same cursor comes
+back. Three consequences:
+
+1. **Silently unreachable compliance records.** Every segment past key N in
+   that day can never be reached, while the response reports `truncated=True`
+   as if they were merely deferred — a compliance search cannot produce
+   records the archive holds.
+2. **An infinite paging loop** for a caller following `next_cursor` in good
+   faith, at `max_objects_scanned` real S3 GETs per lap.
+3. **Unbounded inflation of item 177's counters.** Each lap re-counts the
+   day's `chain_breaks`/`unverified`, so
+   `querygate_audit_worm_search_chain_breaks_total` climbs with how long the
+   pager ran rather than with how many segments actually broke. Item 177's
+   docs disclose per-scan counting, but this makes the magnitude untrustworthy
+   even within a single logical search.
+
+**When it triggers — corrected 2026-08-12 (`claim-reviewer`), and it is worse
+than first filed.** The original note said "not default-triggering", reasoning
+that the default `AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` (2000) exceeds the
+~1440 segments/day a default 60s flush interval produces. That arithmetic is
+per **flushing process**, not per deployment. Segment keys are
+`prefix/YYYY/MM/DD/<timestamp>-<microsecond>.jsonl` and every replica and every
+uvicorn worker runs its own interval-driven `WormFlushMonitor` writing into the
+*same* day prefix. So the per-process ceiling multiplies: two replicas — or one
+pod with `NUM_OF_WORKERS=2` — **can** produce ~2880 objects/day against the 2000
+default, on exactly the topology `deploy/HA_DR.md` recommends, with no knob
+lowered and no interval shortened.
+
+**State the precondition, don't drop it.** ~1440/day/process is an upper bound
+under *sustained* traffic, not a property of the configuration: `flush_once`
+returns immediately on an empty drain, so a segment is written only for an
+interval that actually had an event, and nothing in QueryGate emits audit events
+on a schedule. Reaching the ceiling needs ≥1 auditable event in essentially every
+60s window in each process for a day. A busy multi-replica deployment hits this
+at stock settings; an idle one does not. (An earlier revision of this note
+asserted the stock-settings trigger without that precondition — overstating a
+defect is its own inaccuracy, and the customer-facing copies inherited it.)
+It also triggers on any single-process deployment that lowers the object budget
+below its daily segment count or shortens the flush interval below ~43s.
+
+**What to do (when prioritized):** make the day-truncation cursor exclusive
+rather than day-resetting — add an `after_key` field to the cursor payload
+(the existing fingerprint already protects it, and it is only ever used as a
+`StartAfter` listing marker, never as a raw `GetObject` key, so the module's
+"a cursor key is never used as a raw key path" property is preserved), give
+`_list_day_keys` a `start_after` parameter, emit
+`_encode_cursor(day, key=None, after_key=keys[-1], line=0, ...)` when `keys`
+is non-empty, and pass it through on resume. Keep the current day-start cursor
+only when `keys` is empty.
+
+**Acceptance criteria:** a test putting 5 single-event segments in one day
+with `max_objects_scanned=2` follows `next_cursor` to exhaustion and sees all
+5 events exactly once, with no cursor repeating and the loop terminating; a
+companion test asserts `chain_breaks_total` rises by exactly 1 across a whole
+cursor chain over one broken segment. Both fail today.
+
+**Effort:** M. **Depends on:** 134 (shipped).
+
+### 185. `AUDIT_WORM_SEARCH_REQUESTS_TOTAL{outcome="rejected"}` is unreachable for the rejections its own comment claims to count ✅ DONE
+
+**Renumbered from 180 to 185 on 2026-08-12** — same merge-time collision as
+item 184; see that item's note for the full rationale.
+
+**Surfaced 2026-08-11 by `architecture-boundary-reviewer` auditing item 177's
+own commit.** Pre-existing since item 134 phase 2; unrelated to item 177's
+change beyond sitting in the same file.
+
+`build_worm_search_result` — the only production caller, from
+`api/admin_observability_routes.py` — runs `_validate_window` and
+`_validate_limit` **itself**, before deciding whether the backend is enabled
+and before calling `search_worm_archive`. So a missing `start_time`, an
+over-wide window, or an out-of-range `limit` raises there and never reaches
+`search_worm_archive`'s own
+`except QueryValidationError: ...labels(outcome="rejected").inc()`. In
+production that label therefore only ever counts cursor-fingerprint/day-range
+rejections — yet `metrics.py`'s comment on the counter explicitly lists
+"missing/over-wide time range, limit out of range" as what it counts. An
+operator alerting on a spike of bound-violating callers sees nothing.
+
+The existing test
+(`test_a_rejected_request_increments_the_rejected_outcome_not_ok`) passes
+because it calls `search_worm_archive` **directly**, exercising a path
+production never takes — so the gap is invisible to the suite.
+
+**What to do (when prioritized):** either move the counter up into
+`build_worm_search_result` (wrapping its two validation calls in the same
+`except QueryValidationError` + `.inc()`), or narrow `metrics.py`'s comment to
+say "cursor rejections only". The first is preferable — the metric is more
+useful where the rejections actually happen.
+
+**Acceptance criteria:** an integration test hitting
+`GET /api/v1/admin/observability/worm-search` with no `start_time` asserts the
+`rejected` counter rose by 1. Fails today.
+
+**Effort:** S. **Depends on:** 134 (shipped).
+
+### 193. `docs/product-guide.html` has no freshness gate against `docs/PRODUCT_GUIDE.md` ✅ DONE
+
+**Surfaced 2026-08-12 by `architecture-boundary-reviewer` and `claim-reviewer`
+auditing the item-179 merge**, which landed with the generated HTML stale
+(regenerated by hand in that pass). **Scope corrected 2026-08-12:** the drift
+was not merge-caused and was larger than first written — besides the two
+Decision Log entries, three whole sections ("The one-walk rule, in plain
+terms", "Performance benchmark", "Load benchmark") had been missing since
+commit `f995e35`, well before either branch. The generated copy drifts on *any*
+`PRODUCT_GUIDE.md` edit, which is precisely why it needs a gate rather than a
+habit.
+Nothing references the generated file outside `Makefile` and its generator;
+there is no test and no CI job comparing it to its source, so it goes stale
+silently — and it is the copy most likely to be *sent to someone*.
+
+**What to do:** a unit test that renders `docs/PRODUCT_GUIDE.md` through
+`scripts/generate_product_guide_html.py` into a tmpdir and asserts equality with
+the committed HTML, in the same spirit as `scripts/check_worklist.py`'s derived-
+mirror check. Note the generator must be deterministic for this to work; if it
+embeds a timestamp, that has to be excluded or made stable first.
+
+**Effort:** S. **Depends on:** nothing.
+
+**Shipped 2026-08-22.** `tests/unit/test_product_guide_html_freshness.py`
+regenerates the page in memory (the real generator, redirected to a tmp path)
+and byte-compares it, in the default unit suite — the same posture
+`test_trust_page.py` takes for `docs/TRUST_EVIDENCE.md`. Three tests, because
+byte-equality alone is not enough: a negative control proves a markdown edit
+actually changes the output (otherwise a generator that ignored its input would
+satisfy the guard forever), and a section-count assertion pins the failure mode
+that was actually measured here — whole sections going missing. Mutation-verified
+by planting drift in the committed HTML.
+
+Note for the record: `tests/unit/test_product_guide.py` does **not** cover this
+— it exercises the packaged in-product help corpus, a different artifact. A
+reviewer asserted otherwise while auditing the GTM branch; that was wrong, and
+is why this needed a file of its own rather than an extra assertion.
+
+### 194. Three crafted-or-corrupt WORM lines still escape `search_worm_archive` as an unhandled exception the route masks as a 500 ✅ DONE
+
+**All three shapes closed.** Defects 1-2 shipped 2026-08-23 (`digests_equal` for a non-ASCII digest at every comparison site in both readers; `RecursionError` caught alongside `json.JSONDecodeError` in both `json.loads` handlers). Defect 3 shipped 2026-08-24 with the owner's decision — `_contains_forbidden_content`'s walk of `query_shape` is bounded by `AUDIT_WORM_SEARCH_MAX_QUERY_SHAPE_DEPTH` (default 64, hard ceiling 256) and fails closed, so over-depth is counted `malformed` rather than raised. The cap returns `True` (reject) on over-depth because the screener's `True` means reject; returning `False` would have converted a resource bound into a screening bypass, and a test pins that direction. The config field is bounded above so raising it cannot reintroduce the defect, and a test exercises the walk at exactly that ceiling in the expensive LIST form. Eight mutations, eight killed.
+
+**Defects (1) and (2) shipped 2026-08-23.** A non-ASCII digest is now a mismatch rather than a `TypeError`: `audit/ledger.py` grew `digests_equal`, used by all five `hmac.compare_digest` sites (both readers), so ordinary corruption of one byte in a `hash` no longer permanently 500s every future search covering that immutable object. Both `json.loads` handlers (the line loop and the seed walk) now catch `RecursionError` alongside `json.JSONDecodeError`, so a deeply-nested line is counted `malformed` and the rest of the page survives.
+
+**Defect (3) remains open and is the reason this item is not fully done.** `_contains_forbidden_content` still walks `query_shape` with no depth cap. Measured on 2026-08-23 against the shipped tree (Python 3.11, `sys.getrecursionlimit()` 1000): LIST nesting first raises around depth **~330**, DICT around **~1000** — the ~3x gap is the structural generator-frame cost the original note describes, so any cap must be sized against the LIST cost. The exact integer is harness-sensitive (±1 per intervening frame) and is LOWER inside an async request handler, so it is deliberately stated as an approximation: the cap must be chosen with margin, never tuned to a measured boundary. `Policy.max_where_depth` defaults to **5**, so a legitimate `query_shape` sits three orders of magnitude below the LIST threshold. The remaining decision is the cap VALUE and is a maintainer call, since the screener is a security control whose `True` means *reject* and the cap must fail closed (over-nested ⇒ `malformed`).
+
+**Surfaced 2026-08-12 by `security-invariant-reviewer` and `claim-reviewer`
+independently, auditing item 178's own commit, and measured — not reasoned —
+against the post-fix tree.** All three are **pre-existing** (items 154/172),
+not caused by item 178; what item 178 briefly added was a module-docstring
+sentence asserting they did not exist, corrected in that same commit to name
+them and point here.
+
+Each is the same defect class item 178 closed for `seq`: a line the reader is
+supposed to *count* as `malformed`/`unverified` instead raises out of
+`search_worm_archive`, hits the route's `mask_unexpected()`
+(`api/admin_observability_routes.py`), and returns a generic HTTP 500. The
+cost is availability plus the loss of every genuine record the page had
+already accumulated — nothing leaks (the masked body is
+`PUBLIC_INTERNAL_ERROR`). Because a WORM object is immutable, one bad object
+poisons every future search whose window covers that day, permanently.
+
+1. **A non-ASCII `hash` raises `TypeError` in `hmac.compare_digest`**
+   (`audit/ledger.py`'s `verify_envelope_hash`). `LedgerRecord.hash` is a
+   plain `str` with no hex/ASCII constraint. **This is the one that does not
+   need an attacker:** `_get_object_text` decodes the object body with
+   `errors="replace"`, so a single corrupted byte inside a genuine segment's
+   `hash` field becomes U+FFFD and 500s the endpoint. Measured:
+   `verify_envelope_hash({... "hash": "abc\ufffd"})` raises rather than
+   returning `False`.
+2. **`json.loads` on a deeply-nested line raises `RecursionError`**, which is
+   a `RuntimeError` and so is not caught by the `except json.JSONDecodeError`
+   at either call site (the main line loop and the seed walk). Measured:
+   1,000 nested arrays raises, 900 does not — and that is a ~2 KB line
+   (`"[" * 1000 + "]" * 1000`), four orders of magnitude under
+   `_MAX_OBJECT_BYTES`, so the byte bounds are no defence at all. The
+   available stack inside an async request handler is smaller than in a bare
+   probe, so the production threshold is lower still.
+3. **`_contains_forbidden_content` walks `query_shape` with no depth cap.**
+   **Superseded 2026-08-23 — the ~480/~2x figures below were re-measured and
+   are wrong; see the depths recorded at the top of this item (~330 list,
+   ~1000 dict, a ~3x gap). The original text is kept only for the structural
+   explanation, which still holds.** Measured through the real function, and
+   the threshold is **shape-dependent**:
+   LIST nesting raises at depth ~480 (300 is fine), while DICT nesting survives
+   to ~1000. The ~2x gap is structural — the list branch is
+   `any(_contains_forbidden_content(item) for item in node)`, costing a
+   generator frame *plus* a call frame per level, where the dict branch costs
+   one. Any cap must therefore be sized against the LIST cost, not the dict
+   one. Reachable past every other guard — the envelope
+   can be genuine, hash-verifying, chain-linked, and schema-valid, since
+   `query_shape` is a `Dict[str, Any]` that `extra="forbid"` cannot constrain.
+
+**What to do (when prioritized).** (1) and (2) are mechanical: make
+`verify_envelope_hash` return `False` for a non-ASCII `hash` (an `.isascii()`
+pre-check, or compare on `.encode()`d bytes) — note it is shared by four
+readers, so the change is theirs too, and `audit/ledger.py`'s own
+`verify_chain` has the SAME `hmac.compare_digest(expected, record.hash)`
+hazard (measured: identical `TypeError`), reachable via `querygate-audit
+verify` against a locally-corrupted ledger, so the real scope is five call
+sites and both readers, not four and one; and widen both handlers to
+`except (json.JSONDecodeError, RecursionError)`. (3) needs **a maintainer
+decision on the depth cap**, which is why this is not a same-session fix: the
+screener is a security control whose `True` means *reject*, so a cap must
+fail closed (over-nested ⇒ `malformed`) and must sit above anything
+`audit/events.py`'s `normalize_query_shape` can legitimately emit — bounded
+by `max_where_depth` plus a constant for `set_op` arms and cte bodies, which
+should be measured rather than assumed. Pin each shape with its own
+regression test, then restore the absolute form of the module docstring's
+standing-contract sentence.
+
+**Effort:** S–M. **Depends on:** 134 (shipped).
+
 ### 195. The narrowing path: `Policy.templates_only` enforcement plus an observed-shape recorder that drafts a template from real traffic ✅ DONE
 
 **Why.** QueryGate's read AST is deliberately expressive (items 99–106), so a
@@ -14366,3 +14612,645 @@ and surfaced — but not recorded.
 
 **Effort:** M–L overall. **Depends on:** 48, 50 phase 2 (the Redis wiring
 precedent).
+
+### 200. Per-surface credential-type policy: enabling SSO must actually close the console to shared secrets ✅ DONE
+
+**Effort: S–M.** Requested by the maintainer 2026-08-23, after item 199 shipped.
+
+**Why it mattered:** item 199 made SSO *available*; it did not make it
+*enforced*. Every configured credential scheme still worked on every surface,
+so a deployment that had completed a full IdP integration still had a static
+`API_KEYS` entry that opened the admin console — and every action taken through
+it was attributable to a config entry, not to a person. The Proof pillar's
+claim is per-human attribution; leaving that to operator convention was the
+wrong call, and the maintainer's review caught it: *"do we want to support all
+these (cookie, token, api key, jwt)?"*
+
+Removing API keys outright was considered and rejected on two concrete cases:
+the quickstart (the only way anyone evaluates the product), and **unattended
+agents**, which have no browser to approve a device grant and would otherwise
+need the customer's IdP to issue client-credentials tokens before they could
+run at all. Restricting per surface gets the outcome that matters — no shared
+secret on the control plane — without a cliff for callers that have no
+alternative yet.
+
+**What shipped:**
+- `core/auth_policy.py` — a closed vocabulary of the five `auth_method` values
+  an authenticator can actually stamp on a `Principal`, a `SHARED_SECRET_METHODS`
+  set (`api_key`, `anonymous` — the two that identify a deployment rather than a
+  person), and an `AuthMethodPolicy` per surface. `CONSOLE_AUTH_METHODS` /
+  `REST_AUTH_METHODS` / `MCP_AUTH_METHODS` configure it; an unknown method name
+  is refused at startup, the same posture as an unknown scope in a mapping rule.
+- **The default closes the console when SSO is on.** A permissive default with
+  opt-in tightening was rejected: a control nobody turns on protects nobody, and
+  the deployments most likely to leave the default are exactly the ones that
+  just finished an IdP integration and *believe* the console is SSO-gated.
+- **Enforcement is on the resolved principal**, not on which authenticators got
+  built — so a scheme added later is governed automatically rather than
+  inheriting access to everything.
+- Refusal is **403, not 401**: the caller authenticated, and retrying the same
+  credential kind can never work.
+
+*Mutation-verified. It found the defect worth having the discipline for: the
+policy was enforced on the bearer chain's return but **not** on `api/auth.py`'s
+session-cookie early return, so a tightened console policy could be bypassed by
+exactly the credential type SSO introduced. Both that path and the device-token
+path now have their own tests. It also showed a "would accept no credential"
+config guard was unreachable dead code — an empty configured list falls back to
+the surface default, and a non-empty one is non-empty by construction — so the
+guard was deleted and replaced with a property test rather than left as a
+security check that never fires.*
+
+**Known bound:** a method refusal is logged (`auth.method_not_permitted`) but
+not written to the durable audit sink, matching how the existing 401 paths
+behave. If per-surface refusals should be durably auditable, that is a
+deliberate follow-up rather than something this item silently assumed.
+### 201. The WORM archive tier is reachable only against AWS S3, so on-prem and air-gapped deployments cannot have it ✅ DONE
+
+**Filed and shipped 2026-08-23**, following the three WORM defect fixes
+(items 184/194/185) rather than before them: expanding a surface with open
+correctness defects would have forked those defects across every new backend.
+
+`WormFlushMonitor._get_client` and `search_worm_archive` both constructed
+`boto3.client("s3", region_name=...)` with no `endpoint_url`, and no config
+field for one existed anywhere in the repo. So `AUDIT_SINK_BACKEND=
+jsonl_chained_s3_worm` — the tier that carries the "even we can't delete it"
+claim — worked only against AWS S3 proper. A self-hosted or air-gapped
+deployment, which is the **Reach** pillar's own territory ("self-hosted, data
+never leaves"), could have the hash-chained local ledger but not the
+immutable copy.
+
+`AUDIT_WORM_S3_ENDPOINT_URL` (empty by default = AWS S3, resolved by region
+exactly as before) is threaded into **both** clients from the same
+`AppConfig` field, so an archive can never be written to one store and
+searched at another. MinIO and Ceph RGW both document S3 Object Lock support in
+`GOVERNANCE` and `COMPLIANCE` modes. That is a vendor claim, not a tested one:
+no CI job or live test in this repo has ever run against a non-AWS store, in
+contrast to the `postgres-live`/`mssql-live`/`mysql-live` precedent for dialect
+claims. The startup warning exists precisely because the tier's only guarantee
+cannot be verified from inside QueryGate.
+
+**Deliberately an endpoint override, not an "any object store" adapter.**
+Retention is still sent as `ObjectLockMode`/`ObjectLockRetainUntilDate`, so a
+store without Object Lock would accept the writes and produce ordinary,
+deletable blobs while the deployment believed they were immutable — a silent
+and total failure of the only claim the tier makes. `app.py` therefore logs a
+startup warning whenever the override is set, telling the operator to verify
+COMPLIANCE-mode retention against that store before relying on it. **GCS and
+Azure Blob are NOT reachable this way** and were not attempted: their
+immutability models (Bucket Lock / immutable Blob Storage) are their own
+APIs, not S3 Object Lock, so each needs a real second backend — write path
+*and* search path — which is its own item if a design partner ever needs it.
+
+**Mutation-verified** against four mutations: the flush monitor ignoring the
+endpoint, an empty override reaching boto3 as `""` rather than `None` (which
+would break every existing AWS deployment, since boto3 treats `""` as a real
+endpoint), the search client ignoring it, and `build_worm_search_result`
+ceasing to thread the config value through.
+
+**Effort:** S. **Depends on:** 134 (shipped), 184/194/185 (shipped first).
+
+### 210. Proprietary licence transition — retire the BSL apparatus ✅ DONE
+
+**Effort: M.** Blocks everything else that touches licensing text.
+
+**Why it matters:** the repo is wired end-to-end for a BSL flip that will now
+never happen — two CI jobs, three Make targets, a script, a test, and roughly
+thirty documents assert a source-available future and unlimited free production
+use. Shipping a paid product while the licensing FAQ promises *"no licence key
+to obtain"* and *"no check that can refuse to start or block a query"* is not a
+doc bug; it is a written promise that is the exact inverse of what the product
+will do.
+
+**What it is:**
+- **Replace `LICENSE`'s BSL body with the proprietary notice. Do not delete the
+  file** — `pyproject.toml`'s `license-files`, `check_release_artifacts.py`'s
+  wheel/sdist/image assertions, and the Dockerfile's `COPY LICENSE` all require
+  it to exist.
+- **`the EULA (both languages)` becomes the licence of record.** Add, for
+  counsel, in both languages: term/renewal/fees/invoicing; **no-refund on
+  cancellation with access to end of the paid period**; effect of non-payment;
+  **suspension distinct from termination**; a cure period consistent with the
+  grace window; **anti-circumvention** (disabling or patching the entitlement
+  check is a material breach — this clause does not exist today and the whole
+  enforcement argument assumes it); notice that the Software enforces the term
+  technically; **licence-data transmission disclosure** (what leaves, how often,
+  retention); licence-service availability; and a **post-termination
+  audit-retrieval carve-out** so exporting one's own records is not a breach.
+- **Delete the Change-Date apparatus**: `make stamp-change-date`,
+  `change-date-check`, `change-date-check-release`, its `release-check` wiring,
+  `scripts/check_change_date.py`, `tests/unit/test_change_date.py`, the
+  `RELEASING.md` sections — **and both CI call sites**, `ci.yml`'s
+  `make change-date-check` and `release.yml`'s direct
+  `python3 scripts/check_change_date.py --check --release`. Removing only the
+  Make targets breaks the tagged-release job.
+- **Preserve two assertions from the deleted test**: the pyproject↔dated-CHANGELOG
+  binding (nothing else asserts it) and the placeholder-refusal release gate,
+  **retargeted at the EULA**, which carries unfilled placeholders and today has
+  no test, script, or CI job referencing it anywhere. The gate must match **any
+  `[…]` span in either language file, not an ASCII-uppercase pattern** —
+  `EULA.he.md`'s placeholders are Hebrew, so the obvious `\[[A-Z_ ]+\]` regex
+  gives a green build on an entirely unfilled Hebrew licence of record.
+- **⚠️ Retarget `tests/security/test_no_phone_home.py` — this must land before
+  item 211's first commit.** It is `pytestmark = [security, unit]`, so it runs in
+  `pytest -m unit`, in `make release-check`, in CI, and in the project pre-commit
+  hook; and its patterns match `licen[cs]e_server|entitlement_(url|endpoint|
+  server)|activation_*|heartbeat_url` plus any vendor hostname in `src/`. Item
+  211's client cannot be written without turning the suite red **mid-item**,
+  where it reads as a mystery failure and the cheapest reaction is to delete the
+  file — taking with it two assertions that become *more* valuable under this
+  model, one of which is the mechanism an internal commercial plan §8 sells. Narrow it instead:
+  keep both assertions, add the subscription source module to the `allowed` set
+  with its endpoint named, scope the vendor-host and vocabulary rules to "outside
+  `subscription/`", and add the positive payload assertion. Note it also shifts
+  the adversarial-suite count pinned across eight documents.
+- **Rewrite the licensing FAQ end to end** — roughly thirteen claims go
+  false. Highest exposure: the "no kill switch, no time bomb, no check that can
+  refuse to start or block a query" promise.
+- **✅ The `licensing` class is added to `scripts/claim_drift_sites.py` and the
+  sweep is measured: 209 live sites across 31 files** when first counted
+  (2026-08-24); **225 today**, because later commits in this very branch added
+  more. The number goes stale fast — **re-run the command rather than trusting
+  it.** Measured against the
+  ~20 documents the hand list below named. Exactly the understatement the tool's
+  own docstring predicts. Run `python3 scripts/claim_drift_sites.py licensing`,
+  fix, re-run to empty; **treat the list below as a checklist, not the scope.**
+  Two scoping facts the measurement gives us:
+  - **126 of the 209 are in five BSL-*execution* artifacts** —
+    `GTM_EXECUTION_PLAN.md` (56, already banner-marked superseded),
+    the licence drafting notes (29), the publication plan (21),
+    `BSL_EXECUTION_PROMPT.md` (11), `GTM_EXECUTION_PROMPT.md` (9). These are
+    plans *for the flip that was cancelled*, not live claims about the product.
+    Banner-mark or archive them **as whole documents**; line-editing them is
+    wasted work and would destroy the historical record of why the decision
+    changed.
+  - **That leaves 83 sites of genuine editing.** The named files below account
+    for 62 of them; the remaining ~21 sit across a further dozen files —
+    including an internal commercial plan itself (4), `RELEASING.md` (3) and
+    `test_no_phone_home.py` (3) — so run the command for the live list rather
+    than treating this as the decomposition. Named:  the licensing FAQ (23),
+    `CONTRIBUTING.md` + `.github/cla/` (13 — the CLA exists for outside
+    contributors to a public repo, of which there are now none),
+    `CONTAINER_IMAGE_LICENCES.md` (5), `PRODUCT_GUIDE.md` (4), `docs/README.md`
+    (3), `README.md` (2), `sales/index.html` (1), and the executable BSL
+    rationale in `scripts/check_licenses.py`,
+    `scripts/check_release_artifacts.py`, `security/copyleft-license-allowlist.json`
+    and `tests/unit/test_third_party_licenses.py`. Two files whose BSL text is executable rather than prose and that
+  a prose sweep misses: `pyproject.toml`'s `license-files` comment block (which
+  also defers the SPDX expression and classifier that now become truthful) and
+  `scripts/check_release_artifacts.py`'s three BSL-specific rationale strings and
+  error messages, which would otherwise instruct a future maintainer to satisfy a
+  licence that no longer applies.
+- **Sweep the rest**: `CLAUDE.md`’s "North Star" section (Reach pillar narrowing **and** the
+  non-goal list — add "no hosted query execution" as a recorded decision, and
+  reconcile an internal commercial plan §2 to carry all seven; the two lists currently disagree
+  in both directions),
+  `PRODUCT_GUIDE.md` Decision Log, a superseded-by banner on
+  `GTM_EXECUTION_PLAN.md`, the licence-enforcement analysis, the licence drafting notes,
+  the distribution-strategy note, the publication plan,
+  `BSL_EXECUTION_PROMPT.md`, `GTM_EXECUTION_PROMPT.md`,
+  `CONTAINER_IMAGE_LICENCES.md`, `docs/README.md`, `CONTRIBUTING.md` +
+  `.github/cla/` (the CLA exists for outside contributors to a public repo —
+  there are none), `README.md`, `CUSTOMER_README.md`, `landing/`,
+  `sales/index.html`. Rewrite items 197/198's bodies.
+- **Regenerate the gated artifacts in the same commits**: `make
+  product-guide-html`, `make trust-page`, and the adversarial-suite count that
+  `test_security_suite_count_claims.py` pins across eight documents.
+
+**Definition of done:** `make release-check` green; no `BSL`/`Change Date`/
+`Additional Use Grant`/"free forever"/"no outbound calls" claim survives outside
+a superseded-by banner; `claim-verify` clean.
+
+**Shipped 2026-08-27.** `LICENSE` is a proprietary notice reserving all rights
+and naming the EULA as the licence of record; the EULA gained, in
+**both** languages, the ten commercial clauses this item named — term/renewal/
+fees/invoicing/tax (§14), no-refund with access to the end of the paid period
+(§14.3), non-payment with its own notice and cure period (§14.4), suspension
+distinct from termination (§7.4), a general cure period (§7.2),
+anti-circumvention as a material breach (§3(h), §15.5), notice of technical
+enforcement (§15.1-15.4), licence-data transmission disclosure naming all four
+fields with retention (§16), licence-service availability with a replacement-
+entitlement remedy (§17), and the post-termination audit-retrieval carve-out
+(§18) — plus a third-party pass-through clause in §2 that was not on the original
+list and that **partly satisfies** Microsoft ODBC requirement §2(b)(ii)
+(`docs/CONTAINER_IMAGE_LICENCES.md`).
+
+`tests/security/test_no_phone_home.py` was **narrowed, not deleted**: the vendor
+hostname and licence-vocabulary bans now exempt exactly `src/querygate/
+subscription/`, the exemption's width is bounded, and that package is held to a
+four-rule payload contract: one literal declaration matching the EULA, no `**`
+spread into a body-bound mapping, no mapping literal passed as the body, and no
+key in one that is neither disclosed nor an HTTP header. It took three passes to
+get right, and each failure is worth recording because they are the same mistake
+in different clothes. The first draft checked only the *declaration*, which a
+reviewer showed a client could satisfy while posting
+`{**payload, "hostname": ...}`. The second caught that but keyed on `ast.Dict`
+alone, so re-spelling it `dict(**payload, hostname=h)` walked past all four rules
+— measured, not theorised. The second also put `url`, `data`, `content` and
+`params` in the *key* allowlist when they are *argument* names, so
+`{"org_id": o, "url": dsn}` passed clean, and applied the key rules to every dict
+in the package, which would have turned item 211's first commit red over a
+`cache.py` entry. The third recognises both spellings, scopes the rules to
+mappings that can reach the wire, and narrows the allowlist to four header names.
+Because the package does not exist yet the contract is a pure function over a
+directory, and every rule runs on each pass against planted bypasses — the
+*subject* is deferred to item 211, the *guard* is not. What it does **not** cover,
+stated rather than implied: a body built from a typed model with an extra
+attribute, which is the runtime assertion item 211 owes. the licensing FAQ was
+rewritten end to end. Five cancelled-plan documents plus `.github/cla/` carry
+whole-document superseded/retired banners, recorded as whole-file exemptions in
+`scripts/claim_drift_sites.py` and kept honest by
+`tests/unit/test_claim_drift_exemptions.py` — an exemption is valid only while
+the banner is present. `CLAUDE.md`’s "North Star" section gained the seventh non-goal (**no hosted
+query execution**) and the narrowed Reach pillar; an internal commercial plan §2's
+"only an org id and a deployment id" contradiction with its own §3 was fixed.
+Items 197 and 198 were rewritten. `pyproject.toml` declares
+`License :: Other/Proprietary License` — true for the first time.
+
+**Measured — and the honest version is less flattering than the first two
+drafts.** `python3 scripts/claim_drift_sites.py licensing` reports **35 candidate
+sites**, and every one is a negation, a superseded-marker, or a deliberate
+historical reference: the scanner's own documented acceptable end state.
+
+**That 35 is not comparable to the 235 measured before this item, and the
+difference is almost entirely exemptions rather than edits.** On an
+exemption-free basis the licensing patterns match **269 lines in this tree
+against 268 at the previous commit** — net +1, because the retired claims now
+get quoted in the guards and documents that retire them. What closed the gap is
+the 234 recorded exemptions: five cancelled-plan documents plus `.github/cla/`
+under whole-document superseded banners, and the licensing guards' own docstrings
+naming the claim each one replaced.
+
+Real editing did happen and is visible per file — the licensing FAQ went 23 → 7
+raw — but it was offset by new text elsewhere. **Two earlier drafts of this
+paragraph got the number wrong**: the first published 35 when the command printed
+48 (before `docs/TODO_ARCHIVE.md` was exempted), and the second claimed ~200
+exemptions *and* ~20 genuine edits out of a 200-line drop, which does not add up.
+Re-run the command rather than trusting any number here. `make release-check`
+green; `make test-security` 656 collected (655 run, 1 skipped pending item 211).
+
+**What the audit caught, because it is the more useful record.** Four reviewers
+ran over this item across two rounds; the expensive findings were all the same
+shape — the EULA had become a *security specification* and was
+allowed to disagree with the design:
+
+- **§15.2 promised blanket administrative and configuration access survives
+  suspension.** an internal commercial plan §5 deliberately **blocks**
+  `/admin/config/blast-radius`, `/simulate`, `/versions/{id}/apply` and
+  `/admin/connections/{id}/test` during a lapse, because they are live-schema and
+  secret-reference oracles. Item 216's implementer would have built against the
+  signed licence. Now narrowed to health, metrics, licence status and audit
+  retrieval, with the enumerated set deferred to the Documentation — and, after
+  the re-review caught that the EULA alone had been fixed, in
+  the licensing FAQ, `PRODUCT_GUIDE.md` and the licence-enforcement analysis too.
+- **§16 asserted a *complete* transmission disclosure and omitted transport
+  metadata** that an internal commercial plan §8 says is sent — and §8 claimed the EULA named
+  it. §16.1(b) now discloses egress IP, product version and liveness, with a
+  retention period.
+- **`LICENSE` cited "Section 16 (Technical enforcement…)" when that is §15** — a
+  wrong operative-clause pointer in the one file that ships in the wheel, the
+  sdist and the image. `test_every_eula_section_the_licence_notice_cites_exists_with_that_title`
+  now resolves every outbound reference — both the titled form and the bare
+  "Sections 8 and 9" plural, which the first version of that guard could not
+  see.
+- **The clause-parity guard was satisfiable by a cross-reference.** `7.4`, `7.5`,
+  `14.4` and `(h)` each appear twice per language, so deleting the
+  anti-circumvention restriction left the suite green. Markers are now anchored
+  to their heading.
+- **`test_the_subscription_exemption_is_narrow` contained a tautology** —
+  `all(_is_subscription_module(p) for p in exempt)` over a set built by that
+  predicate, true for `lambda p: True`. It survived a mutation test because the
+  *neighbouring* assertion fired.
+- **The whole-file claim-drift exemptions were not class-scoped**, so exempting
+  the control-plane plan for licensing also blinded it to the
+  `cost-estimation`, `worm-resumable`, `four-eyes`, `admin-ui` and
+  `disclosure-budget` sweeps. `KNOWN_OK` entries now name their class.
+- **`sales/index.html` was given a claim its own governing doc forbids** —
+  "signed and provenance-attested images" when cosign and SLSA have never run —
+  contradicting the adjacent objection block in the same file.
+
+**Left open, deliberately:** the EULA and `LICENSE` still carry placeholders
+because the Licensor legal entity does not exist — `make eula-check-release`
+refuses a tag while any remain, in either language. `docs/CONTAINER_IMAGE_LICENCES.md` requirement §2(b)(iii) (indemnity
+to Microsoft) is still not met and needs an owner decision, and the in-image
+`THIRD_PARTY_NOTICES` file it asks for is not written.
+
+### 216. Renewal countdown and lapse UX ✅ DONE
+
+**Effort: M.** Depends on 211.
+
+**Why it matters:** a subscription that stops without warning is a support
+incident and a chargeback. The countdown is the product being honest.
+
+**What it is:**
+- **Trigger:** auto-renew off (or payment failing) **and** under 30 days
+  remaining.
+- **Surfaces:** a persistent banner in `admin_ui` and `access_ui` with a
+  **day countdown** and the exact expiry date; escalation under 7 days; an
+  email; a coarse field on the health endpoint; a Prometheus gauge; a line in
+  `querygate-license status`.
+- **Say exactly what happens at expiry**: every query and write is refused with
+  402, and audit export keeps working. Link straight to the renewal URL.
+- **The unauthenticated `/health` endpoint carries only a coarse state** — no
+  org, plan, dates, or counts. It is deliberately unauthenticated and returning
+  aggregate detail only; publishing an expiry date there tells any scanner
+  exactly when this customer's gateway stops.
+- **The same constraint binds the Prometheus gauge**, which is otherwise the
+  unguarded sibling: `metrics_require_auth` defaults to true but **false is
+  supported**, and a `days_remaining` gauge on such a deployment discloses
+  strictly more than the health field just forbade. The gauge is a coarse state
+  enum; the day countdown lives only on the authenticated UI banner, the email,
+  and `querygate-license status`.
+- The 402 body and the exception message carry a fixed operator-facing string:
+  no org id, deployment id, serial, plan, or date.
+- **Accessibility is part of this item**, not a follow-up: the banner is a live
+  region, dismissible without losing the information, and legible at the
+  contrast the rest of the UI meets.
+
+**Definition of done:** `ui-a11y-reviewer` clean; a test per surface asserting
+the countdown appears at the right threshold and the 402 message names the
+renewal URL.
+
+**What shipped, and what the audit changed.** `renewal_state` is a *signed*
+field (`auto_renewing` / `cancelling` / `payment_failing`) resolved by the
+control plane from the billing record — a deployment cannot see a billing
+subscription, and a deployment-side heuristic would warn on *our* outage.
+`renewal_notice()` is the one place a threshold is decided; the banner, the
+email, `querygate-license status` and the coarse public signal all derive from
+it. `/health` and the Prometheus gauge carry a three-value enum and no date.
+
+Five reviewers ran and returned 41 accepted findings. The ones that changed the
+design rather than the wording:
+
+- **The dedupe slot was keyed per subscription *lifetime*, not per billing
+  period.** A customer whose card failed in month 1 and again in month 7 was
+  warned once, ever — the second claim hit the unique constraint, the job
+  reported success, and nobody was told. `Notification` now carries `period_end`.
+- **There was no Alembic migration for that table.** Every control-plane test
+  builds its schema with `create_all`, so it existed in all of them and in no
+  deployment; `control-plane-notices` would have failed on its first claim.
+  `tests/test_migrations.py` now diffs models against migrations permanently.
+- **Observe mode reported `expired` while refusing nothing.** New deployments
+  start in observe by design, so the false alarm would have landed on the first
+  customers first. `renewal_notice` now branches on `would_block`.
+- **The banner was rendered while the sign-in modal was still open**, and a modal
+  `<dialog>` makes everything outside it inert — so on every path where the
+  dialog is shown, a screen reader never heard the warning. It now renders after
+  `close()`.
+- **`LAPSE_CONSEQUENCE` claimed "configuration access keeps working"** while the
+  FAQ claimed configuration was suspended. The code sides with neither exactly:
+  live schema reflection is gated, configuration and audit retrieval are not.
+  Both sentences now say that.
+- Six of the ten enforcement points originally mutation-verified turned out to
+  have tests that pass under a mutation breaking the behaviour they name — an
+  inverted `safeHref` ternary, an identity `escapeHtml`, a `/health` assertion
+  whose first branch was dead because Starlette renders JSON without spaces.
+  `tests/unit/test_renewal_banner_behaviour.py` executes the module under Node
+  for the two that no static assertion can carry.
+
+Four follow-ups were filed rather than fixed here: items 223–226.
+
+### 220. Deny-by-default at table and column granularity: a `Policy` allow-list with no allow-all fallback ✅ DONE
+
+**Effort: M. Blocks item 215.** Owner decision, 2026-08-23.
+
+**Why it matters:** `Policy.table_allowed` returns `True` when `allowed_tables`
+is empty, and `column_allowed` follows the same convention — **an empty
+allow-list means allow-everything**. `denied_tables` has no wildcard. So the
+only deny-all lever in the model today is `Policy.enabled = False`, which is
+all-or-nothing: the moment an operator enables a connection to run their first
+query, every table and column on it is readable up to the numeric caps. That is
+the opposite of what a new install should do, and it makes the "safe-by-default
+starter policy" item 215 promises literally inexpressible. It is also a poor
+default for a product whose entire pitch is that it governs *what a query is
+allowed to be*.
+
+**What it is:**
+- A `Policy` field with **no allow-all fallback** — working name
+  `require_explicit_table_allowlist: bool = False` — under which an empty
+  `allowed_tables` means *deny every table* rather than *allow every table*. The
+  same treatment for `allowed_columns`.
+- **Default `False`, so no existing deployment changes behaviour.** This is a
+  new opt-in guarantee, not a silent tightening of everyone's policy — a
+  behaviour flip on an existing security control is exactly the change that
+  breaks a customer at 3am.
+- The shipped starter policy (item 215) sets it `True`, so a fresh install
+  denies until the operator names tables deliberately.
+- **Both branches mutation-verified.** Per CLAUDE.md's working agreement:
+  break the empty-allow-list branch in each direction and confirm a test fails
+  *for that reason*. A swapped boolean here silently opens every table on every
+  connection that opted in, with a green suite — the same class as items 101 and
+  114.
+- Documented in `examples/policy.example.yaml` (whose comments currently
+  concede the shipped default is permissive) and in the policy section of
+  `docs/PRODUCT_GUIDE.md`.
+
+**Definition of done:** `security-invariant-check` clean; a test that an
+existing policy with an empty allow-list and the flag unset still allows (no
+behaviour change), and one that the same policy with the flag set denies; both
+mutation-verified; `examples/policy.example.yaml` and the product guide updated.
+
+**Shipped 2026-08-28.** `Policy.require_explicit_allowlist` (default `False`)
+flips an empty `allowed_tables` from allow-everything to deny-everything, and an
+absent `allowed_columns` entry from allow-every-column to deny-every-column.
+`denied_*` still wins over `allowed_*`, and the `"*"` column wildcard still works
+under the flag — an operator who wants deny-by-default at the table level but not
+the column level is the common case, and a flag that forbids it is one nobody
+turns on.
+
+**The default is the load-bearing half.** Flipping the meaning of a live security
+control under every existing deployment is the change that breaks a customer at
+3am, so this is a new opt-in guarantee, not a silent tightening. Ten tests split
+across both halves: that an existing policy with an empty allow-list and the flag
+unset still allows, and that the same policy with the flag set denies.
+
+**Three mutations, each verified to fail for its own reason** (a swapped boolean
+here silently opens every table on every connection that opted in, with a green
+suite — the item 101/114 class): inverting the table branch fails 2 tests,
+inverting the column branch fails 1, and flipping the default to `True` fails 3.
+
+**Caught by an existing guard, not by me:**
+`test_every_guardrail_direction_is_either_obvious_or_reviewed` refused the new
+field because its name does not say whether a higher value is looser or stricter.
+It is now in `INVERTED_GUARDRAIL_FIELDS` (`True` is the *tighter* posture) and in
+`_DIRECTION_REVIEWED_GUARDRAILS`. Without that, `admin/access_diff.py` would have
+reported a deny-by-default cutover as a **loosening** — precisely the review an
+operator would be relying on.
+
+Documented in `examples/policy.example.yaml` (which now sets it `true` on the
+demo connection) and in the `PRODUCT_GUIDE.md` Decision Log.
+
+### 227. ClusterFuzzLite coverage is shallow because pydantic-core is native ✅ DONE
+
+**Effort: S.** Found while verifying the ClusterFuzzLite integration added in
+`chore(supply-chain)` (2026-09-01), not by a reviewer — the fuzzer was green and
+the defect was only visible in its coverage counter.
+
+**Why it matters:** `fuzz/fuzz_structured_query.py` targets
+`StructuredQuery.model_validate`, which dispatches almost immediately into
+`pydantic-core`. That is compiled Rust; Atheris instruments Python bytecode and
+cannot see inside it. **Measured:** 2,745,141 executions plateaued at **31
+coverage features**, and the coverage-guided search therefore degrades towards
+blind random input. A clean run currently means "no crash on random bytes", not
+"the input space was explored" — and the danger is that a green fuzzing badge
+gets read as the stronger claim. (Rewiring instrumentation does not fix this:
+replacing `instrument_all()` with `instrument_imports()` was measured *worse*,
+2 features, with libFuzzer warning the target looked uninstrumented.)
+
+**Definition of done:** at least one additional fuzz target whose work happens
+in *Python*, where coverage feedback is real — the strongest candidates are
+`validation/policy_validation.py` (pure Python, operates on an already-built
+AST, and is a genuine enforcement boundary) and
+`compiler/sqlalchemy_compiler.py` fed a valid AST. Report the coverage-feature
+count for each target in the PR so the improvement is measured rather than
+asserted, and keep the existing model target — its value is crash-resistance on
+hostile bytes, which is real even with weak coverage. Update the honest-limit
+comment at the top of `fuzz/fuzz_structured_query.py` and Appendix C of
+an internal publication plan once the numbers change.
+
+**How it shipped (2026-09-03), and the first attempt was wrong.**
+
+The item's premise — target Python code, get real coverage feedback — was
+correct in principle and insufficient in practice. `fuzz_policy_validation.py`
+targets `validate_structural_caps`: pure Python, a real enforcement point
+(`max_cte_count`, `max_subquery_depth`), no I/O. 18,128 functions instrumented.
+It still measured **29 features over 10,993,940 executions** — no better than
+the Rust-bound target it was written to beat.
+
+The validator was not invisible; it was **unreachable**. Random bytes
+essentially never satisfy the `StructuredQuery` model, so the fuzzer never got
+past the gate and the corpus stalled at five inputs totalling seven bytes. Every
+execution died at JSON or model validation.
+
+`fuzz/make_seed_corpus.py` generates ten validated ASTs — simple, aggregate,
+CTE-bearing and depth-nested — zipped to
+`$OUT/fuzz_policy_validation_seed_corpus.zip` at build time, so the fuzzer starts
+*inside* the boundary and mutates outward.
+
+    fuzz_structured_query (pydantic-core bound)     31 features
+    fuzz_policy_validation, no seed corpus          29 features
+    fuzz_policy_validation, WITH seed corpus       377 features   (13x)
+
+Seeded, the corpus grows to 39 inputs / 8.9 KB and is still finding new coverage
+at 4.6M executions. No crashes.
+
+**Two packaging defects found on the way, both silent:**
+
+1. `ModuleNotFoundError: No module named 'examples'` at startup.
+   `querygate.policy.models` transitively pulls `core/config.py`, which resolves
+   the `examples` package through `importlib.resources` at MODULE scope —
+   invisible to PyInstaller's static analysis. The binary died before libFuzzer
+   ever ran, which reports as "no crashes" forever. `build.sh` now passes
+   `--collect-data examples --hidden-import examples`.
+2. Both targets' `--selftest` corpora used `"from"` where the AST field is
+   `"from_table"`, so every input was rejected at the model gate and the
+   selftests passed while exercising nothing below it — the same
+   unreachable-subject failure as the main finding, one layer up.
+
+**Standing rule for this target:** if you change it, re-measure. A fuzz target
+that cannot reach its subject reports success indefinitely.
+
+### 228. Microsoft ODBC driver redistribution in a PUBLIC image ✅ DONE
+
+**Effort: S to remove the question; M to answer it. BLOCKS the first public
+image release.** Found 2026-09-02 while reconciling `docs/CONTAINER_IMAGE_LICENCES.md`
+to the Apache-2.0 transition.
+
+**Why it matters:** the shipped image installs Microsoft's proprietary
+`msodbcsql18` under `ACCEPT_EULA=Y`. Under the cancelled proprietary model this
+was tolerable because two things were true at once: the EULA carried a
+Third-party components pass-through, and `LICENSE` meant nobody without an Order
+had any licence to use the image at all — so the pass-through reached every
+lawful user and nobody else.
+
+**Apache-2.0 removes both.** It has no pass-through clause and no mechanism to
+bind a downstream recipient to another vendor's terms, and a public image can be
+pulled by anyone, including people who agreed to nothing. Microsoft's §2(b)(ii)
+("require distributors and external end users to agree to terms that protect it
+and Microsoft at least as much as this agreement") went from *partly met* to
+*not met*, and §2(b)(iii)'s indemnity running to Microsoft was never addressed
+under any model.
+
+**Definition of done — pick one, cheapest first:**
+
+1. **Make the default image driver-free** and ship MSSQL support as a separate,
+   clearly-labelled variant, so the default artifact carries no third-party
+   proprietary binary. Removes the question rather than answering it.
+2. **Document `apt-get install msodbcsql18` as an operator step**, so whoever
+   accepts `ACCEPT_EULA=Y` is whoever installs it. Also removes the question,
+   at the cost of a less turnkey MSSQL install.
+3. **Get the redistribution and indemnity position reviewed by counsel** before
+   publishing an image containing the driver. Answers it, and costs money.
+
+Either way, ship a `THIRD_PARTY_NOTICES` file **inside the image** — `Dockerfile`
+already `COPY`s `LICENSE`, so this is the same shape and is not done. Necessary
+under any option, sufficient under none.
+
+**Do not publish the container image until this is closed.** The repository and
+the wheel are unaffected; this is a container-artifact blocker only.
+
+**How it shipped (2026-09-02):** option 1 — the question was removed rather than
+answered. `msodbcsql18` moved out of the default image into an opt-in
+`production-mssql` target. The party who accepts `ACCEPT_EULA=Y` and the party
+who installs the driver are the same person again, so §2(b)(ii) has nobody left
+to reach and §2(b)(iii)'s indemnity is not triggered by a distribution that does
+not happen. `scripts/check_release_artifacts.py` slices the default stage out of
+the Dockerfile and fails on an `apt-get install … msodbcsql18` there —
+mutation-verified, and keyed on the install command rather than the package name
+because the opt-in stage's own comment names the package and a naive substring
+check flagged that comment on its first run.
+
+**The gotcha that nearly shipped this broken, recorded because it is silent:**
+`docker build .` with no `--target` builds the **last** stage in the file.
+Appending `production-mssql` at the end therefore made *it* the default, so the
+"driver-free" image still contained the driver. `docker build --check` parsed
+happily and the release-artifact guard passed, because both inspect the
+Dockerfile rather than the built image — the only thing that caught it was
+running the image and looking inside. A trailing one-line `FROM production AS
+default` stage now guarantees the last stage is the driver-free one. Verified on
+the real image: 0 `msodbcsql18` packages, no `/opt/microsoft`, 576MB vs 588MB.
+
+**Accepted cost:** MSSQL users build one extra line instead of pulling a turnkey
+image. A real convenience regression for one of three supported dialects, taken
+over redistributing a proprietary binary to anyone who runs `docker pull`.
+
+### 230. The shipped image generated an admin key that nothing accepted ✅ DONE
+
+**Effort: S. CRITICAL — the one-command install was unusable.** Found
+2026-09-05 by CI on PR #45, and only after the release smoke was fixed to
+authenticate.
+
+**What was broken:** item 215 correctly closed the anonymous bypass for
+`is_hardened_image`, and `bootstrap.first_boot` correctly generated an admin API
+key, wrote it to `/app/var/admin-api-key` at mode 0600, and logged "Copy it now
+and store it in your secret manager". **Nothing ever put that key into
+`cfg.api_keys`.** `read_admin_key` existed, documented itself as "used to
+satisfy production auth", and had unit tests — with no production caller.
+
+So `docker run <registry>/querygate:latest`, the install this product's README
+and `docs/INSTALL.md` both lead with, produced a deployment whose
+`ApiKeyAuthenticator` held an empty key list. Every authenticated request
+returned 401 forever, while the startup log told the operator to copy a key that
+could never work.
+
+**Why nothing caught it:** the release smoke sent no credential on any of its
+nine API calls, so it never exercised authentication at all. Two defects
+concealing each other — the smoke could not fail on auth because it never
+attempted it, and the missing wiring could not surface because nothing
+authenticated. Fixing the smoke exposed the real bug within one CI run.
+
+**The fix:** first boot now runs in `create_app` rather than the lifespan, and
+the key it generates is merged into `api_keys` before
+`build_principal_dependency` reads them. Ordering is the whole fix: the lifespan
+runs when the server starts serving, but the authenticator is constructed during
+`create_app`, so a key generated in the lifespan is always too late.
+
+**Regression test:** `test_the_generated_admin_key_actually_authenticates`
+drives the real app — 401 unauthenticated, 200 with the generated key.
+Mutation-verified: removing the wiring fails it.
+
+**One trap the test documents, because it wasted a debugging cycle:** the
+repository's own `.env` sets `API_KEYS='["admin"]'` and `AppConfig` is a
+`BaseSettings` that reads it. Under that value the operator-supplied key wins,
+first boot's key is never consulted, and a hand-check of the fix passes while
+proving nothing. The test forces `API_KEYS=[]` to reproduce the container.

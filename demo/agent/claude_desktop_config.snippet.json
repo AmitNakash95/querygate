@@ -1,0 +1,27 @@
+{
+  "_comment": "Claude Desktop bridges both servers through mcp-remote (already cached in this machine's npx cache, so it works offline). The explicit 5591/5592 are OAuth callback ports \u2014 passed positionally because mcp-remote reads argv[1] as the port; leaving a flag there makes it NaN. Merge the mcpServers block into ~/Library/Application Support/Claude/claude_desktop_config.json and restart Claude Desktop.",
+  "mcpServers": {
+    "unsafe-postgres": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "http://127.0.0.1:8811/mcp",
+        "5591",
+        "--allow-http"
+      ]
+    },
+    "querygate": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "http://127.0.0.1:8010/mcp",
+        "5592",
+        "--allow-http",
+        "--header",
+        "Authorization: Bearer pitch-demo-key"
+      ]
+    }
+  }
+}
