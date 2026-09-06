@@ -31,8 +31,15 @@ permissions:
 env:
   # GHCR path is derived from the repo automatically and lowercased by
   # docker/metadata-action. For AGitmit/QueryGate this resolves to
-  # ghcr.io/agitmit/querygate.
-  IMAGE: ghcr.io/${{ github.repository }}
+  # ghcr.io/amitnakash95/querygate.
+  # LOWERCASED at use time. An OCI reference must be lowercase, and
+  # `github.repository` preserves the owner's capitalisation
+  # (`AmitNakash95/querygate`). The push succeeded anyway because
+  # docker/metadata-action lowercases what it emits, which HID the problem:
+  # `cosign sign` then received the RAW value and failed with "could not parse
+  # reference" AFTER the image was already published. Measured on v0.2.0; a
+  # lowercase owner would never have hit this.
+  IMAGE_RAW: ghcr.io/${{ github.repository }}
 
 jobs:
   publish:
@@ -45,6 +52,13 @@ jobs:
       attestations: write # SLSA build-provenance attestation
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # An OCI reference must be lowercase; `github.repository` keeps the owner's
+      # capitalisation. Computed once here so every consumer — metadata-action,
+      # cosign, and the provenance attestation — uses the same lowercased value.
+      - name: Lowercase the image reference
+        run: |
+          echo "IMAGE=$(printf '%s' "$IMAGE_RAW" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
 
       # Fail fast if the tag (e.g. v0.1.0) doesn't match the version baked into
       # the package/pyproject. scripts/check_release.py already asserts
@@ -73,8 +87,8 @@ jobs:
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       # Compute the image tags + OCI labels from the git tag.
-      #   ghcr.io/agitmit/querygate:0.1.0   (exact version)
-      #   ghcr.io/agitmit/querygate:latest  (only on a non-prerelease tag)
+      #   ghcr.io/amitnakash95/querygate:0.2.0   (exact version)
+      #   ghcr.io/amitnakash95/querygate:latest  (only on a non-prerelease tag)
       - name: Compute image tags and labels
         id: meta
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
@@ -134,7 +148,7 @@ jobs:
       # Keyless signature (Sigstore) bound to this workflow's OIDC identity and
       # recorded in the public transparency log. A customer can later verify the
       # image really came from this repo's release workflow with:
-      #   cosign verify ghcr.io/agitmit/querygate:0.1.0 \
+      #   cosign verify ghcr.io/amitnakash95/querygate:0.2.0 \
       #     --certificate-identity-regexp 'https://github.com/AGitmit/QueryGate/.github/workflows/release.yml@.*' \
       #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
       - name: Sign the image with cosign (keyless)
@@ -149,7 +163,7 @@ jobs:
       # in GitHub's attestations API. This is the "SLSA provenance" half of the
       # signed-delivery gate (the cosign step above is the signing half). A
       # consumer verifies it by immutable digest with:
-      #   gh attestation verify oci://ghcr.io/agitmit/querygate@<digest> \
+      #   gh attestation verify oci://ghcr.io/amitnakash95/querygate@<digest> \
       #     --repo AGitmit/QueryGate
       - name: Attest SLSA build provenance
         uses: actions/attest-build-provenance@ef244123eb79f2f7a7e75d99086184180e6d0018 # v1
