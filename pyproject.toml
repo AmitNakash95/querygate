@@ -65,38 +65,38 @@ python = "^3.11"
 # pydantic ecosystem relaxed from exact pins to floors so the security-driven
 # fastapi/mcp bumps below (TODO item 30 phase 2) can resolve a compatible set.
 pydantic = ">=2.11.5"
-pydantic-settings = ">=2.9.1"
+pydantic-settings = ">=2.15.0"
 pydantic-core = ">=2.33.2"
-SQLAlchemy = "2.0.41"
-greenlet = "3.0.3"
-pyodbc = "^5.2.0"
+SQLAlchemy = "2.0.52"
+greenlet = "3.5.5"
+pyodbc = "^5.3.0"
 aioodbc = "0.5.0"
-uvicorn = ">=0.29.0"
+uvicorn = ">=0.52.4"
 # fastapi >=0.119 supports Starlette 1.x; required to pull the CVE-fixed
 # starlette >=1.3.1 (TODO item 30 phase 2 dependency remediation).
-fastapi = ">=0.119.0"
-starlette = ">=1.3.1"
-python-dotenv = ">=1.2.2"
-asyncpg = "^0.30.0"
+fastapi = ">=0.141.1"
+starlette = ">=1.6.0"
+python-dotenv = ">=1.2.3"
+asyncpg = "^0.31.0"
 # mcp >=2.0.0 (TODO item 128): the `2026-07-28` protocol revision, `MCPServer`
 # (formerly `FastMCP`) SDK. Also carries forward the CVE-2025-66416 /
 # CVE-2026-52869 / CVE-2026-59950 fixes from the 1.28.1 floor it replaces.
-mcp = ">=2.0.0"
+mcp = ">=2.1.1"
 httpx = "^0.28.1"
 loguru = "^0.7.3"
 PyYAML = "^6.0"
-prometheus-client = "^0.25.0"
+prometheus-client = "^0.26.0"
 pyjwt = {extras = ["crypto"], version = "^2.13.0"}
 # Direct dependency (TODO item 47 phase 2): encrypted-at-rest config draft
 # store (admin/draft_store.py) uses Fernet directly. Previously only reached
 # transitively via pyjwt[crypto] — declared explicitly so a future pyjwt
 # change can't silently drop it out from under a production import.
-cryptography = ">=44.0.1"
-redis = "^8.0.1"
+cryptography = ">=50.0.1"
+redis = "^8.1.0"
 hvac = "^2.4.0"
 defusedxml = "^0.7.1"
-asyncmy = "^0.2.11"
-boto3 = "^1.43.65"
+asyncmy = "^0.2.14"
+boto3 = "^1.43.87"
 
 [tool.poetry.group.dev.dependencies]
 # Test stack floored at CVE-fixed versions (pytest PYSEC-2026-1845); pytest 9
@@ -105,13 +105,13 @@ pytest = ">=9.0.3"
 pytest-asyncio = ">=1.0.0"
 pytest-mock = ">=3.14.0"
 black = ">=26.3.1"
-fakeredis = "^2.36.2"
+fakeredis = "^2.37.1"
 lupa = "^2.8"
 pytest-cov = ">=6.1.0"
-cyclonedx-bom = "^7.3.0"
+cyclonedx-bom = "^7.3.1"
 pip-audit = "^2.10.1"
 aiosqlite = "^0.22.1"
-hypothesis = "^6.157.0"
+hypothesis = "^6.167.1"
 bandit = "^1.8.0"
 # NOTE: Schemathesis is intentionally NOT a Poetry dependency. Its transitive
 # pins (starlette<1 on 3.x, pytest>=8 on 4.x) conflict with both the runtime
@@ -119,7 +119,7 @@ bandit = "^1.8.0"
 # DAST runs it from its official Docker image instead — like Trivy/gitleaks/
 # Semgrep — so a dev testing tool never constrains the shipped dependency graph.
 # See scripts/run_dast.py and TODO item 89.
-moto = "^5.2.2"
+moto = "^5.2.3"
 # Dev-only, unlike pymysql/aiomysql/pyodbc above (2026-08-06
 # security-invariant-reviewer finding, TODO item 19 phase 2): no module under
 # src/querygate/ imports snowflake.sqlalchemy or snowflake.connector —
