@@ -164,6 +164,13 @@ LICENSE_TIERS: dict[str, str] = {
     "BSD-3-Clause": PERMISSIVE,
     "ISC": PERMISSIVE,
     "MIT": PERMISSIVE,
+    # greenlet, from 3.5.5. It is MIT, except the Stackless-Python-derived
+    # files (`slp_platformselect.h`, `platform/`), which are PSF-2.0 — the
+    # arrangement it has always had, now declared precisely as a PEP 639
+    # `License-Expression` rather than a bare "MIT" classifier. Read both
+    # bundled files (`LICENSE`, `LICENSE.PSF`) in the 3.5.5 wheel on
+    # 2026-09-06. Both halves are already PERMISSIVE in their own right.
+    "MIT AND PSF-2.0": PERMISSIVE,
     "MIT-0": PERMISSIVE,
     "PSF-2.0": PERMISSIVE,
     "Python-2.0": PERMISSIVE,
