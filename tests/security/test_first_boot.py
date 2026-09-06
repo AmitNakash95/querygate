@@ -165,3 +165,56 @@ def test_only_the_admin_service_and_bootstrap_write_connections_yaml():
         "a second connections.yaml writer appeared; every write after first boot "
         f"must go through admin/service.py's stage/apply path: {writers}"
     )
+
+
+def test_the_generated_admin_key_actually_authenticates(tmp_path, monkeypatch):
+    """The key first boot generates must be accepted by the running app.
+
+    **This shipped broken.** Item 215 correctly closed the anonymous bypass for
+    `is_hardened_image`, and first boot correctly generated a key and told the
+    operator to copy it — but nothing ever put that key into `cfg.api_keys`.
+    `read_admin_key` existed, documented itself as "used to satisfy production
+    auth", and had unit tests, yet had no production caller. So
+    `docker run <registry>/querygate:latest` produced a deployment whose
+    `ApiKeyAuthenticator` held an EMPTY key list: every authenticated request
+    401'd forever, while the startup log told the operator to copy a key that
+    could never work.
+
+    Nothing caught it because the release smoke sent no credential at all, so it
+    never exercised auth — two defects that concealed each other. CI found it
+    only once the smoke was fixed to authenticate.
+
+    `API_KEYS` is forced empty here deliberately: the repository's own `.env`
+    sets `API_KEYS='["admin"]'` for local development, and `AppConfig` is a
+    `BaseSettings` that reads it. Under that value the operator-supplied key
+    wins, `first_boot`'s key is never consulted, and this test passes while
+    testing nothing — which is exactly what happened on the first attempt to
+    verify the fix by hand.
+    """
+    from fastapi.testclient import TestClient
+
+    from querygate.api.app import create_app
+    from querygate.core.config import AppConfig
+
+    monkeypatch.setenv("HARDENED_IMAGE", "1")
+    monkeypatch.setenv("API_KEYS", "[]")
+    monkeypatch.setenv("VAR_DIR", str(tmp_path))
+
+    app = create_app(AppConfig())
+    generated = (tmp_path / "admin-api-key").read_text(encoding="utf-8").strip()
+    assert generated, "first boot generated no admin key in a hardened image"
+
+    with TestClient(app) as client:
+        anonymous = client.get("/api/v1/connections")
+        assert anonymous.status_code == 401, (
+            "the hardened image must not serve an unauthenticated caller; "
+            f"got {anonymous.status_code}"
+        )
+        authenticated = client.get(
+            "/api/v1/connections", headers={"Authorization": f"Bearer {generated}"}
+        )
+        assert authenticated.status_code == 200, (
+            "the key first boot generated was refused by the app it configures — "
+            f"got {authenticated.status_code}. The one-command install is unusable "
+            "when this fails."
+        )

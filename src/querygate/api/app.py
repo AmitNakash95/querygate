@@ -49,6 +49,34 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
     """Build and return the configured FastAPI application."""
     conf = cfg or default_config
 
+    # First boot runs HERE, not in the lifespan, and the key it generates is
+    # wired into `api_keys` before `build_principal_dependency` reads them.
+    #
+    # This was a critical defect in the shipped image (TODO.md item 230). Item
+    # 215 correctly closed the anonymous bypass for `is_hardened_image`, and
+    # first boot correctly generated an admin key and told the operator to copy
+    # it — but nothing ever added that key to `cfg.api_keys`. `read_admin_key`
+    # existed, said in its own docstring that it was "used to satisfy production
+    # auth", and had unit tests, yet had no production caller.
+    #
+    # The result: `docker run <registry>/querygate:latest` produced a deployment
+    # whose ApiKeyAuthenticator held an EMPTY key list, so every authenticated
+    # request 401'd forever while the startup log told the operator to copy a key
+    # that would never work. The one-command install was unusable.
+    #
+    # Ordering is the whole fix: the lifespan runs when the server starts
+    # serving, but `build_principal_dependency(conf)` runs during create_app, so
+    # a key generated in the lifespan is always too late.
+    _first_boot_result = None
+    if conf.is_hardened_image:
+        from querygate.bootstrap import first_boot, read_admin_key
+
+        _first_boot_result = first_boot(Path(conf.var_dir))
+        if not conf.api_keys:
+            _admin_key = read_admin_key(Path(conf.var_dir))
+            if _admin_key:
+                conf = conf.model_copy(update={"api_keys": [_admin_key]})
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         log = get_logger()
@@ -60,10 +88,8 @@ def create_app(cfg: Optional[AppConfig] = None) -> FastAPI:
         # a replica and a crash-loop all reach the same state without
         # regenerating — silently rotating a key on a rebuilt image would turn a
         # routine upgrade into an unplanned re-activation.
-        if conf.is_hardened_image:
-            from querygate.bootstrap import first_boot
-
-            result = first_boot(Path(conf.var_dir))
+        if conf.is_hardened_image and _first_boot_result is not None:
+            result = _first_boot_result
             if result.is_first_boot:
                 log.info("querygate.first_boot", seeded=list(result.seeded))
                 if result.generated_admin_key:
