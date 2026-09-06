@@ -30,7 +30,8 @@ This report and the CycloneDX SBOM in `dist/` can name the same licence differen
 | ISC | 1 |
 | LGPL-2.0-or-later | 1 |
 | MIT | 59 |
-| MIT-0 | 2 |
+| MIT AND PSF-2.0 | 1 |
+| MIT-0 | 1 |
 | MPL-2.0 | 4 |
 | PSF-2.0 | 3 |
 
@@ -93,20 +94,20 @@ MySQL client libraries are a well-known copyleft trap: `mysqlclient` and `mysql-
 | `annotated-types` | 0.7.0 | MIT |
 | `anyio` | 4.14.2 | MIT |
 | `async-timeout` | 5.0.1 | Apache-2.0 ᵈ |
-| `asyncmy` | 0.2.11 | Apache-2.0 |
-| `asyncpg` | 0.30.0 | Apache-2.0 |
+| `asyncmy` | 0.2.14 | Apache-2.0 |
+| `asyncpg` | 0.31.0 | Apache-2.0 |
 | `attrs` | 25.4.0 | MIT |
-| `boto3` | 1.43.65 | Apache-2.0 |
-| `botocore` | 1.43.65 | Apache-2.0 |
+| `boto3` | 1.43.87 | Apache-2.0 |
+| `botocore` | 1.43.89 | Apache-2.0 |
 | `certifi` | 2026.6.17 | MPL-2.0 |
 | `cffi` | 2.1.0 | MIT-0 |
 | `charset-normalizer` | 3.4.9 | MIT |
 | `click` | 8.4.2 | BSD-3-Clause |
 | `colorama` | 0.4.6 | BSD ᵈ |
-| `cryptography` | 50.0.0 | Apache-2.0 OR BSD-3-Clause |
+| `cryptography` | 50.0.1 | Apache-2.0 OR BSD-3-Clause |
 | `defusedxml` | 0.7.1 | PSF-2.0 |
-| `fastapi` | 0.139.2 | MIT |
-| `greenlet` | 3.0.3 | MIT |
+| `fastapi` | 0.141.1 | MIT |
+| `greenlet` | 3.5.5 | MIT AND PSF-2.0 |
 | `h11` | 0.16.0 | MIT |
 | `httpcore` | 1.0.9 | BSD-3-Clause |
 | `httpcore2` | 2.9.1 | BSD-3-Clause |
@@ -118,35 +119,35 @@ MySQL client libraries are a well-known copyleft trap: `mysqlclient` and `mysql-
 | `jsonschema` | 4.26.0 | MIT |
 | `jsonschema-specifications` | 2025.9.1 | MIT |
 | `loguru` | 0.7.3 | MIT |
-| `mcp` | 2.0.0 | MIT |
-| `mcp-types` | 2.0.0 | MIT |
+| `mcp` | 2.1.1 | MIT |
+| `mcp-types` | 2.1.1 | MIT |
 | `opentelemetry-api` | 1.44.0 | Apache-2.0 |
-| `prometheus-client` | 0.25.0 | Apache-2.0 AND BSD-2-Clause |
+| `prometheus-client` | 0.26.0 | Apache-2.0 AND BSD-2-Clause |
 | `pycparser` | 3.0 | BSD-3-Clause |
 | `pydantic` | 2.13.4 | MIT |
 | `pydantic-core` | 2.46.4 | MIT |
-| `pydantic-settings` | 2.9.1 | MIT |
+| `pydantic-settings` | 2.15.0 | MIT |
 | `pyjwt` | 2.13.0 | MIT |
-| `pyodbc` | 5.2.0 | MIT-0 |
+| `pyodbc` | 5.3.0 | MIT |
 | `python-dateutil` | 2.9.0.post0 | Apache-2.0 OR BSD |
-| `python-dotenv` | 1.2.2 | BSD-3-Clause |
+| `python-dotenv` | 1.2.3 | BSD-3-Clause |
 | `python-multipart` | 0.0.32 | Apache-2.0 |
 | `pywin32` | 312 | PSF-2.0 ᵈ |
 | `pyyaml` | 6.0.3 | MIT |
-| `redis` | 8.0.1 | MIT |
+| `redis` | 8.1.0 | MIT |
 | `referencing` | 0.37.0 | MIT |
 | `requests` | 2.34.2 | Apache-2.0 |
 | `rpds-py` | 2026.6.3 | MIT |
 | `s3transfer` | 0.19.2 | Apache-2.0 |
 | `six` | 1.17.0 | MIT |
-| `sqlalchemy` | 2.0.41 | MIT |
+| `sqlalchemy` | 2.0.52 | MIT |
 | `sse-starlette` | 3.0.3 | BSD-3-Clause |
-| `starlette` | 1.3.1 | BSD-3-Clause |
+| `starlette` | 1.6.0 | BSD-3-Clause |
 | `truststore` | 0.10.4 | MIT |
 | `typing-extensions` | 4.16.0 | PSF-2.0 |
 | `typing-inspection` | 0.4.2 | MIT |
 | `urllib3` | 2.7.0 | MIT |
-| `uvicorn` | 0.51.0 | BSD-3-Clause |
+| `uvicorn` | 0.52.4 | BSD-3-Clause |
 | `win32-setctime` | 1.2.0 | MIT ᵈ |
 
 ## Not redistributed (development, test, and CI tooling)
@@ -162,9 +163,9 @@ MySQL client libraries are a well-known copyleft trap: `mysqlclient` and `mysql-
 | `cachecontrol` | 0.14.4 | Apache-2.0 |
 | `chardet` | 5.2.0 | LGPL-2.0-or-later |
 | `coverage` | 7.15.2 | Apache-2.0 |
-| `cyclonedx-bom` | 7.3.0 | Apache-2.0 |
+| `cyclonedx-bom` | 7.3.1 | Apache-2.0 |
 | `cyclonedx-python-lib` | 11.11.0 | Apache-2.0 |
-| `fakeredis` | 2.36.2 | BSD-3-Clause |
+| `fakeredis` | 2.37.1 | BSD-3-Clause |
 | `filelock` | 3.31.0 | MIT |
 | `fqdn` | 1.5.1 | MPL-2.0 |
 | `google-api-core` | 2.34.0 | Apache-2.0 |
@@ -176,7 +177,7 @@ MySQL client libraries are a well-known copyleft trap: `mysqlclient` and `mysql-
 | `googleapis-common-protos` | 1.75.1 | Apache-2.0 |
 | `grpcio` | 1.83.0 | Apache-2.0 |
 | `grpcio-status` | 1.83.0 | Apache-2.0 |
-| `hypothesis` | 6.157.0 | MPL-2.0 |
+| `hypothesis` | 6.167.1 | MPL-2.0 |
 | `iniconfig` | 2.1.0 | MIT |
 | `isoduration` | 20.11.0 | ISC |
 | `jsonpointer` | 3.1.1 | BSD-3-Clause |
@@ -187,7 +188,7 @@ MySQL client libraries are a well-known copyleft trap: `mysqlclient` and `mysql-
 | `markdown-it-py` | 4.2.0 | MIT |
 | `markupsafe` | 3.0.3 | BSD-3-Clause |
 | `mdurl` | 0.1.2 | MIT |
-| `moto` | 5.2.2 | Apache-2.0 |
+| `moto` | 5.2.3 | Apache-2.0 |
 | `msgpack` | 1.2.1 | Apache-2.0 |
 | `mypy-extensions` | 1.1.0 | MIT |
 | `packageurl-python` | 0.17.6 | MIT |
