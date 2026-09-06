@@ -72,6 +72,12 @@
       <nav id="domain-tabs" class="domain-tabs" role="tablist" aria-label="Domain sections" hidden></nav>
       <p id="domain-release-note" class="domain-release" hidden></p>
 
+      <!-- The live region is visually hidden and carries ONLY the announcement
+           text. The visible banner sits outside it, because role="status" is
+           implicitly aria-atomic: with the collapse/expand controls inside,
+           every toggle re-announced the whole banner. -->
+      <p id="renewal-announcement" class="sr-only" role="status"></p>
+
       <div id="global-banner" class="banner" role="status" hidden></div>
 
       <section id="view-overview" class="view active" data-view="overview">
@@ -595,15 +601,48 @@
   </div>
 
   <dialog id="auth-dialog" class="auth-dialog" aria-labelledby="auth-title">
+    <div class="dialog-brand"><img class="brand-wordmark" src="/admin/logo-wordmark.svg" alt="QueryGate;"></div>
+    <p class="eyebrow">Administrator session</p>
+    <h2 id="auth-title">Connect to the control plane</h2>
+    <p id="sso-notice" class="form-error" role="alert" hidden></p>
+
+    <div id="sso-block" hidden>
+      <p>Sign in with your organisation's identity provider. What you can do here is decided by your group membership, not by this page.</p>
+      <div id="sso-providers" class="sso-providers"></div>
+      <form id="local-login-form" hidden autocomplete="on">
+        <label><span>Username</span><input id="local-username" type="text" autocomplete="username" required></label>
+        <label><span>Password</span><input id="local-password" type="password" autocomplete="current-password" required></label>
+        <label><span>Authentication code <small>(if enrolled)</small></span><input id="local-totp" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]*" maxlength="6" placeholder="123456"></label>
+        <p id="local-error" class="form-error" role="alert" hidden></p>
+        <button class="button primary wide" type="submit">Sign in</button>
+      </form>
+      <p class="auth-divider"><span>or use a bearer token</span></p>
+    </div>
+
     <form id="auth-form" method="dialog">
-      <div class="dialog-brand"><img class="brand-wordmark" src="/admin/logo-wordmark.svg" alt="QueryGate;"></div>
-      <p class="eyebrow">Administrator session</p>
-      <h2 id="auth-title">Connect to the control plane</h2>
-      <p>Use a bearer token with <code>admin:config:read</code> to inspect and simulate, and <code>admin:config:write</code> to edit, validate, stage, and activate changes.</p>
+      <p id="token-intro">Use a bearer token with <code>admin:config:read</code> to inspect and simulate, and <code>admin:config:write</code> to edit, validate, stage, and activate changes.</p>
       <label><span>Bearer token</span><input id="auth-token" type="password" autocomplete="off" required placeholder="Paste token"></label>
       <p id="auth-error" class="form-error" role="alert" hidden></p>
       <button class="button primary wide" type="submit">Connect securely</button>
       <small>The token is kept only in memory for this session — it is cleared when you close or reload the tab, and is never written to browser storage or a configuration document. It is sent only in the Authorization header.</small>
+    </form>
+  </dialog>
+
+  <dialog id="device-dialog" class="auth-dialog" aria-labelledby="device-title">
+    <form id="device-form" method="dialog">
+      <p class="eyebrow">Device sign-in request</p>
+      <h2 id="device-title">Approve this tool?</h2>
+      <p>A tool is asking to act as you. It will receive a short-lived token carrying <strong>your</strong> identity, limited to the scopes you already hold — it can never gain more than you have. Approve only if you started this.</p>
+      <dl class="device-summary">
+        <dt>Tool</dt><dd id="device-client">—</dd>
+        <dt>Code</dt><dd id="device-code">—</dd>
+        <dt>Requesting</dt><dd id="device-scopes">—</dd>
+      </dl>
+      <p id="device-error" class="form-error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button class="button" type="button" id="device-deny">Deny</button>
+        <button class="button primary" type="button" id="device-approve">Approve</button>
+      </div>
     </form>
   </dialog>
 

@@ -238,3 +238,12 @@ __marimo__/
 
 # Generated demo fixtures (Postgres is the supported runnable demo target)
 examples/demo_db/*.db
+demo/.run/
+demo/config/var/
+
+# Control-plane operator config. `config.example.yaml` IS committed; the real
+# one is the operator's and may name their hosts and paths. Secrets are already
+# `${ENV_VAR}` references by construction (settings.py refuses a literal), so
+# this is about not committing someone's infrastructure, not about leaked keys.
+control-plane/config.yaml
+control-plane/*.db

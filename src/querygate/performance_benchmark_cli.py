@@ -5,7 +5,7 @@ instance (default: the local demo database from ``make compose-up``) and
 reports, per scenario, three latency tiers: raw SQL baseline, the in-process
 request pipeline, and a full REST round trip. See
 ``querygate.performance_benchmark`` for methodology and
-``docs/business/PERFORMANCE_BENCHMARK.md`` for the published write-up.
+``docs/benchmarks/PERFORMANCE_BENCHMARK.md`` for the published write-up.
 
 This is informational, not pass/fail — exit code is always 0 on a completed
 run (non-zero only on an error, e.g. no reachable database). Pass
@@ -38,7 +38,7 @@ from querygate.performance_benchmark import (  # noqa: E402
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_MARKDOWN_PATH = _REPO_ROOT / "docs" / "business" / "PERFORMANCE_BENCHMARK_RESULTS.md"
+DEFAULT_MARKDOWN_PATH = _REPO_ROOT / "docs" / "benchmarks" / "PERFORMANCE_BENCHMARK_RESULTS.md"
 
 
 def _row(*cols: str) -> str:
@@ -85,7 +85,7 @@ def _print_report(report: PerformanceBenchmarkReport) -> None:
     )
     print(
         "\nAll figures are wall-clock milliseconds, in-process (ASGI transport, no real\n"
-        "socket/TLS). See docs/business/PERFORMANCE_BENCHMARK.md for methodology."
+        "socket/TLS). See docs/benchmarks/PERFORMANCE_BENCHMARK.md for methodology."
     )
 
 

@@ -16,6 +16,7 @@ from redis.exceptions import RedisError
 from querygate.core.exceptions import DisclosureBudgetExceededError
 from querygate.execution.disclosure_budget import KIND_SHAPE, KIND_TABLE
 from querygate.execution.redis_disclosure_budget import (
+    _RESERVE_SCRIPT,
     RedisDisclosureBudgetLimiter,
     _redis_key,
 )
@@ -175,3 +176,73 @@ async def test_retry_after_counts_down_as_the_window_ages(redis_client):
     with pytest.raises(DisclosureBudgetExceededError) as excinfo:
         await lim.reserve([(KEY_SHAPE, 1, KIND_SHAPE, 1)], window_seconds=600, now=400.0)
     assert excinfo.value.retry_after_seconds == 300
+
+
+# ---------------------------------------------------------------------------
+# Redis Cluster safety (TODO.md item 192)
+# ---------------------------------------------------------------------------
+
+
+def _hash_tag(key: str) -> str:
+    """The span Redis Cluster actually hashes: between the first `{` and the
+    first `}` after it. An empty span means Redis ignores the tag and hashes the
+    whole key — which is the failure this guard exists to catch."""
+    open_at = key.find("{")
+    if open_at < 0:
+        return ""
+    close_at = key.find("}", open_at + 1)
+    if close_at < 0:
+        return ""
+    return key[open_at + 1 : close_at]
+
+
+def test_every_key_one_reserve_call_passes_shares_one_hash_slot():
+    """Item 192. This limiter is the only one that hands SEVERAL keys to one Lua
+    script, so on Redis Cluster they must hash to one slot or the call fails
+    `CROSSSLOT` → `RedisError` → this limiter's fail-CLOSED branch → every
+    aggregate query on a k-floored connection is refused.
+
+    `enforce_disclosure_budget` builds every charge in a single call from its own
+    `connection_id`, so tagging on the connection is sufficient *and* necessary.
+    A source-level assertion because neither `fakeredis` (models no slots) nor a
+    single-node Redis (has exactly one) can observe the bug — the same reason
+    `test_redis_observed_shapes.py` guards its script this way.
+    """
+    charged_in_one_call = [
+        ("demo", "agent", "", "employees", ""),
+        ("demo", "agent", "", "salaries", ""),
+        ("demo", "agent", "", "employees", "shape-a"),
+        ("demo", "agent", "", "salaries", "shape-b"),
+    ]
+    tags = {_hash_tag(_redis_key(key)) for key in charged_in_one_call}
+    assert tags == {"demo"}, f"keys in one script call span several hash slots: {tags}"
+
+
+def test_a_different_connection_gets_a_different_tag():
+    """The tag must be the *connection*, not a constant: a constant would put
+    every deployment's entire budget in one Cluster slot for no reason."""
+    assert _hash_tag(_redis_key(("demo", "a", "", "t", ""))) == "demo"
+    assert _hash_tag(_redis_key(("other", "a", "", "t", ""))) == "other"
+
+
+def test_the_hash_tag_is_never_empty():
+    """Redis ignores an EMPTY `{}` tag and hashes the whole key instead, which
+    silently reinstates the CROSSSLOT bug. Nothing should hand us a blank
+    connection id, but the failure mode is invisible, so it is closed by
+    construction."""
+    assert _hash_tag(_redis_key(("", "a", "", "t", ""))) != ""
+
+
+def test_a_brace_in_a_connection_id_cannot_open_a_second_tag():
+    """Percent-escaping runs inside the braces, so `{`/`}` in an identifier
+    become `%7B`/`%7D` and the first `{...}` span stays the one we wrote."""
+    key = _redis_key(("we{ird}", "a", "", "t", ""))
+    assert _hash_tag(key) == "we%7Bird%7D"
+    assert key.count("{") == 1 and key.count("}") == 1
+
+
+def test_the_script_declares_every_key_it_touches():
+    """Reaching a key built inside Lua via `redis.call` is what Cluster forbids —
+    a worse version of the same bug, and equally invisible to fakeredis."""
+    assert "qg:disclosure" not in _RESERVE_SCRIPT
+    assert "KEYS[i]" in _RESERVE_SCRIPT

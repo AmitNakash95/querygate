@@ -1,0 +1,143 @@
+# QueryGate identity configuration — who may sign in, and what that earns them.
+#
+# Enable with SSO_ENABLED=true and IDENTITY_FILE=identity.yaml. Everything here
+# hot-reloads with POST /api/v1/admin/reload-config: tightening a rule takes
+# effect on the NEXT REQUEST, including for people already signed in.
+#
+# Nothing in this file is a credential except `client_secret`, which should
+# always be a `${ENV_VAR}` (or `${vault:...}`) reference resolved through the
+# same SecretResolver connection strings use — never a literal.
+
+sso:
+  # The public origin a browser reaches QueryGate on. The OIDC redirect_uri is
+  # derived from this, NOT from the inbound request's Host header, so a forged
+  # host cannot steer an authorization code somewhere else. Register
+  # "<base_url>/api/v1/auth/sso/callback" as the redirect URI in your IdP.
+  base_url: "https://querygate.internal.example.com"
+  session_ttl_seconds: 28800        # 8h absolute lifetime
+  session_idle_timeout_seconds: 3600  # signed out after 1h of inactivity
+  login_flow_ttl_seconds: 600       # how long a started login may take
+  default_landing_path: "/admin/"   # must be site-relative
+
+providers:
+  # --- Microsoft Entra ID -------------------------------------------------
+  # App registration → Redirect URI (Web) = <base_url>/api/v1/auth/sso/callback
+  # Token configuration → Add groups claim (Security groups) to emit `groups`
+  # App roles → to emit `roles`. Map the GUIDs below, not display names.
+  - id: entra
+    preset: entra_id
+    tenant: "00000000-0000-0000-0000-000000000000"
+    client_id: "11111111-1111-1111-1111-111111111111"
+    client_secret: "${QG_ENTRA_CLIENT_SECRET}"
+    # Only these email domains may sign in, on top of whatever the IdP allows.
+    allowed_email_domains: ["example.com"]
+
+  # --- Okta ---------------------------------------------------------------
+  # For a custom authorization server, set `issuer` explicitly instead of
+  # `domain` (e.g. https://example.okta.com/oauth2/aus1abc...).
+  # - id: okta
+  #   preset: okta
+  #   domain: "example.okta.com"
+  #   client_id: "0oa1abc..."
+  #   client_secret: "${QG_OKTA_CLIENT_SECRET}"
+  #   subject_prefix: "okta:"   # required once two OIDC providers are enabled
+
+  # --- Keycloak (self-hosted) ---------------------------------------------
+  # - id: keycloak
+  #   preset: keycloak
+  #   domain: "sso.example.com"
+  #   tenant: "querygate"        # the realm name
+  #   client_id: "querygate"
+  #   client_secret: "${QG_KEYCLOAK_CLIENT_SECRET}"
+
+  # --- Amazon Cognito (a two-part issuer) ---------------------------------
+  # - id: cognito
+  #   preset: cognito
+  #   region: "eu-west-1"
+  #   tenant: "eu-west-1_AbCdEf123"   # the user pool id
+  #   client_id: "..."
+  #   client_secret: "${QG_COGNITO_CLIENT_SECRET}"
+
+  # Twenty presets ship: adfs, auth0, authelia, authentik, cloudflare_access,
+  # cognito, entra_id, fusionauth, gitlab, google, jumpcloud, keycloak, okta,
+  # onelogin, ping_identity, pingfederate, salesforce, workos, zitadel — plus
+  # `generic`, where you set `issuer` yourself. `generic` is a first-class path,
+  # not a fallback: use it for any IdP without a preset, including ones whose
+  # issuer needs more than tenant/domain/region (Azure AD B2C, Duo SSO, Curity,
+  # Ory Hydra).
+
+  # --- QueryGate's own development provider --------------------------------
+  # Requires DEV_IDP_ENABLED=true and a local ENVIRONMENT. QueryGate serves the
+  # provider itself at <sso.base_url>/dev-idp, so the real redirect flow runs
+  # with nothing to register anywhere. It vouches for anyone who clicks a
+  # button — never enable it outside local development.
+  #
+  # With no `users:` block, the personas are derived from the mapping rules
+  # below: one per rule, plus one that matches nothing so you can see
+  # deny-by-default working. Add `users:` to define your own.
+  # - id: dev
+  #   kind: dev
+  #   users:
+  #     - sub: dev-admin
+  #       name: "Dev Admin"
+  #       email: dev-admin@localhost
+  #       groups: [platform]
+  #     - sub: dev-keycloak-shaped
+  #       name: "Someone with a nested role claim"
+  #       claims:
+  #         realm_access:
+  #           roles: [querygate-admin]
+
+  # --- QueryGate's own local accounts -------------------------------------
+  # For deployments with no external IdP, and for break-glass access when the
+  # IdP is unreachable. Requires LOCAL_IDP_ENABLED=true; accounts live in
+  # users.yaml and are managed through /api/v1/admin/identity/users.
+  - id: local
+    kind: local
+    display_name: "QueryGate account"
+
+# --- Claim → scope mapping -------------------------------------------------
+# DENY BY DEFAULT. A person who matches no rule signs in successfully and holds
+# ZERO scopes: a known human with no authority. Rules only ever grant, they
+# never revoke, and order does not matter — the result is the union of every
+# rule that matches.
+#
+# `grant_roles` names a bundle from docs/SCOPE_CATALOG.md; `grant_scopes` names
+# individual scopes. Both are validated at load, so a typo fails the reload
+# loudly instead of silently granting nothing.
+mapping:
+  rules:
+    - provider: entra
+      claim: groups                 # Entra security-group object IDs
+      equals: "22222222-2222-2222-2222-222222222222"
+      grant_roles: ["Operator"]
+      description: "Platform on-call"
+
+    - provider: entra
+      claim: roles                  # Entra app roles
+      any_of: ["QueryGate.ConfigGovernor"]
+      grant_roles: ["Config Governor"]
+
+    - provider: entra
+      claim: roles
+      any_of: ["QueryGate.ConfigApprover"]
+      grant_roles: ["Config Approver"]
+      description: "Four-eyes: deliberately a different group from the authors"
+
+    # Keycloak nests realm roles; a dotted claim path reads them.
+    # - provider: keycloak
+    #   claim: realm_access.roles
+    #   any_of: ["querygate-admin"]
+    #   grant_roles: ["Identity Administrator"]
+
+    - provider: local
+      claim: groups                 # groups: [...] in users.yaml
+      equals: "break-glass"
+      grant_roles: ["Operator", "Identity Administrator"]
+
+    # `provider: "*"` applies to every provider — useful for a claim your IdPs
+    # all emit identically.
+    # - provider: "*"
+    #   claim: groups
+    #   any_of: ["data-auditors"]
+    #   grant_roles: ["Compliance Auditor"]

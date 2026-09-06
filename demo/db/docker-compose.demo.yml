@@ -1,0 +1,70 @@
+# Dedicated Postgres 16 instance for the QueryGate partner-demo pitch.
+#
+# Deliberately isolated from the repo root docker-compose.yml:
+#   - different compose project name (querygate-pitch, set via `name:` below)
+#   - different container name (querygate-pitch-db, not querygate-demo-db)
+#   - different named volume (querygate_pitch_db_data)
+#   - different port (127.0.0.1:5544, not 5433)
+#   - different database name (querygate_demo_pitch, not querygate_demo)
+#
+# The machine already runs querygate-querygate-demo-db-1 on 5433 for the
+# regular dev/test workflow (see docker-compose.yml at repo root). That
+# container must not be disturbed by anything in this file. Bring this stack
+# up/down independently with `docker compose -f demo/db/docker-compose.demo.yml ...`
+# or via the `pitch-db-*` Make targets in demo/db/Makefile.include.
+
+name: querygate-pitch
+
+services:
+  querygate-pitch-db:
+    image: postgres:16
+    container_name: querygate-pitch-db
+    restart: unless-stopped
+    # pg_stat_statements must be loaded at server start (shared_preload_libraries)
+    # so the demo control UI can prove "queries executed on your database" per
+    # role by diffing pg_stat_statements counts before/after each scenario.
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_preload_libraries=pg_stat_statements"
+      - "-c"
+      - "pg_stat_statements.track=all"
+    environment:
+      POSTGRES_USER: pitch_owner
+      POSTGRES_PASSWORD: pitch_owner_demo_pw_only
+      POSTGRES_DB: querygate_demo_pitch
+    ports:
+      - "127.0.0.1:5544:5432"
+    volumes:
+      - querygate_pitch_db_data:/var/lib/postgresql/data
+      - ./01_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./02_roles.sql:/docker-entrypoint-initdb.d/02_roles.sql:ro
+# ── Why this database is capped at 2 vCPU ────────────────────────────────────
+# The "an agent can overload your database" act needs the overload to be
+# VISIBLE — unrelated queries must actually get slower while it runs.
+#
+# On an 18-core dev laptop it isn't: a parallel cross join pegs 3 cores and
+# leaves 15 idle, so a concurrent health probe stays flat at ~1ms and the
+# demo's most important visual shows nothing. Measured, not assumed —
+# probe latency was 1.09ms before / 0.87ms during / 1.48ms after.
+#
+# Capping at 2 vCPU is not stagecraft, it is the more honest configuration:
+# real production Postgres instances are sized to their workload (2-8 vCPU is
+# typical), not given 18 idle cores. With the cap, saturation is saturation and
+# the probe reflects what a real user of that database would actually feel.
+# Say this out loud if a technical partner asks — it holds up.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pitch_owner -d querygate_demo_pitch"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  querygate_pitch_db_data:
+    name: querygate_pitch_db_data

@@ -43,6 +43,7 @@ def _bounds() -> WormSearchBounds:
         default_limit=50,
         max_limit=500,
         request_timeout_seconds=20.0,
+        max_query_shape_depth=64,
     )
 
 

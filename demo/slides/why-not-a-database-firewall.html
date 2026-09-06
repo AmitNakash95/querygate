@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QueryGate — Why not a database firewall?</title>
+<meta name="robots" content="noindex,nofollow">
+<meta name="theme-color" content="#101216" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f5f6f8" media="(prefers-color-scheme: light)">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23101216'/%3E%3Ctext x='32' y='42' font-size='28' text-anchor='middle' font-family='Georgia,serif'%3E%3Ctspan fill='%23ffffff'%3EQG%3C/tspan%3E%3Ctspan fill='%23ff9a5c'%3E%3B%3C/tspan%3E%3C/text%3E%3C/svg%3E">
+<!--
+  One slide. Self-contained on purpose: it opens over file:// on a laptop that
+  has never run the demo, and prints to one landscape page.
+  Palette tokens mirror demo/control/static/styles.css.
+
+  Every claim here is answerable from demo/RUNBOOK.md "The hard questions".
+  The competitor column is deliberately written to survive a prospect who runs
+  one of these products: it credits the allow-list mode, credits table/column
+  policy as table stakes, and credits app-user tracking. Do not sharpen it into
+  a strawman — the argument only works if their side is stated fairly.
+-->
+<style>
+:root {
+  --bg: #101216; --bg-raised: #181b20; --bg-inset: #0b0d10;
+  --ink: #f2f3f5; --ink-muted: #aeb6c2; --ink-faint: #8f99a7;
+  --line: #2b3038; --line-strong: #444b56;
+  --accent: #ff9a5c; --good: #68d3a6;
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+  --font-serif: Georgia, "Times New Roman", serif;
+  --font-mono: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+  /* One typographic unit. The viewport terms keep the slide inside a 16:9
+     projector (a unit that grows with width alone runs off the bottom); the
+     rem term is what makes the type respond to page zoom and to the reader's
+     default font size, since vw/vh are invariant under zoom — WCAG 1.4.4. */
+  --u: min(calc(0.28rem + 0.6vw), calc(0.28rem + 0.86vh));
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f5f6f8; --bg-raised: #ffffff; --bg-inset: #e9ebef;
+    --ink: #181b20; --ink-muted: #4e5866; --ink-faint: #5f6977;
+    --line: #d8dce2; --line-strong: #b9c0c9;
+    --accent: #b74700; --good: #16734e;
+    color-scheme: light;
+  }
+  /* Tightest contrast pair in the file: --ink-faint on --bg-inset is 4.66:1,
+     governing the permanently-small .numbers .l text. Lightening either token
+     drops it under WCAG AA. Re-measure before retuning by eye. */
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); }
+body {
+  color: var(--ink);
+  font-family: var(--font-body);
+  line-height: 1.45;
+  min-height: 100vh;
+  display: flex; align-items: center; justify-content: center;
+  padding: clamp(14px, calc(2.2 * var(--u)), 40px);
+}
+.slide {
+  width: min(1400px, 100%);
+  display: flex; flex-direction: column;
+  gap: clamp(10px, calc(1.4 * var(--u)), 26px);
+}
+
+.eyebrow {
+  font-size: clamp(10px, calc(0.95 * var(--u)), 15px);
+  letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--ink-faint); font-weight: 600; margin: 0;
+}
+h1 {
+  font-family: var(--font-serif); font-weight: 400;
+  font-size: clamp(26px, calc(4 * var(--u)), 62px); line-height: 1.05;
+  margin: 0;
+}
+h1 .mark { color: var(--accent); }
+
+.answer {
+  font-size: clamp(15px, calc(1.7 * var(--u)), 26px);
+  line-height: 1.3; margin: 0; max-width: 64ch;
+  color: var(--ink-muted);
+}
+.answer strong { color: var(--ink); font-weight: 600; }
+
+/* ---- the comparison ---- */
+.compare {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: clamp(8px, calc(1.1 * var(--u)), 20px);
+}
+.col {
+  background: var(--bg-raised);
+  /* --line-strong, not --line: on a projector the dark tokens crush together
+     and a 1.3:1 border makes the two cards read as one field. */
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  padding: clamp(11px, calc(1.3 * var(--u)), 24px);
+  display: flex; flex-direction: column; gap: clamp(6px, calc(0.8 * var(--u)), 14px);
+}
+.col.ours { border-color: var(--accent); }
+.col h2 {
+  margin: 0; font-size: clamp(13px, calc(1.28 * var(--u)), 20px);
+  letter-spacing: 0.02em;
+}
+.col.theirs h2 { color: var(--ink-muted); }
+.col.ours h2 { color: var(--accent); }
+.col h2 .expand { font-weight: 400; font-size: 0.8em; color: var(--ink-faint); }
+.col ul { margin: 0; padding: 0; list-style: none; display: grid; gap: clamp(5px, calc(0.7 * var(--u)), 12px); }
+.col li { display: grid; gap: 2px; }
+.k {
+  font-size: clamp(9px, calc(0.76 * var(--u)), 13px); letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--ink-faint); font-weight: 600;
+}
+.v { font-size: clamp(12px, calc(1.04 * var(--u)), 18px); line-height: 1.35; }
+code { font-family: var(--font-mono); font-size: 0.9em; background: var(--bg-inset); padding: 0.1em 0.35em; border-radius: 4px; }
+
+/* ---- honesty + numbers ---- */
+.footer {
+  display: grid; grid-template-columns: 1.6fr 1fr;
+  gap: clamp(8px, calc(1.1 * var(--u)), 20px); align-items: stretch;
+}
+.honest {
+  border: 1px dashed var(--line-strong); border-radius: 14px;
+  padding: clamp(10px, calc(1.15 * var(--u)), 20px);
+  font-size: clamp(11px, calc(0.98 * var(--u)), 16px); color: var(--ink-muted);
+}
+.honest strong { color: var(--ink); }
+.honest p { margin: 0; }
+.honest p + p { margin-top: 0.85em; }
+.numbers {
+  background: var(--bg-inset); border: 1px solid var(--line-strong);
+  border-radius: 14px; padding: clamp(10px, calc(1.15 * var(--u)), 20px);
+  display: grid; gap: 4px; align-content: center;
+}
+.numbers .n { font-family: var(--font-mono); font-size: clamp(17px, calc(1.85 * var(--u)), 30px); color: var(--good); }
+.numbers .l { font-size: clamp(10px, calc(0.84 * var(--u)), 14px); color: var(--ink-faint); }
+.numbers .l + .n { margin-top: 0.5em; }
+.numbers .l + .l { margin-top: 0.5em; }
+/* code inherits --bg-inset, which is also .numbers' own background — the chip
+   would be invisible here. */
+.numbers code { background: var(--bg-raised); border: 1px solid var(--line-strong); }
+.src { font-size: clamp(9px, calc(0.74 * var(--u)), 12px); line-height: 1.4; color: var(--ink-faint); margin: 0; }
+
+@media screen and (max-width: 820px) {
+  /* Still rem-blended rather than a fixed px pin, so 200% zoom — which lands
+     here on a 1600px display — keeps growing the body text. */
+  :root { --u: calc(0.2rem + 0.4vw); }
+  .compare, .footer { grid-template-columns: 1fr; }
+  body { align-items: flex-start; }
+}
+@media print {
+  @page { size: landscape; margin: 12mm; }
+  :root {
+    --bg: #fff; --bg-raised: #fff; --bg-inset: #f2f2f2; --ink: #000;
+    --ink-muted: #333; --ink-faint: #555; --line: #bbb; --line-strong: #888;
+    --accent: #a83e00; --good: #0e5c3d;
+    color-scheme: light;
+  }
+  /* --u resolves against the page box (~10px at landscape/12mm). The body-text
+     clamps still bottom out at their screen floors there, so paper needs explicit
+     sizes to hold one page — lowering --u alone would only shrink the headline.
+     Verified: one page. */
+  :root { --u: 8px; }
+  body { min-height: auto; display: block; }
+  .compare, .footer { grid-template-columns: 1fr 1fr; }
+  .slide { width: 100%; gap: 8px; }
+  .col { padding: 9px; gap: 5px; border-radius: 8px; }
+  .col ul { gap: 4px; }
+  .honest, .numbers { padding: 9px; border-radius: 8px; }
+  .answer { font-size: 12px; max-width: none; }
+  .v { font-size: 9.5px; line-height: 1.3; }
+  .honest { font-size: 9px; }
+  .numbers { gap: 2px; }
+  .numbers .n { font-size: 15px; }
+  .numbers .l { font-size: 8px; }
+  .src { font-size: 8px; }
+  .k { font-size: 8px; }
+  code { font-size: 1em; }
+}
+</style>
+</head>
+<body>
+<main class="slide">
+
+  <header>
+    <p class="eyebrow">The question we always get</p>
+    <h1>“Why QueryGate and not a database firewall<span class="mark">?</span>”</h1>
+  </header>
+
+  <p class="answer">
+    A database firewall reads the SQL and decides — by pattern, or by whether it
+    has seen that statement before — whether to let it through.
+    <strong>QueryGate never receives SQL at all</strong>: the agent submits a
+    typed JSON object with a fixed set of fields, and QueryGate writes the SQL
+    itself.
+  </p>
+
+  <section class="compare" aria-label="Database firewall compared with QueryGate">
+    <div class="col theirs">
+      <h2>Database firewall / DAM <span class="expand">(database activity monitoring)</span></h2>
+      <ul role="list">
+        <li><span class="k">What it judges</span>
+            <span class="v">A SQL string it has to interpret — comments, encodings, dialect quirks and all.</span></li>
+        <li><span class="k">The question it asks</span>
+            <span class="v">“Have I approved this statement, or flagged it?” One arm has to have seen the statement before; the other is an unbounded detection problem.</span></li>
+        <li><span class="k">Facing a novel query</span>
+            <span class="v">An allow-list assumes traffic that repeats. An agent composes SQL it has never sent before on almost every request — so you block legitimate work, or you run permissive.</span></li>
+        <li><span class="k">Decision granularity</span>
+            <span class="v">Allow, deny, alert or substitute a statement. A policy can name a table or a column — that part is table stakes.</span></li>
+        <li><span class="k">Who asked</span>
+            <span class="v">The connection’s identity — usually a pooled app credential. App-user tracking, where it exists, is inferred, and lands in the log rather than in the decision.</span></li>
+      </ul>
+    </div>
+
+    <div class="col ours">
+      <h2>QueryGate</h2>
+      <ul role="list">
+        <li><span class="k">What it judges</span>
+            <span class="v">A validated <code>StructuredQuery</code> object. No string in it is ever interpreted as SQL — a value is a bound parameter, a name is an escaped identifier — so a second statement or a comment is inert text, not syntax.</span></li>
+        <li><span class="k">The question it asks</span>
+            <span class="v">“Is this shape allowed?” A closed question over a fixed set of typed fields.</span></li>
+        <li><span class="k">Facing a novel query</span>
+            <span class="v">Novelty is irrelevant. A query never seen before is fine if its shape is in policy, and refused if it isn’t.</span></li>
+        <li><span class="k">Decision granularity</span>
+            <span class="v">The query’s <em>shape</em> — joins, nesting depth, row caps, in-query masking, timeout — plus a column check that covers every reference, including one that appears only in a <code>WHERE</code>.</span></li>
+        <li><span class="k">Who asked</span>
+            <span class="v">The human behind the agent, carried by delegation into the policy that gets applied, not only into the log.</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="footer">
+    <div class="honest">
+      <p><strong>And we are not telling you to remove yours.</strong> A firewall watches
+      <em>every</em> path into the database — DBAs, applications, ETL, stolen
+      credentials. QueryGate sits in none of those; it governs the one path a
+      firewall can characterise least well: a non-deterministic agent writing
+      new SQL on every request. Keep both.</p>
+      <p><strong>The difference is not “blocks earlier.”</strong> A good firewall also
+      stops a statement before it executes. The difference is <em>what gets
+      judged</em> — a string you must out-guess, or a shape you defined.</p>
+    </div>
+    <div class="numbers">
+      <span class="n">2.6&nbsp;ms</span>
+      <span class="l">median <em>policy refusal</em> — 20 runs, demo/config/VERIFIED.md</span>
+      <span class="n">0</span>
+      <span class="l">queries your database ran during that policy refusal — read from <code>pg_stat_statements</code></span>
+      <span class="l">On an allowed query — itself ~80&nbsp;ms end to end — QueryGate adds single-digit to mid-teens ms. Different measurement, not in the file above: run RUNBOOK scenario 6 rather than quoting it.</span>
+    </div>
+  </section>
+
+  <p class="src">
+    Backing detail: demo/RUNBOOK.md “The hard questions”; measured evidence in
+    demo/config/VERIFIED.md; the rulebook is the 51 lines of demo/config/policy.demo.yaml.
+    Two caveats, held honestly: per-human attribution is shipped, but this demo runs on a
+    static key, so it is the one row above the demo does not itself show; and audit
+    persistence is an operator setting — stdout always, <code>AUDIT_SINK_BACKEND=jsonl</code>
+    to persist, <code>jsonl_chained</code> for the tamper-evident ledger.
+  </p>
+
+</main>
+</body>
+</html>

@@ -16,7 +16,7 @@
 # separately and never counted as a catch, so the benchmark discloses what
 # QueryGate does NOT stop rather than only its wins.
 #
-# See docs/business/SECURITY_BENCHMARK.md for methodology and the scope of the
+# See docs/benchmarks/SECURITY_BENCHMARK.md for methodology and the scope of the
 # raw-SQL-baseline and Google MCP Toolbox comparisons.
 
 version: 1

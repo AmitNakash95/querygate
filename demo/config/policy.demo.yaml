@@ -1,0 +1,51 @@
+# QueryGate policy for the partner demo.
+#
+# This is the whole rulebook. Every rule below is a hard wall, checked
+# before the database is ever touched — not a suggestion the agent can
+# talk its way around.
+
+default:
+  enabled: true
+
+  # Only these four tables exist as far as the agent is concerned. The
+  # employee table (names, SSNs, salaries) is not on this list. It still
+  # exists in the database — the agent just never gets to know that.
+  allowed_tables: [customers, orders, order_items, products]
+
+  # Customer email addresses can never be read. Not filtered, not sorted,
+  # not returned. Full stop.
+  denied_columns:
+    customers: [email]
+
+  # These two columns are visible, but never in the raw. The agent gets a
+  # masked value; the real one never leaves the database.
+  column_masks:
+    customers:
+      - column: phone
+        kind: last          # only the last 4 digits are shown, e.g. "0142"
+        length: 4
+      - column: national_id
+        kind: hash          # a one-way hash, never the real ID
+
+  # The most rows the agent can ever pull back in one query. Asking for
+  # "the entire customer table" still only returns this many.
+  max_limit: 100
+
+  # No cartesian products. Joining every customer to every order to every
+  # order line with no matching condition is how a database gets brought
+  # to its knees — this makes that request impossible to even build.
+  allow_cross_join: false
+
+  # Sane limits on how complicated a single query can be, so nothing can
+  # be built that quietly turns into a massive, slow scan.
+  max_joins: 4
+  max_select_columns: 15
+  max_where_depth: 4
+  max_group_by: 6
+  max_where_predicates: 50
+  max_in_list_size: 500
+
+  # Every query gets a few seconds to finish, and only a handful can run
+  # at the same time. Nothing gets to hog the database.
+  timeout_seconds: 5
+  max_concurrency: 4
