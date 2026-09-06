@@ -12,6 +12,7 @@ import sqlalchemy as sa
 from httpx import ASGITransport, AsyncClient
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from querygate import __version__
 from querygate.api.app import create_app
 from querygate.catalog.loader import CatalogStore, set_catalog_store
 from querygate.connections.models import ConnectionProfile
@@ -127,9 +128,13 @@ async def test_mcp_product_guide_search_returns_packaged_versioned_citations(mcp
 
     assert resp.status_code == 200
     result = _parse_mcp_response(resp)["result"]["structuredContent"]["result"]
-    assert result["querygate_version"] == "0.1.0"
+    # Derived, not hardcoded: a literal here is a fourth place the version has to
+    # be bumped, and it silently rots because this file is `integration` — a
+    # `-m unit` run never touches it. That is exactly how it survived the 0.2.0
+    # bump and failed in CI instead.
+    assert result["querygate_version"] == __version__
     assert result["results"][0]["topic_id"] == "configuration.policy"
-    assert result["results"][0]["citation"]["version"] == "0.1.0"
+    assert result["results"][0]["citation"]["version"] == __version__
 
 
 @pytest.mark.asyncio
