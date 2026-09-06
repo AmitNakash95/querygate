@@ -97,7 +97,7 @@ certification effort starts from a mapped baseline rather than a blank page.
 | Criterion | QueryGate control | Evidence | Status |
 |---|---|---|---|
 | CC9.1 Risk mitigation | Concurrency limits, timeouts, result-size caps, per-principal quotas, query-cost gating protect the operational DB. | `execution/concurrency.py`, `execution/quota.py`, `execution/cost_estimation.py` | Product-provided |
-| CC9.2 Vendor & third-party management | Dependency allowlist + SBOM is the software-supply-chain half; vendor-management *process* is the org's. | `docs/SECURITY_POSTURE.md`; dep-audit | Product + Org |
+| CC9.2 Vendor & third-party management | Dependency allowlist + SBOM + third-party licence inventory is the software-supply-chain half; vendor-management *process* is the org's. | `docs/SECURITY_POSTURE.md`; `docs/THIRD_PARTY_LICENSES.md` (`make license-check`); dep-audit | Product + Org |
 
 ## Confidentiality (C-series)
 

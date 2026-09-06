@@ -802,6 +802,73 @@ async def test_worm_audit_backend_with_a_key_does_not_warn_at_startup(tmp_path, 
 
 
 @pytest.mark.asyncio
+async def test_worm_audit_backend_wires_the_s3_endpoint_into_the_flush_monitor(tmp_path):
+    """TODO.md item 201, the write half. `test_audit_worm_sink.py` constructs a
+    WormFlushMonitor directly, and `test_worm_search.py` covers the READ half
+    through `build_worm_search_result` — so deleting `endpoint_url=` from
+    app.py's lifespan wiring left the whole suite green while producing a
+    split-brain deployment: flushes go to AWS, searches go to the override.
+    That is exactly the "never written to one store and searched in another"
+    hazard both docstrings assert cannot happen, and it is the harder failure
+    to notice because the search still answers 200."""
+    settings = _settings(
+        audit_sink_backend="jsonl_chained_s3_worm",
+        audit_jsonl_path=str(tmp_path / "chain.jsonl"),
+        audit_worm_s3_bucket="qg-worm-endpoint-test",
+        audit_worm_s3_region="us-east-1",
+        audit_worm_s3_endpoint_url="https://minio.internal:9000",
+        audit_ledger_hmac_key="a-real-key",
+    )
+    app = create_app(settings)
+    with patch("querygate.health._ping", new_callable=AsyncMock):
+        async with app.router.lifespan_context(app):
+            monitor = app.state.worm_flush_monitor
+            assert monitor is not None
+            # Through real botocore endpoint resolution, so an ignored override
+            # resolves to s3.us-east-1.amazonaws.com and fails.
+            assert monitor._get_client().meta.endpoint_url == "https://minio.internal:9000"
+
+
+@pytest.mark.asyncio
+async def test_a_custom_s3_endpoint_warns_that_object_lock_is_unverified(tmp_path, capsys):
+    """The Object Lock hazard's only control is this warning, and the docs say
+    so in three places. Deleting the whole block left the suite green."""
+    settings = _settings(
+        audit_sink_backend="jsonl_chained_s3_worm",
+        audit_jsonl_path=str(tmp_path / "chain.jsonl"),
+        audit_worm_s3_bucket="qg-worm-endpoint-warn",
+        audit_worm_s3_region="us-east-1",
+        audit_worm_s3_endpoint_url="https://minio.internal:9000",
+        audit_ledger_hmac_key="a-real-key",
+    )
+    app = create_app(settings)
+    with patch("querygate.health._ping", new_callable=AsyncMock):
+        async with app.router.lifespan_context(app):
+            pass
+    out = capsys.readouterr().out
+    assert "audit.worm.custom_endpoint" in out
+    # The warning must never echo the endpoint value: a credential can ride in
+    # a userinfo component of the URL.
+    assert "minio.internal" not in out
+
+
+@pytest.mark.asyncio
+async def test_no_custom_endpoint_does_not_warn(tmp_path, capsys):
+    settings = _settings(
+        audit_sink_backend="jsonl_chained_s3_worm",
+        audit_jsonl_path=str(tmp_path / "chain.jsonl"),
+        audit_worm_s3_bucket="qg-worm-endpoint-nowarn",
+        audit_worm_s3_region="us-east-1",
+        audit_ledger_hmac_key="a-real-key",
+    )
+    app = create_app(settings)
+    with patch("querygate.health._ping", new_callable=AsyncMock):
+        async with app.router.lifespan_context(app):
+            pass
+    assert "audit.worm.custom_endpoint" not in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
 async def test_worm_audit_backend_wires_the_flush_monitor_end_to_end(tmp_path):
     """TODO.md item 134: the piece the unit tests (test_audit_worm_sink.py)
     can't cover — that app.py's lifespan actually starts a WormFlushMonitor

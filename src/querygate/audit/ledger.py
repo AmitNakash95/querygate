@@ -122,6 +122,32 @@ def resolve_ledger_key(raw: str) -> Optional[bytes]:
     return raw.encode("utf-8") if raw.strip() else None
 
 
+def digests_equal(expected: str, actual: str) -> bool:
+    """Constant-time digest comparison that treats a non-ASCII `actual` as a
+    mismatch instead of raising (TODO.md item 194, defect 1).
+
+    `hmac.compare_digest` accepts two `str`s only when both are ASCII-only;
+    otherwise it raises `TypeError`. Every digest field on a `LedgerRecord` /
+    `Receipt` is a plain `str` with no hex or ASCII constraint, and
+    `audit/worm_search.py`'s `_get_object_text` decodes segment bodies with
+    `errors="replace"` — so ONE corrupted byte inside a genuine segment's
+    `hash` turns it into U+FFFD and raises out of every reader. That is
+    ordinary corruption, not an attack, and it permanently 500s every future
+    search whose window covers that immutable object.
+
+    A non-ASCII digest can never equal a hex digest we computed, so returning
+    `False` is the same answer `compare_digest` would give if it could — the
+    line is counted as `unverified` and the scan continues, which is the
+    documented contract. Fails closed: any non-ASCII input is a mismatch.
+
+    Used by every digest comparison in this module so the hazard cannot be
+    reintroduced at one site while the others are fixed.
+    """
+    if not (expected.isascii() and actual.isascii()):
+        return False
+    return hmac.compare_digest(expected, actual)
+
+
 def verify_envelope_hash(raw: Any, *, key: Optional[bytes] = None) -> Optional[bool]:
     """Check a hash-chained ledger envelope's own hash against its contents,
     without requiring the rest of the chain (TODO.md item 137).
@@ -159,7 +185,7 @@ def verify_envelope_hash(raw: Any, *, key: Optional[bytes] = None) -> Optional[b
     except pyd.ValidationError:
         return False
     expected = compute_record_hash(record.seq, record.prev_hash, record.event, key=key)
-    return hmac.compare_digest(expected, record.hash)
+    return digests_equal(expected, record.hash)
 
 
 def unwrap_envelope(raw: Any) -> Any:
@@ -260,7 +286,7 @@ def verify_chain(
             )
 
         expected = compute_record_hash(record.seq, record.prev_hash, record.event, key=key)
-        if not hmac.compare_digest(expected, record.hash):
+        if not digests_equal(expected, record.hash):
             return _fail(
                 checked,
                 head_hash,
@@ -287,7 +313,7 @@ def verify_chain(
                     line=line_no,
                     reason=f"sequence gap: expected {prev.seq + 1}, found {record.seq}",
                 )
-            if not hmac.compare_digest(record.prev_hash, prev.hash):
+            if not digests_equal(record.prev_hash, prev.hash):
                 return _fail(
                     checked,
                     head_hash,
@@ -302,7 +328,7 @@ def verify_chain(
         checked += 1
 
     if expected_head is not None:
-        if head_hash is None or not hmac.compare_digest(head_hash, expected_head):
+        if head_hash is None or not digests_equal(head_hash, expected_head):
             return _fail(
                 checked,
                 head_hash,
@@ -365,7 +391,7 @@ def verify_receipt(receipt: Receipt, *, key: Optional[bytes] = None) -> bool:
         expected = compute_record_hash(receipt.seq, receipt.prev_hash, receipt.event, key=None)
     else:
         return False
-    return hmac.compare_digest(expected, receipt.hash)
+    return digests_equal(expected, receipt.hash)
 
 
 def extract_receipt_for_event_id(

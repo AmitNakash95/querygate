@@ -109,7 +109,7 @@ kind of change those rules exist to constrain:
    every procedure the DB user can see becomes callable. If this design ever
    drifts toward "list every procedure the connection's DB role can execute,
    let the caller invoke any of them," that is a non-goal violation requiring
-   its own NORTH_STAR decision, not something to slide into during
+   its own recorded product-identity decision, not something to slide into during
    implementation.
 
 ---
@@ -308,7 +308,7 @@ REST surface (mirrors the write triad in `api/routes.py`):
 - `POST /{connection}/procedures/approve` — only if §7 decision 2 lands on
   reusing the write path's approval-token gate; mirrors `write/approve`.
 
-MCP surface (new file, auto-registers via `discover_and_register_tools()`
+MCP surface (new file, registers via `discover_and_register_tools()` once added to `TOOL_MODULES`
 with zero additional wiring — `mcp/tools/procedures.py`):
 `list_procedures`, `describe_procedure` (mirrors `list_tables`/
 `describe_table`), `call_stored_procedure` (mirrors `run_structured_writes`'s

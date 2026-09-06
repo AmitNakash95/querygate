@@ -22,7 +22,7 @@ Design constraints (why it looks the way it does):
   string with no AST contract would block the same attack. That determination
   is structural (a string-concatenating passthrough has no per-query table/column
   policy and no parameter-binding contract), factual, and reproducible — see
-  ``docs/business/SECURITY_BENCHMARK.md`` for the methodology and the honest
+  ``docs/benchmarks/SECURITY_BENCHMARK.md`` for the methodology and the honest
   scope of the comparison. A *live* Google MCP Toolbox / live-LLM baseline run
   is phase 2 (needs external infra) and is intentionally out of scope here.
 - **Honest by construction.** Documented residual risks

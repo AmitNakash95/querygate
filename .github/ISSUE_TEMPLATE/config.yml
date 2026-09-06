@@ -1,0 +1,17 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/AGitmit/QueryGate/security/advisories/new
+    about: >-
+      Never open a public issue for a vulnerability. Use a private security
+      advisory instead — see SECURITY.md for scope and what to expect.
+  - name: Read the docs first
+    url: https://github.com/AGitmit/QueryGate/blob/main/docs/README.md
+    about: >-
+      Capability reference, limitations, threat model, deployment guides, and
+      the built-in offline help API. Most questions are answered there.
+  - name: Is this a deliberate non-goal?
+    url: https://github.com/AGitmit/QueryGate/blob/main/docs/LIMITATIONS.md
+    about: >-
+      A raw-SQL escape hatch, executing model-generated code, and
+      stored-procedure pass-through are permanent non-goals, not backlog items.

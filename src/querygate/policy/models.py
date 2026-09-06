@@ -257,13 +257,32 @@ class Policy(pyd.BaseModel):
     # the connection id does not exist.
     enabled: bool = True
 
-    # Table/column allow-deny. An empty allow-list means "no restriction";
-    # deny always wins over allow. Column lists are keyed by table name, with
-    # "*" applying to every table.
+    # Table/column allow-deny. An empty allow-list means "no restriction"
+    # UNLESS `require_explicit_allowlist` is set below; deny always wins over
+    # allow. Column lists are keyed by table name, with "*" applying to every
+    # table.
     allowed_tables: list[str] = pyd.Field(default_factory=list)
     denied_tables: list[str] = pyd.Field(default_factory=list)
     allowed_columns: dict[str, list[str]] = pyd.Field(default_factory=dict)
     denied_columns: dict[str, list[str]] = pyd.Field(default_factory=dict)
+
+    # Deny-by-default (TODO.md item 220). Without this, the only deny-all lever
+    # in the model is `enabled = False`, which is all-or-nothing: the moment an
+    # operator enables a connection to run their first query, every table and
+    # column on it is readable up to the numeric caps. That is the opposite of
+    # what a new install should do, and it makes item 215's "safe-by-default
+    # starter policy" literally inexpressible.
+    #
+    # With it, an empty `allowed_tables` denies every table and an absent
+    # `allowed_columns` entry denies every column, so an operator names what a
+    # caller may reach rather than what it may not.
+    #
+    # **Default False, deliberately.** This is a new opt-in guarantee, not a
+    # silent tightening of every existing deployment — flipping the meaning of a
+    # live security control under people is the change that breaks a customer at
+    # 3am. The shipped starter policy sets it True; existing policies are
+    # untouched until someone opts in.
+    require_explicit_allowlist: bool = False
 
     # Purpose-bound access (TODO.md item 145, feature F7): the closed set of
     # purpose tokens a caller may declare (`StructuredQuery.purpose`) on this
@@ -509,11 +528,12 @@ class Policy(pyd.BaseModel):
     # also what catches a caller varying `limit`/`offset` to manufacture a
     # fresh shape bucket.
     #
-    # SET THE PER-TABLE CAP. `max_shape_repeats_per_window` does not currently
-    # deliver its bound (TODO.md item 186): the fingerprint does not
-    # canonicalize a referenced select alias, a cte rename, a nested-scope
-    # alias, or list order, so a prober mints a fresh bucket per probe. The
-    # backstop is unaffected — its key carries no fingerprint at all.
+    # Set BOTH: they are belt and braces, not alternatives. (TODO.md item 186
+    # closed a period in which `max_shape_repeats_per_window` did not deliver
+    # its bound — the fingerprint did not canonicalize a referenced select
+    # alias, a cte rename, a nested-scope alias, or list order, so a prober
+    # minted a fresh bucket per probe. `shape_fingerprint` now normalizes all
+    # four; each vector has a regression test with a paired control.)
     #
     # Both default to None (disabled) and BOTH only ever apply on a connection
     # that also sets `min_group_size`: with no k-floor there is nothing to
@@ -767,7 +787,13 @@ class Policy(pyd.BaseModel):
             return False
         if self.allowed_tables:
             return any(t.casefold() == target for t in self.allowed_tables)
-        return True
+        # An EMPTY allow-list. Historically this meant "allow everything", which
+        # is why `require_explicit_allowlist` exists: under it, an empty list
+        # means deny everything instead, and an operator must name each table
+        # deliberately. Default False, so no existing deployment changes
+        # behaviour — flipping a live security control is the change that breaks
+        # a customer at 3am (TODO.md item 220).
+        return not self.require_explicit_allowlist
 
     def column_allowed(self, table_name: str, column_name: str) -> bool:
         col = column_name.casefold()
@@ -781,7 +807,10 @@ class Policy(pyd.BaseModel):
         allowed = allowed_specific if allowed_specific is not None else allowed_wildcard
         if allowed is not None:
             return any(c.casefold() == col for c in allowed)
-        return True
+        # No allow-list configured for this table or via "*". Same reasoning as
+        # `table_allowed` above: permissive by default, deny-by-default under
+        # `require_explicit_allowlist`.
+        return not self.require_explicit_allowlist
 
     def column_mask(self, table_name: str, column_name: str) -> Optional[ColumnMask]:
         """The mask configured for a column, or None if it's unmasked. A
@@ -950,12 +979,18 @@ GUARDRAIL_FIELDS: tuple[str, ...] = tuple(
 # `templates_only`: True narrows the caller from the whole structured-query
 # surface to a finite reviewed set, so the higher (True) value is the tighter
 # posture (item 195).
+# `require_explicit_allowlist`: True flips an empty allow-list from
+# allow-everything to deny-everything, so the higher (True) value is the tighter
+# posture (item 220). Getting this backwards would make the access diff report a
+# deny-by-default cutover as a LOOSENING, which is precisely the review an
+# operator would be relying on.
 INVERTED_GUARDRAIL_FIELDS = frozenset(
     {
         "min_group_size",
         "quota_window_seconds",
         "disclosure_budget_window_seconds",
         "templates_only",
+        "require_explicit_allowlist",
     }
 )
 
@@ -978,6 +1013,8 @@ _DIRECTION_REVIEWED_GUARDRAILS = frozenset(
         # sustained probe rate, so a longer window is the TIGHTER setting.
         "disclosure_budget_window_seconds",
         "min_group_size",  # INVERTED: a larger k-anonymity floor hides more
+        # INVERTED: True turns an empty allow-list from allow-all into deny-all.
+        "require_explicit_allowlist",
         "cost_estimation_mode",  # OBSERVE never blocks; ENFORCE can
         "log_query_literals",  # logging raw literals is the looser posture
         # Permitting the one join whose cost is a cartesian product is looser —

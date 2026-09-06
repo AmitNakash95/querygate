@@ -23,13 +23,16 @@ that counted *distinct* shapes would have missed the attack completely.
 Two caps, both `None` (disabled) by default, either one tripping refuses:
 
 * `Policy.max_shape_repeats_per_window` — how many times one
-  (table, normalized-shape) pair may be re-run. Intended as the targeted probe
-  cap. **It does not currently deliver that bound (TODO.md item 186):**
-  `_canonicalize` rewrites only *dotted* refs and only from the OUTERMOST
-  scope's alias map, so a referenced select alias, a cte rename, a nested-scope
-  alias, or a reordered list each mint a fresh bucket per probe — measured at 20
-  distinct fingerprints for 20 alias-walked probes. Until 186 lands, the
-  per-table cap below is the load-bearing one.
+  (table, normalized-shape) pair may be re-run. The targeted probe cap.
+  **TODO.md item 186 is closed.** It previously did not deliver that bound:
+  `_canonicalize` rewrote only *dotted* refs and only from the OUTERMOST scope's
+  alias map, so a referenced select alias, a cte rename, a nested-scope alias, or
+  a reordered list each minted a fresh bucket per probe — measured at 20 distinct
+  fingerprints for 20 alias-walked probes. `shape_fingerprint` now collapses a
+  bare reference to any caller-authored name to one constant token, resolves
+  aliases from every scope, and sorts every list; the same twenty probes measure
+  as **one** fingerprint. Each vector has its own regression test with a paired
+  control, in `tests/unit/test_disclosure_budget.py`.
 * `Policy.max_aggregate_queries_per_window` — how many aggregate queries may
   touch one table however the shape varies. The blunt backstop, and what makes
   the shape cap non-trivial to evade: `normalize_query_shape` deliberately
@@ -37,14 +40,20 @@ Two caps, both `None` (disabled) by default, either one tripping refuses:
   `top_n.n`, a percentile `fraction`), so without this second cap a caller
   could mint a fresh shape bucket per probe just by walking `limit`.
   `shape_fingerprint` below strips those same numbers before hashing, which
-  closes *that* evasion at the shape layer too. It does **not** close the alias/
-  cte/order evasions — see item 186 above — so the two are not belt and braces
-  today: the per-table cap is carrying the weight.
+  closes *that* evasion at the shape layer too — as, since item 186, do the
+  alias, cte-rename, nested-scope and list-order evasions. The two caps are
+  genuinely belt and braces again; the per-table cap is no longer carrying the
+  shape cap's weight on its own.
 
 **Scope of the key: `(connection_id, principal, purpose, table)`.** Principal,
 not actor: under item 90 the principal IS the human whose policy applied (the
 Proof-pillar subject); keying on the actor would budget an entire agent fleet
-as one identity and let one agent deny service to every other. Purpose is in
+as one identity and let one agent deny service to every other. **This argument
+holds under JWT auth only** (TODO.md item 186's second scoping residual): with
+static API-key auth every caller sharing a key collapses to one
+`Principal.subject`, so the budget is shared by exactly the fleet the paragraph
+above says it avoids budgeting together. Deploy JWT auth if per-human disclosure
+budgeting is the property you need. Purpose is in
 the key so each declared purpose (item 145) carries its own independent budget
 — which is what makes a purpose bound *cumulative* disclosure rather than only
 narrowing one query at a time. Note this deliberately does NOT put a cap on
@@ -114,19 +123,104 @@ Charge = Tuple[DisclosureBudgetKey, int, str, int]
 KIND_SHAPE = "disclosure_shape"
 KIND_TABLE = "disclosure_table"
 
-# Numeric fields `normalize_query_shape` legitimately retains (they are
-# structure, not predicate literals — see its own docstring), but which a
-# caller can vary freely without changing what the query *discloses*. Dropped
-# before fingerprinting so walking `limit` cannot mint a fresh shape bucket per
+# Fields `normalize_query_shape` legitimately retains (they are structure, not
+# predicate literals — see its own docstring), but which a caller can vary
+# freely without changing what the query *discloses*. Dropped before
+# fingerprinting so walking one of them cannot mint a fresh shape bucket per
 # probe. Collapsing two genuinely-different shapes into one bucket is the safe
 # direction: it makes the cap trip sooner, never later.
-_VOLATILE_SHAPE_KEYS = frozenset({"requested_limit", "offset", "n", "fraction", "alias"})
+#
+# `dir`/`nulls` and the caller-authored `alias`/`name` were added by TODO.md item
+# 186 — see `_canonicalize`. Sort *direction* is a two-valued knob per ORDER BY
+# term that the caller can flip freely, and `requested_limit` is already stripped
+# here, so ordering barely changes what an aggregate scope discloses; a top-N by
+# ascending vs. descending salary now shares one bucket, which is the
+# trips-sooner direction.
+_VOLATILE_SHAPE_KEYS = frozenset(
+    {
+        "requested_limit",
+        "offset",
+        "n",
+        "fraction",
+        "alias",  # a select item's caller-authored output name
+        "name",  # a cte's caller-authored name (`normalize_query_shape`'s only use)
+        "dir",
+        "nulls",
+    }
+)
+
+# Every bare reference to a caller-authored output name collapses to this single
+# constant rather than to a positional marker. (Named `..._MARKER`, not
+# `..._TOKEN`: "token" means a bearer credential everywhere else in this
+# codebase, and Bandit's B105 flagged the old name as a hardcoded password —
+# a false positive, but the ambiguity was real in a security product.) Deliberately: a positional scheme
+# has to agree with the list sorting below on *which* position, and a caller who
+# reorders their select list would otherwise shift every token. One constant
+# cannot be gamed by any reordering, and the only cost is that `ORDER BY
+# <alias-a>` and `ORDER BY <alias-b>` share a bucket — the trips-sooner
+# direction this module already commits to.
+_ALIAS_REFERENCE_MARKER = "#alias"
+
+# Keys under which `normalize_query_shape` records a caller-*authored* name: a
+# select item's output alias and a cte's name. Both are dropped by
+# `_VOLATILE_SHAPE_KEYS` above, but they have to be COLLECTED first, because a
+# bare reference to one elsewhere in the shape is what item 186's evasion walks.
+_AUTHORED_NAME_KEYS = frozenset({"alias", "name"})
 
 
-def _canonicalize(node: Any, aliases: Dict[str, str]) -> Any:
+def _sort_key(node: Any) -> str:
+    """A total order over already-canonicalized shape nodes, so a list can be
+    sorted deterministically whatever its element types."""
+    return json.dumps(node, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _collect_authored_names(node: Any, out: set) -> None:
+    """Every caller-authored output name in the shape, casefolded.
+
+    Collected from the RAW shape, before `_canonicalize` drops
+    `_VOLATILE_SHAPE_KEYS`: the definitions are what tell us which bare strings
+    elsewhere in the shape are *references* rather than column names. Walks the
+    whole tree, so a name declared inside a cte body, a set-operation arm or a
+    nested subquery counts too — `_canonicalize` used to see only the outermost
+    scope, which was one of item 186's four vectors.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in _AUTHORED_NAME_KEYS and isinstance(value, str):
+                out.add(value.casefold())
+            else:
+                _collect_authored_names(value, out)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_authored_names(item, out)
+
+
+def _table_alias_map(query: StructuredQuery) -> Dict[str, str]:
+    """Effective-name → physical-table, unioned across EVERY scope.
+
+    `effective_name_map` covers one scope. Building the map from the outermost
+    scope alone left a dotted reference inside a `value_subquery` /
+    `exists_subquery` / set-op arm / cte body un-rewritten, so renaming that
+    inner table alias minted a fresh bucket (item 186). Walking
+    `iter_query_scopes` — the single canonical scope walker, as item 96 requires
+    — closes it.
+
+    First declaration wins on a collision (one alias naming different physical
+    tables in two scopes). Either choice merges the two shapes into one bucket,
+    which is the trips-sooner direction; picking deterministically is what
+    matters.
+    """
+    mapping: Dict[str, str] = {}
+    for _depth, scope in iter_query_scopes(query):
+        for effective, physical in effective_name_map(scope).items():
+            mapping.setdefault(effective.casefold(), physical.casefold())
+    return mapping
+
+
+def _canonicalize(node: Any, aliases: Dict[str, str], authored: set) -> Any:
     """Recursively drop `_VOLATILE_SHAPE_KEYS` and canonicalize identifiers.
 
-    Two normalizations, both of which exist to stop a prober minting a fresh
+    Four normalizations, all of which exist to stop a prober minting a fresh
     shape bucket for a query that is semantically identical:
 
     * **Case.** `normalize_query_shape` records identifiers with the caller's
@@ -137,27 +231,54 @@ def _canonicalize(node: Any, aliases: Dict[str, str]) -> Any:
       indiscriminately because the shape carries no predicate literals by construction —
       there is no user data in it to corrupt, only identifiers, operators and
       structural keywords.
-    * **Aliases.** A column reference carries the *effective* name
+    * **Table aliases.** A column reference carries the *effective* name
       (`emp.salary`), so renaming an alias would otherwise change the shape
       without changing the query. Any dotted reference whose prefix is a
-      declared effective name is rewritten to the physical table
-      (`employees.salary`).
+      declared effective name — in ANY scope, see `_table_alias_map` — is
+      rewritten to the physical table (`employees.salary`).
+    * **Output-name references (TODO.md item 186).** A select item's `alias` and
+      a cte's `name` are dropped as volatile, but a *reference* to one is a bare
+      string: `order_by[].col`, `group_by[]`, `top_n.order_by[].col`, `correlate[]`,
+      a `from`/`joins[].table` naming a cte, and `having`'s column refs.
+      `_canonicalize` only rewrote refs containing a dot, so a bare `n7` came
+      back unchanged and twenty probes differing only in `count(*) AS n1…n20`
+      plus a sliding predicate constant produced **twenty distinct
+      fingerprints** — `max_shape_repeats_per_window` never tripped at any
+      value, measured. Every such reference now collapses to
+      `_ALIAS_REFERENCE_MARKER`.
+    * **List order.** `select` items, `and_terms`/`or_terms`, `joins`, `group_by`
+      and set-operation arms were all order-*sensitive* here while being
+      semantically order-insensitive (or, for a left join / `EXCEPT`, merely
+      order-*significant* — which collapsing only makes stricter). Every list is
+      sorted after its elements are canonicalized.
 
     A self-join collapses (`emp.id` and `mgr.id` both become `employees.id`),
     merging two distinct shapes into one counter. That is the conservative
-    direction — the cap trips sooner, never later.
+    direction — the cap trips sooner, never later — and it is the direction every
+    normalization above takes.
     """
     if isinstance(node, dict):
         return {
-            key: _canonicalize(value, aliases)
+            key: _canonicalize(value, aliases, authored)
             for key, value in node.items()
             if key not in _VOLATILE_SHAPE_KEYS
         }
     if isinstance(node, list):
-        return [_canonicalize(item, aliases) for item in node]
+        return sorted((_canonicalize(item, aliases, authored) for item in node), key=_sort_key)
     if isinstance(node, str):
         folded = node.casefold()
+        # Checked before the dotted rewrite, and it cannot shadow it: an
+        # authored name is a bare identifier, so it never contains a dot.
+        if folded in authored:
+            return _ALIAS_REFERENCE_MARKER
         prefix, sep, rest = folded.partition(".")
+        # A cte's columns are referenced `<cte name>.<column>`, and
+        # `effective_name_map` maps a cte name to ITSELF (it is the scope's
+        # `from_table`), so the table-alias rewrite below is a no-op for it and a
+        # cte rename walked straight through. Checked first, for the same reason
+        # the bare case is: the authored name is the caller-varied part.
+        if sep and prefix in authored:
+            return f"{_ALIAS_REFERENCE_MARKER}{sep}{rest}"
         if sep and prefix in aliases:
             return f"{aliases[prefix]}{sep}{rest}"
         return folded
@@ -169,18 +290,23 @@ def shape_fingerprint(query: StructuredQuery) -> str:
 
     Built from `normalize_query_shape` — so it contains identifiers, operators
     and structure but never a predicate literal, a row, or a credential — with
-    the volatile numeric fields stripped and identifiers canonicalized (see
+    the volatile fields stripped, identifiers canonicalized and lists sorted (see
     `_canonicalize`), then serialized deterministically and hashed. The digest
     is truncated to 32 hex chars: this is a bucketing key for a rolling window,
     not a security boundary, and a collision merges two shapes into one counter
     (again, the conservative direction).
+
+    **This changes existing fingerprints** (item 186): an in-flight rolling
+    window resets on deploy, once, and every probe already counted is forgotten.
+    Accepted — the alternative is leaving a measured, unbounded evasion of the
+    per-shape cap in place.
     """
-    aliases = {
-        effective.casefold(): physical.casefold()
-        for effective, physical in effective_name_map(query).items()
-    }
+    aliases = _table_alias_map(query)
+    shape = normalize_query_shape(query)
+    authored: set = set()
+    _collect_authored_names(shape, authored)
     canonical = json.dumps(
-        _canonicalize(normalize_query_shape(query), aliases),
+        _canonicalize(shape, aliases, authored),
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -303,23 +429,34 @@ class InProcessDisclosureBudgetLimiter:
 
 
 def rejection_message(kind: str, limit: int, window_seconds: int, retry_after: int) -> str:
-    """The caller-visible refusal text.
+    """The caller-visible refusal text — one sentence, identical for both caps.
 
-    Names the cap and the window but deliberately NOT the table or the query
-    shape: which table is near its disclosure budget is itself a disclosure
-    channel, and echoing the shape back would confirm to a prober exactly which
-    of its variants the server considers identical.
+    Deliberately names **none** of: the table, the query shape, which cap
+    tripped, that cap's configured value, or the window length.
+
+    * The table and the shape, because which table is near its disclosure budget
+      is itself a disclosure channel, and echoing the shape back would confirm to
+      a prober exactly which of its variants the server considers identical.
+    * **Which cap tripped, and its value (TODO.md item 187).** The two branches
+      used to be textually distinct and self-describing. That directly answered
+      the prober's next question — *"will varying my shape help?"* — because
+      hitting the per-shape cap says yes and hitting the per-table cap says no.
+      The server was handing over item 186's evasion strategy rather than making
+      it be discovered blind. `DisclosureBudgetExceededError`'s own docstring
+      already claimed the caller-visible contract was indistinguishable from any
+      other budget rejection; this is the function keeping that contract.
+
+    `kind`, `limit` and `window_seconds` stay in the signature because they are
+    still recorded where they belong — `quota_kind` on the exception object feeds
+    `metrics.classify_rejection` and the operator-facing breakdown, so an
+    operator can always see which cap bit. Only the *caller* is told nothing.
+
+    `retry_after` is kept: `QuotaExceededError`'s REST mapping already puts the
+    identical value in the `Retry-After` header, so omitting it from the text
+    would withhold nothing while making the refusal less actionable for a
+    legitimate caller.
     """
-    if kind == KIND_SHAPE:
-        return (
-            f"disclosure budget exceeded: this query shape may be re-run at most "
-            f"{limit} times per {window_seconds}s window against the same table; "
-            f"retry in ~{retry_after}s"
-        )
-    return (
-        f"disclosure budget exceeded: at most {limit} aggregate queries per "
-        f"{window_seconds}s window against the same table; retry in ~{retry_after}s"
-    )
+    return f"disclosure budget exceeded; retry in ~{retry_after}s"
 
 
 _in_process_limiter = InProcessDisclosureBudgetLimiter()

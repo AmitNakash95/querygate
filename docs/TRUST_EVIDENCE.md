@@ -1,7 +1,7 @@
 <!-- GENERATED FILE — do not hand-edit. Regenerate with `make trust-page` (scripts/generate_trust_page.py). -->
 # QueryGate — Trust & Evidence Packet
 
-*Generated 2026-08-11 for QueryGate 0.1.0. Composed, read-only, from the checked-in docs and dependency-audit results below (TODO.md item 147) — this file asserts no claim of its own; every statement here is backed by the cited source doc and, where named, a reproducible `make` command. It does not imply any control, certification, or third-party attestation that isn't explicitly stated in a source doc.*
+*Generated 2026-09-05 for QueryGate 0.1.0. Composed, read-only, from the checked-in docs and dependency-audit results below (TODO.md item 147) — this file asserts no claim of its own; every statement here is backed by the cited source doc and, where named, a reproducible `make` command. It does not imply any control, certification, or third-party attestation that isn't explicitly stated in a source doc.*
 
 ## Current dependency audit status
 
@@ -11,7 +11,7 @@
 
 ## Security & reliability posture
 
-*Source: [`docs/SECURITY_POSTURE.md`](docs/SECURITY_POSTURE.md).*
+*Source: [`docs/SECURITY_POSTURE.md`](SECURITY_POSTURE.md).*
 
 # QueryGate — Security & Reliability Posture
 
@@ -43,15 +43,17 @@ that weakened any of them would fail the build.
 | **SAST** | Static security analysis of source | **Bandit** + **Semgrep OSS** (`p/python`, `p/security-audit`, `p/owasp-top-ten`) | ✅ Clean (deny-by-default) | `make sast` + `make semgrep` |
 | **Dependencies** | Known-CVE audit of the exact shipped set | **pip-audit** against `poetry.lock` `main` group | ✅ Clean — **1 reviewed allowlist entry** (asyncmy, unreachable codepath) | `make sbom` |
 | **SBOM** | Software bill of materials | **CycloneDX** | ✅ Generated per release | `make sbom` |
+| **Licences** | Third-party licence inventory of the locked **Python** packages ([report](THIRD_PARTY_LICENSES.md)) | Deny-by-default tier policy + individually recorded exceptions | 🟡 No GPL/AGPL among locked Python packages, in either group; **1 weak-copyleft (MPL-2.0 `certifi`) in the redistributed set, review pending**. Python packages only — the image's Debian/`msodbcsql18` layers are unassessed (TODO item 196) | `make license-check` |
 | **Container image** | OS + library CVEs, secrets, misconfig | **Trivy** on the shipped image | ✅ **0 HIGH/CRITICAL** (no exceptions) | `make scan-image` |
 | **Secrets** | No credential ever committed | **gitleaks** over full git history | ✅ Clean | `make scan-secrets` |
 | **DAST** | Fuzz the API for validation bypass / crashes | **Schemathesis** against the live OpenAPI schema | ✅ 0 server errors, 0 bypass | `make test-dast` |
-| **Adversarial suite** | Known bypass classes as regressions | Purpose-built pytest suite (`-m security`) | ✅ 480 tests | `make test-security` |
+| **Adversarial suite** | Known bypass classes as regressions | Purpose-built pytest suite (`-m security`) | ✅ 704 tests | `make test-security` |
 | **Reliability** | Guardrails hold under real concurrent load | Real-Postgres soak/load gates | ✅ Enforced in CI | `make test-load` / `make test-soak` |
 | **Credential isolation** | No secret on any returned model | Asserted against live OpenAPI + MCP schemas | ✅ Enforced | `pytest tests/unit/test_credential_redaction.py` |
 | **Best-practices self-assessment** | OpenSSF criteria maturity | **OpenSSF Best Practices** criteria (self-assessed) | 🟡 Self-assessed | see [below](#external-attestations) |
 
-Legend: ✅ implemented and gating CI · 🟡 self-assessed / not yet an external award.
+Legend: ✅ implemented and gating CI · 🟡 self-assessed / not yet an external
+award, **or** gating but with an open finding recorded in the row.
 
 ---
 
@@ -183,7 +185,7 @@ hand-written adversarial suite.
 ## Adversarial regression suite
 
 Beyond automated fuzzing, QueryGate carries a purpose-built adversarial suite
-(480 tests, `pytest -m security`) encoding specific known bypass classes:
+(704 tests, `pytest -m security`) encoding specific known bypass classes:
 denied-column inference, undeclared-table smuggling, predicate-as-SQL,
 schema-discovery leaks, policy-cap boundary breaches, and audit no-leak checks.
 New attack vectors are added here as regressions (see the `adversarial-probe`
@@ -222,7 +224,7 @@ claim here matters more than badge-count:
   **self-assessment against its criteria** — a genuine maturity artifact you can
   attach to a security questionnaire, and a ready-to-submit application the day
   any component is open-sourced. See
-  [docs/business/openssf-best-practices-answers.md](business/openssf-best-practices-answers.md).
+  [docs/benchmarks/openssf-best-practices-answers.md](benchmarks/openssf-best-practices-answers.md).
 - **OpenSSF Scorecard** — likewise oriented at public repositories
   (branch-protection introspection, public badge serving). Available to enable
   as an internal metric if/when QueryGate is open-sourced; intentionally not run
@@ -286,6 +288,7 @@ make sast            # Bandit static analysis
 make semgrep         # Semgrep OSS rulesets (uses the official image if not installed)
 make scan-secrets    # gitleaks over full history
 make sbom            # CycloneDX SBOM + pip-audit dependency gate
+make license-check   # third-party licence inventory gate (docs/THIRD_PARTY_LICENSES.md)
 make test-dast       # Schemathesis OpenAPI fuzzing
 make test-security   # adversarial regression suite
 make scan-image      # Trivy scan of the built container image
@@ -293,20 +296,25 @@ make security-scan   # sast + semgrep + scan-secrets + sbom + test-dast in one s
                      # (test-security and scan-image stay separate)
 ```
 
-*Last reviewed: 2026-08-11 — every row in the table above was independently
-re-run against this exact tree that day, not carried forward from a prior CI
-result: `make sast` (Bandit, clean), `make semgrep` (0 findings), `make
+*Last reviewed: 2026-08-11 — every row in the table above **except Licences**
+was independently re-run against the tree at that commit, not carried forward
+from a prior CI result: `make sast` (Bandit, clean), `make semgrep` (0 findings), `make
 scan-secrets` (gitleaks, 352 commits scanned, no leaks), `poetry build` +
 `make sbom` (pip-audit clean, 1 allowlisted entry as documented), `make
 scan-image` (Trivy, debian 12.15 base + 57 Python packages, 0
-vulnerabilities), `make test-security` (480 tests), and `make test-dast`
-(1755/1755 checks, 72 operations). (Bump this date whenever a row changes.)
+vulnerabilities), `make test-security` (green; the suite has grown since, and its
+current size is the CI-gated figure in the Adversarial-suite row above rather
+than a number frozen into this paragraph), and `make test-dast`
+(1755/1755 checks, 72 operations). The **Licences** row was added later, on
+2026-08-21, and re-run that day (`make license-check`: 138 locked packages, 60
+redistributed, report current); the other rows were not re-run then and still
+carry their 2026-08-11 evidence. (Bump this date whenever a row changes.)
 Keep this page honest with the `claim-verify` workflow — every row must
 point at a gate that exists and passes.*
 
 ## Compliance control mapping
 
-*Source: [`docs/COMPLIANCE_MAPPING.md`](docs/COMPLIANCE_MAPPING.md).*
+*Source: [`docs/COMPLIANCE_MAPPING.md`](COMPLIANCE_MAPPING.md).*
 
 # Compliance control mapping (SOC 2 / ISO 27001 readiness)
 
@@ -407,7 +415,7 @@ certification effort starts from a mapped baseline rather than a blank page.
 | Criterion | QueryGate control | Evidence | Status |
 |---|---|---|---|
 | CC9.1 Risk mitigation | Concurrency limits, timeouts, result-size caps, per-principal quotas, query-cost gating protect the operational DB. | `execution/concurrency.py`, `execution/quota.py`, `execution/cost_estimation.py` | Product-provided |
-| CC9.2 Vendor & third-party management | Dependency allowlist + SBOM is the software-supply-chain half; vendor-management *process* is the org's. | `docs/SECURITY_POSTURE.md`; dep-audit | Product + Org |
+| CC9.2 Vendor & third-party management | Dependency allowlist + SBOM + third-party licence inventory is the software-supply-chain half; vendor-management *process* is the org's. | `docs/SECURITY_POSTURE.md`; `docs/THIRD_PARTY_LICENSES.md` (`make license-check`); dep-audit | Product + Org |
 
 ## Confidentiality (C-series)
 
@@ -485,7 +493,7 @@ remainder.
 
 ## Adversarial benchmark report
 
-*Source: [`docs/business/SECURITY_BENCHMARK.md`](docs/business/SECURITY_BENCHMARK.md).*
+*Source: [`docs/benchmarks/SECURITY_BENCHMARK.md`](benchmarks/SECURITY_BENCHMARK.md).*
 
 # QueryGate adversarial security benchmark
 
@@ -494,7 +502,7 @@ guardrails behave against a corpus of boundary attacks — and how a naive
 raw-SQL-forwarding gateway behaves against the same attacks.**
 
 This document turns the adversarial "five-minute demo" from
-[`GO_TO_MARKET.md`](GO_TO_MARKET.md) — historically performed live by a
+the go-to-market plan (internal) — historically performed live by a
 salesperson — into a numbers-on-the-page artifact anyone can regenerate. It is
 the evidence behind the claim that structurally forbidding raw SQL is a
 categorically different posture from filtering or trusting a model-generated
@@ -522,7 +530,7 @@ poetry run querygate-security-benchmark list
 
 Exit code is `0` iff the run is clean (every attack caught, no regressions), so
 the same command gates CI and a periodic integrity job. The corpus lives in
-[`benchmarks/security_boundary_v1.yaml`](../../benchmarks/security_boundary_v1.yaml);
+[`benchmarks/security_boundary_v1.yaml`](../benchmarks/security_boundary_v1.yaml);
 the runner is `querygate.security_benchmark`; the harness is regression-locked
 by `tests/unit/test_security_benchmark.py`.
 
@@ -542,7 +550,7 @@ by `tests/unit/test_security_benchmark.py`.
    reproducible by a third party. (Only the latency figures vary run to run and
    are reported as informational.)
 3. **It is honest by construction.** Documented inference residuals
-   ([`docs/INFERENCE_RISKS.md`](../INFERENCE_RISKS.md)) are carried in the
+   ([`docs/INFERENCE_RISKS.md`](INFERENCE_RISKS.md)) are carried in the
    corpus and reported in their own line — the benchmark discloses what
    QueryGate does *not* block rather than cherry-picking only its wins. The
    `test_every_attack_case_declares_a_vulnerable_baseline` test prevents the
@@ -623,14 +631,14 @@ comparison is scoped as phase 2 below.
 This benchmark is the **publishable subset** of QueryGate's adversarial QA. The
 full guarantee set — including error-masking, credential redaction, catalog
 disclosure, concurrency/DoS, and config-governance authorization — is
-regression-locked in [`tests/security/`](../../tests/security/) (TODO.md item
-28) and described in [`docs/THREAT_MODEL.md`](../THREAT_MODEL.md). The benchmark
+regression-locked in [`tests/security/`](../tests/security/) (TODO.md item
+28) and described in [`docs/THREAT_MODEL.md`](THREAT_MODEL.md). The benchmark
 exists to make the structural core of that posture *legible and reproducible to
 an outside reviewer*, not to replace the full suite.
 
 ## Responsible disclosure program
 
-*Source: [`SECURITY.md`](SECURITY.md).*
+*Source: [`SECURITY.md`](../SECURITY.md).*
 
 # Security Policy
 
@@ -643,14 +651,26 @@ reports with corresponding seriousness.
 
 **Please do not open a public issue for security vulnerabilities.**
 
-Report privately to the maintainers:
+**Preferred channel — GitHub private vulnerability reporting.** Open a
+[private security advisory](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability)
+on this repository. It is private to you and the maintainers, it threads the
+whole report and fix in one place, and it is the channel we monitor.
 
-- Email: **security@querygate.invalid** (subject line prefixed `[QueryGate Security]`)
-- Or, if you have repository access, open a
-  [GitHub private security advisory](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability).
+**Email — not yet available.** A dedicated
+`security@<DOMAIN — to be registered>` alias is the intended second channel and
+**does not exist yet**; there is no legal entity or domain behind QueryGate at
+the time of writing. Until this placeholder is replaced with a real address,
+the GitHub advisory above is the only reporting channel, and we would rather
+say that plainly than publish an address that nobody answers. A personal
+mailbox previously stood here; it was removed deliberately, because "who
+answers a vulnerability report, and how" is a property of the project, not of
+one person's inbox.
 
-> Maintainer note: replace the address above with a dedicated
-> `security@<your-domain>` alias before wider distribution.
+> Maintainer checklist before wider distribution: register the domain, stand up
+> the `security@` alias with a monitored inbox and a documented on-call owner,
+> replace the placeholder above, enable **Settings → Code security → Private
+> vulnerability reporting** on the public repository, and re-run
+> `make trust-page` so `docs/TRUST_EVIDENCE.md` picks up the change.
 
 Please include:
 
@@ -736,9 +756,9 @@ new release rather than a backport unless otherwise agreed.
 ## How we back these guarantees
 
 The claims above are enforced by code and tested in CI, not asserted by
-convention. See [docs/SECURITY_POSTURE.md](docs/SECURITY_POSTURE.md) for the
+convention. See [docs/SECURITY_POSTURE.md](SECURITY_POSTURE.md) for the
 full, verifiable security posture (SAST, dependency/SBOM audit, container and
 secret scanning, OpenAPI fuzzing, the adversarial test suite, and the threat
-model), and [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the threat-by-threat
+model), and [docs/THREAT_MODEL.md](THREAT_MODEL.md) for the threat-by-threat
 control and test mapping.
 

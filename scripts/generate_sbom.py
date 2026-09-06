@@ -31,6 +31,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 LOCK_FILE = ROOT / "poetry.lock"
 ALLOWLIST_FILE = ROOT / "security" / "dependency-audit-allowlist.json"
+# The third-party licence inventory (scripts/check_licenses.py) is checked into
+# docs/ for review, but a consumer who downloads a release bundle needs it too —
+# it is the standard answer to the "list your third-party components and their
+# licences" question. Copying it into dist/ and covering it with SHA256SUMS makes
+# it a first-class release artifact alongside the SBOM, rather than a repo file a
+# reviewer has to be sent separately. The path is imported rather than restated so
+# the two scripts cannot drift apart about which file that is.
+from scripts.check_licenses import REPORT_FILE as LICENSE_REPORT  # noqa: E402
+
 DIST = ROOT / "dist"
 
 # Bootstrapped into every fresh venv by ensurepip; not a querygate dependency
@@ -39,13 +48,29 @@ DIST = ROOT / "dist"
 VENV_BOOTSTRAP_PACKAGES = frozenset({"pip", "setuptools", "wheel"})
 
 
+def _display(path: Path) -> str:
+    """Repo-relative path for messages, tolerating a path outside the repo (a
+    test pointing `DIST` at a tmp dir, or a caller building elsewhere)."""
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
 def _normalize(name: str) -> str:
     return name.lower().replace("_", "-")
 
 
-def locked_main_packages(lock_path: Path = LOCK_FILE) -> list[tuple[str, str]]:
+def locked_main_packages(
+    lock_path: Path = LOCK_FILE, environment: dict | None = None
+) -> list[tuple[str, str]]:
     """Return (name, version) pairs for poetry.lock's `main` group, filtered
-    to packages whose markers apply on this platform/interpreter."""
+    to packages whose markers apply on this platform/interpreter.
+
+    `environment` overrides "this platform" — pass
+    `check_licenses.IMAGE_ENVIRONMENT` to ask what the *published image* gets.
+    Without it, this answers for the machine running the build, which is the
+    right question for an SBOM describing the environment it just built."""
     from packaging.markers import Marker
 
     data = tomllib.loads(lock_path.read_text())
@@ -56,8 +81,11 @@ def locked_main_packages(lock_path: Path = LOCK_FILE) -> list[tuple[str, str]]:
         marker = pkg.get("markers")
         if isinstance(marker, dict):
             marker = marker.get("main")
-        if marker and not Marker(marker).evaluate():
-            continue
+        if marker:
+            parsed = Marker(marker)
+            applies = parsed.evaluate(environment) if environment else parsed.evaluate()
+            if not applies:
+                continue
         packages.append((pkg["name"], pkg["version"]))
     return sorted(packages)
 
@@ -187,6 +215,52 @@ def _write_checksums(paths: list[Path], output: Path) -> None:
     output.write_text("\n".join(lines) + "\n")
 
 
+LICENSE_GATE_COMMAND = [sys.executable, str(ROOT / "scripts" / "check_licenses.py"), "--check"]
+
+
+def stage_release_artifacts(
+    wheel: Path,
+    sdist: Path,
+    sbom_path: Path,
+    dist: Path | None = None,
+    license_report: Path | None = None,
+    gate_command: list[str] | None = None,
+) -> list[Path]:
+    """Copy the licence inventory into `dist/` and return everything SHA256SUMS covers.
+
+    Extracted from `main` so the set of checksummed artifacts is testable: an
+    artifact silently dropped from this list would be invisible to
+    `scripts/verify_release.py`, which only verifies what the manifest names.
+    """
+    # Every default is resolved here, not in the signature: a default argument is
+    # bound once at import, so `dist: Path = DIST` would ignore a caller (or a
+    # test) that rebinds the module attribute — and would then write into the
+    # real dist/ while appearing hermetic. `make verify-release` caught exactly
+    # that, which is the behaviour it exists for.
+    dist = dist if dist is not None else DIST
+    report = license_report if license_report is not None else LICENSE_REPORT
+    if not report.is_file():
+        raise SystemExit(f"{_display(report)} is missing — run `make license-report`")
+    # Existence is not enough: a stale report would be copied into dist/ and signed
+    # into SHA256SUMS, so a consumer would verify the integrity of the wrong answer.
+    # `make release-check` runs license-check before this, but `make sbom` on its own
+    # does not, so check here rather than relying on the caller's ordering.
+    license_check = subprocess.run(
+        gate_command if gate_command is not None else LICENSE_GATE_COMMAND,
+        capture_output=True,
+        text=True,
+    )
+    if license_check.returncode != 0:
+        raise SystemExit(
+            "the third-party licence inventory is stale or failing its own gate, so it "
+            "must not be shipped:\n" + license_check.stdout + license_check.stderr
+        )
+    license_copy = dist / report.name
+    license_copy.write_text(report.read_text(encoding="utf-8"), encoding="utf-8")
+    print(f"Third-party licences -> {license_copy}")
+    return [wheel, sdist, sbom_path, license_copy]
+
+
 def main() -> None:
     metadata = tomllib.loads((ROOT / "pyproject.toml").read_text())
     version = metadata["project"]["version"]
@@ -203,11 +277,11 @@ def main() -> None:
 
         sbom_path = DIST / f"querygate-{version}.cdx.json"
         sbom = _generate_cyclonedx_sbom(venv_python, sbom_path, version)
-        print(f"SBOM: {len(sbom['components'])} components -> {sbom_path.relative_to(ROOT)}")
+        print(f"SBOM: {len(sbom['components'])} components -> {_display(sbom_path)}")
 
         audit_path = DIST / f"querygate-{version}.vuln-report.json"
         report = _audit_dependencies(venv_dir, audit_path)
-        print(f"Dependency audit report -> {audit_path.relative_to(ROOT)}")
+        print(f"Dependency audit report -> {_display(audit_path)}")
 
     unreviewed = _evaluate_findings(report, allowlist)
     if unreviewed:
@@ -215,12 +289,13 @@ def main() -> None:
             "dependency audit found vulnerabilities with no reviewed allowlist entry:\n- "
             + "\n- ".join(unreviewed)
             + f"\n\nReview each finding, then either upgrade the dependency or add a "
-            f"justified entry to {ALLOWLIST_FILE.relative_to(ROOT)}."
+            f"justified entry to {_display(ALLOWLIST_FILE)}."
         )
     print(f"Dependency audit: no unreviewed known vulnerabilities ({len(allowlist)} allowlisted).")
 
-    _write_checksums([wheel, sdist, sbom_path], DIST / "SHA256SUMS")
-    print(f"Checksums -> {(DIST / 'SHA256SUMS').relative_to(ROOT)}")
+    checksummed = stage_release_artifacts(wheel, sdist, sbom_path)
+    _write_checksums(checksummed, DIST / "SHA256SUMS")
+    print(f"Checksums -> {_display(DIST / 'SHA256SUMS')}")
 
 
 if __name__ == "__main__":

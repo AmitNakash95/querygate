@@ -1,0 +1,84 @@
+name: Bug report
+description: Something behaves differently from what the docs say it does.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        **Do not report a security vulnerability here.** A public issue
+        describing a policy bypass is a public disclosure of that bypass — use a
+        [private security advisory](https://github.com/AGitmit/QueryGate/security/advisories/new)
+        instead. See `SECURITY.md`.
+
+
+        Please redact real data, credentials, and connection strings from
+        everything you paste below.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what did you expect instead?
+      description: >-
+        If a document says something different from what you observed, link the
+        line — a docs/code disagreement is itself a bug in this project.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: >-
+        The `StructuredQuery` AST, REST request, or MCP tool call that triggers
+        it, plus the relevant part of `policy.yaml`. A reproduction against the
+        bundled demo Postgres (`docker compose up -d`) is ideal.
+      render: json
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: QueryGate version or image digest
+      placeholder: "0.1.0, or ghcr.io/agitmit/querygate@sha256:..."
+    validations:
+      required: true
+  - type: dropdown
+    id: dialect
+    attributes:
+      label: Database dialect
+      options:
+        - PostgreSQL
+        - MSSQL / SQL Server
+        - MySQL
+        - Snowflake (compile-only, not live-verified)
+        - BigQuery (compile-only, not live-verified)
+        - Not dialect-specific
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface?
+      options:
+        - REST
+        - MCP
+        - Admin UI
+        - CLI
+        - Other / not sure
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: >-
+        Python version, OS, how you are running it (Poetry, Docker Compose,
+        Helm), and the concurrency backend (`in_process` or `redis`).
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or error output
+      description: Redact SQL literals, predicate values, and credentials.
+      render: shell
+    validations:
+      required: false

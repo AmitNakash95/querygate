@@ -9,6 +9,32 @@ authors = [{ name = "Amit Nakash" }]
 readme = "README.md"
 requires-python = ">=3.11,<4.0"
 dynamic = ["dependencies"]
+# PEP 639: `LICENSE` is the full Apache-2.0 text and is shipped in the sdist
+# and the wheel. The SPDX expression is declared rather than omitted — the
+# opposite of the proprietary posture that preceded it — so every compliance
+# scanner, package index and SBOM consumer resolves the grant automatically
+# instead of having to read a notice. See COMMERCIAL.md for what is free
+# (all of this repository) and what is planned as a paid service.
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+classifiers = [
+    # Only the Python version CI actually runs is claimed. `requires-python`
+    # permits 3.12+, but nothing verifies it, so nothing asserts it here.
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Database",
+    "Topic :: Database :: Front-Ends",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
 
 [project.scripts]
 querygate = "querygate.run:main"
@@ -22,6 +48,7 @@ querygate-scope-catalog = "querygate.scope_catalog_cli:main"
 querygate-config = "querygate.config_cli:main"
 querygate-quickstart = "querygate.quickstart_cli:main"
 querygate-shapes = "querygate.observed_shapes_cli:main"
+querygate-login = "querygate.login_cli:main"
 
 [project.urls]
 Repository = "https://github.com/AGitmit/QueryGate"

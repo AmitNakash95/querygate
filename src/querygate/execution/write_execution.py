@@ -70,31 +70,14 @@ if TYPE_CHECKING:
     from querygate.execution.service import ApprovalResolver
 
 
-class WriteResult(pyd.BaseModel):
-    """Redaction-safe result of a committed governed write. No row/predicate
-    values — the op, target table, and how many rows were affected."""
-
-    operation: str
-    table: str
-    affected_rows: int
-    executed: bool = True
-
-    model_config = pyd.ConfigDict(extra="forbid")
-
-
-class WriteBatchItemResult(pyd.BaseModel):
-    """One write's outcome in a batch — a committed `WriteResult`'s fields, or an
-    `error` (a failing write never drops the rest of the batch)."""
-
-    operation: Optional[str] = None
-    table: Optional[str] = None
-    affected_rows: Optional[int] = None
-    executed: bool = False
-    error: Optional[str] = None
-    # Sibling of BatchQueryItemResult's identical fields (TODO.md item 128) —
-    # populated only when `error` is specifically an ApprovalRequiredError.
-    approval_fingerprint: Optional[str] = None
-    approval_reasons: Optional[List[str]] = None
+# Response models live in `results.py` so this module defines no
+# `pydantic.BaseModel` subclass and can therefore be Cython-compiled — this is
+# item 211's write-side gate site. Re-exported so existing
+# `from querygate.execution.write_execution import WriteResult` imports keep working.
+from querygate.execution.results import (  # noqa: E402
+    WriteBatchItemResult,
+    WriteResult,
+)
 
 
 def _write_shape(statement: WriteStatement, table_name: str) -> dict:
@@ -137,6 +120,13 @@ class WriteExecutionService:
     async def execute(
         self, statement: WriteStatement, *, approval_token: Optional[str] = None
     ) -> WriteResult:
+        # Ahead of everything, including the audit-wrapped try below: an expired
+        # deployment must not open a session or spend a slot for a write it is
+        # going to refuse. `WriteExecutionService` and `WritePreviewService` are
+        # separate classes and `_execute_many_atomically` opens its own
+        # `session_scope`, so each entry point carries its own call — a gate only
+        # in `StructuredQueryService` would leave every governed
+        # INSERT/UPDATE/DELETE running.
         start = time.monotonic()
         policy = get_policy(self._connection_id, principal=self._principal)
         sql = ""

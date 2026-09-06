@@ -1,0 +1,52 @@
+name: Feature request
+description: Propose a capability, or a change to an existing one.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        **Check the non-goals first.** A raw-SQL escape hatch (`execute_sql` in
+        any form), executing model-generated code, stored-procedure
+        pass-through, a mandatory semantic-modelling step, and a warehouse of
+        our own are **permanent non-goals** — they are the product's identity,
+        not a backlog. See the README's "What it deliberately does not do" and
+        [`docs/LIMITATIONS.md`](https://github.com/AGitmit/QueryGate/blob/main/docs/LIMITATIONS.md).
+
+
+        Also check [`TODO.md`](https://github.com/AGitmit/QueryGate/blob/main/TODO.md)
+        — the worklist is public and this may already be tracked.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you actually trying to accomplish?
+      description: >-
+        Describe the goal, not just the feature. The best proposals here have
+        been ones where the underlying need turned out to be reachable with
+        primitives that already exist.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like QueryGate to do?
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What did you try instead, and why did it not work?
+      description: >-
+        QueryGate's engine philosophy is to expose primitives rather than
+        pre-solve query construction. If you tried to compose this from existing
+        AST features, say what fell short.
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you submit
+      options:
+        - label: This is not one of the listed permanent non-goals.
+          required: true
+        - label: I checked `TODO.md` and `docs/LIMITATIONS.md`.
+          required: true

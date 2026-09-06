@@ -756,7 +756,7 @@ async def test_audit_browser_finds_newest_events_past_a_huge_prefix_of_old_lines
 
 
 def test_audit_browser_exposes_exactly_four_filters_in_the_ui():
-    """`CUSTOMER_README.md`, `sales/index.html` and `docs/business/GO_TO_MARKET.md`
+    """`CUSTOMER_README.md`, `sales/index.html` and the go-to-market analysis
     each tell a customer or a salesperson which filters the admin UI's Audit view
     offers. That claim was wrong once already — an earlier revision said five,
     counting the `action` parameter that the REST endpoint accepts but the UI has
