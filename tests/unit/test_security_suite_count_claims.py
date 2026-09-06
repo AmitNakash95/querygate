@@ -46,6 +46,15 @@ CLAIM_FILES = (
     "docs/SECURITY_POSTURE.md",
     "docs/TRUST_EVIDENCE.md",
     "docs/product-guide.html",
+)
+
+# Surfaces that exist only in this (private) tree — `landing/` and
+# `docs/business/` are excluded from the public split (see
+# docs/business/OSS_SEPARATION_PLAN.md), so a hard `is_file()` assertion on
+# these would fail every run of this test in the public repo. Checked when
+# present, skipped rather than asserted when absent, so this repo keeps full
+# coverage without breaking the published copy.
+PRIVATE_ONLY_CLAIM_FILES = (
     "landing/security.html",
     "docs/business/COMPARISON_MICROSOFT_DAB.md",
     "docs/business/COMPARISON_GOOGLE_MCP_TOOLBOX.md",
@@ -125,6 +134,19 @@ def test_every_document_quotes_the_real_adversarial_suite_size():
     for name in CLAIM_FILES:
         path = ROOT / name
         assert path.is_file(), f"{name} is in CLAIM_FILES but no longer exists — update the list"
+        for quoted in _quoted_counts(path):
+            if quoted != actual:
+                wrong.append(f"{name} quotes {quoted}")
+    for name in PRIVATE_ONLY_CLAIM_FILES:
+        path = ROOT / name
+        if not path.is_file():
+            # Not "update the list" — these are deliberately absent from the
+            # OPEN-SOURCE distribution (landing/, docs/business/), which the
+            # publication filter strips. A claim that does not ship cannot be
+            # stale, and failing here would make the public repository's CI
+            # red for files a contributor can neither see nor fix. Still a
+            # real guard in the private repository, where every entry exists.
+            continue
         for quoted in _quoted_counts(path):
             if quoted != actual:
                 wrong.append(f"{name} quotes {quoted}")

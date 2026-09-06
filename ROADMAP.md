@@ -36,8 +36,7 @@ no competitor's passes.** A re-sequence must cite which pillar or gap it serves.
 An item that advances none of them is a signal to question the item, not the
 order.
 
-The 2026-07-22 competitive scan (an internal competitive analysis,
-`docs/business/COMPETITORS.md`) reached one conclusion that drives the whole
+The 2026-07-22 competitive scan reached one conclusion that drives the whole
 sequence: **QueryGate's white space is real, but the thing that converts
 "promising architecture" into "must-buy" is proof, not more features — and the
 gate on everything is landing one paid design partner.**
@@ -472,7 +471,7 @@ deferred; it is not part of shipping the subscription.
   same-session fix.*
 - [x] **152** — Sales/landing pages don't reflect items 19 (MySQL)/134 (WORM
   retention) shipping. *Surfaced 2026-08-06 by `claim-reviewer` while
-  auditing items 19/128/134/144 — an internal go-to-market analysis was updated correctly,
+  auditing items 19/128/134/144 — internal sales materials were updated correctly,
   the public pages weren't; run `pitch-sync`.*
 - [x] **153** — `CHANGELOG.md` has no `[Unreleased]` entry for items 19
   (MySQL) or 134 (WORM retention). *Surfaced 2026-08-06 by `claim-reviewer`
@@ -963,7 +962,7 @@ position.
   headers would leak query semantics to intermediaries.* **Depends on 128, 127.**
 - [x] **132** — Reconcile stale shipped-status claims left behind by items
   90–93. *Surfaced by the `auditors` claim review on 2026-07-30. Cheap, and it
-  is outward-facing: an internal go-to-market analysis understates four shipped capabilities, and
+  is outward-facing: internal sales materials understate four shipped capabilities, and
   item 93's body still points an implementer at a module deleted in July.*
 - [x] **133** — Caller-facing, quota-metered verdict endpoint (play P4).
   *Added 2026-07-30 by `competitive-scan`; scope corrected the same day by

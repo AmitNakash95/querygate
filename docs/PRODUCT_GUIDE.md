@@ -6965,7 +6965,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   generator disagree, so "always current" is enforced the same way item 95's
   `docs/SCOPE_CATALOG.md` guard already is, not left as a habit to remember.
   Deliberately no HTML/CSS page: the item's own scope explicitly rules out
-  this becoming a marketing page (that's `pitch-sync`/the go-to-market analysis's
+  this becoming a marketing page (that's `pitch-sync`'s
   job) — a generated Markdown doc is the evidentiary companion, not a
   landing-page replacement for `landing/security.html`.
 
@@ -8590,8 +8590,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   it, and verifying/tuning it is tracked as the measure-first TODO.md item 94.
   We deliberately do **not** build an in-product result cache or pre-aggregation
   cache (that would make QueryGate a stale-data caching engine and duplicate what
-  the DB already does well). See `docs/business/COMPETITOR_CUBE.md` for the
-  companion competitive framing.
+  the DB already does well).
 - **2026-07-22 — Delegated agent identity maps the *human* to `Principal.subject`
   and the *agent* to a new `Principal.actor` chain (TODO.md item 90, phase 1).**
   The two-identity, on-behalf-of model (RFC 8693 token exchange; the MCP
