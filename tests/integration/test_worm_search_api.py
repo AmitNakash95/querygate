@@ -20,6 +20,7 @@ from querygate.audit.events import AuditEvent
 from querygate.audit.ledger import GENESIS_PREV_HASH, make_record, verify_envelope_hash
 from querygate.audit.worm_search import _encode_cursor, _filters_fingerprint
 from querygate.core.config import AppConfig
+from querygate.metrics import REGISTRY
 
 pytestmark = pytest.mark.integration
 
@@ -339,3 +340,179 @@ async def test_a_type_confused_seq_is_a_200_with_counts_not_a_masked_500(s3):
     assert body["chain_breaks"] == 1
     assert body["unverified"] == 1
     assert body["events"] == []
+
+
+def _rejected_total() -> float:
+    return (
+        REGISTRY.get_sample_value(
+            "querygate_audit_worm_search_requests_total", {"outcome": "rejected"}
+        )
+        or 0.0
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_missing_time_range_increments_the_rejected_counter():
+    """TODO.md item 185's acceptance criterion, asserted through the REAL
+    route rather than by calling `search_worm_archive` directly.
+
+    `build_worm_search_result` validates the window and limit itself, before
+    the backend-enabled check and before `search_worm_archive` — so these
+    rejections never reached that function's own `outcome="rejected"`
+    increment. `metrics.py` nonetheless documented the label as covering
+    "missing/over-wide time range, limit out of range", so an operator
+    alerting on bound-violating callers saw nothing. The pre-existing unit
+    test passed only because it exercised a path production never takes."""
+    before = _rejected_total()
+    app = create_app(_settings((_WORM_SEARCH_SCOPE,), backend="jsonl_chained_s3_worm"))
+
+    resp = await _get(app, {})
+
+    assert resp.status_code == 422
+    assert _rejected_total() == before + 1
+
+
+@pytest.mark.asyncio
+async def test_an_over_wide_window_increments_the_rejected_counter():
+    """The second bound `metrics.py` names. Distinct from the missing-range
+    case above: it reaches a different validator (`_validate_window`'s width
+    check rather than its required-field check), so a fix that only wrapped
+    one of the two calls would still pass the other test."""
+    before = _rejected_total()
+    app = create_app(_settings((_WORM_SEARCH_SCOPE,), backend="jsonl_chained_s3_worm"))
+
+    resp = await _get(
+        app,
+        {
+            "start_time": "2000-01-01T00:00:00+00:00",
+            "end_time": "2026-01-01T00:00:00+00:00",
+        },
+    )
+
+    assert resp.status_code == 422
+    assert _rejected_total() == before + 1
+
+
+@pytest.mark.asyncio
+async def test_a_disabled_backend_still_counts_a_bound_rejection():
+    """The rejection is counted even when WORM archiving is off — the
+    validation contract is unconditional (claim-reviewer, 2026-08-06), so the
+    metric that reports its violations must be too, or the counter silently
+    depends on which backend happens to be configured."""
+    before = _rejected_total()
+    app = create_app(_settings((_WORM_SEARCH_SCOPE,), backend="jsonl_chained"))
+
+    resp = await _get(app, {})
+
+    assert resp.status_code == 422
+    assert _rejected_total() == before + 1
+
+
+@pytest.mark.asyncio
+async def test_a_successful_search_does_not_increment_the_rejected_counter():
+    """Guards the obvious over-correction: incrementing on every request, or
+    in a `finally`, would satisfy all three tests above."""
+    before = _rejected_total()
+    app = create_app(_settings((_WORM_SEARCH_SCOPE,), backend="jsonl_chained_s3_worm"))
+    with mock_aws():
+        client = boto3.client("s3", region_name="us-east-1")
+        client.create_bucket(Bucket=_BUCKET, ObjectLockEnabledForBucket=True)
+        resp = await _get(
+            app,
+            {
+                "start_time": "2026-03-15T00:00:00+00:00",
+                "end_time": "2026-03-16T00:00:00+00:00",
+            },
+        )
+
+    assert resp.status_code == 200
+    assert _rejected_total() == before
+
+
+@pytest.mark.asyncio
+async def test_an_out_of_range_limit_increments_the_rejected_counter():
+    """The THIRD bound `metrics.py` names, and the one a partial fix misses.
+    Wrapping only `_validate_window` satisfies every other counter test here
+    while leaving limit rejections uncounted — mutation-verified, that exact
+    mutation survived until this test existed.
+
+    `limit < 1` is caught by FastAPI's own `Query(ge=1)` and never reaches the
+    domain validator, so the reachable case is a limit ABOVE
+    `audit_worm_search_max_limit` (500 by default)."""
+    before = _rejected_total()
+    app = create_app(_settings((_WORM_SEARCH_SCOPE,), backend="jsonl_chained_s3_worm"))
+
+    resp = await _get(
+        app,
+        {
+            "start_time": "2026-03-15T00:00:00+00:00",
+            "end_time": "2026-03-16T00:00:00+00:00",
+            "limit": 100_000,
+        },
+    )
+
+    assert resp.status_code == 422
+    assert _rejected_total() == before + 1
+
+
+def _outcome_total(outcome: str) -> float:
+    return (
+        REGISTRY.get_sample_value(
+            "querygate_audit_worm_search_requests_total", {"outcome": outcome}
+        )
+        or 0.0
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_disabled_backend_counts_the_request_it_served():
+    """A `source="disabled"` result is a genuinely SERVED request — 200, a
+    real WormSearchResult — so it has to land in the outcome space like any
+    other. Counting it nowhere made `rejected / (ok+rejected+error+disabled)`
+    read 100% on every deployment with WORM archiving off, which is the
+    DEFAULT, breaking the exact ratio alert item 185 exists to enable."""
+    before = _outcome_total("disabled")
+    app = create_app(_settings((_WORM_SEARCH_SCOPE,), backend="jsonl_chained"))
+
+    resp = await _get(
+        app,
+        {
+            "start_time": "2026-03-15T00:00:00+00:00",
+            "end_time": "2026-03-16T00:00:00+00:00",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["source"] == "disabled"
+    assert _outcome_total("disabled") == before + 1
+
+
+@pytest.mark.asyncio
+async def test_every_served_or_rejected_request_lands_under_exactly_one_outcome():
+    """The property the four labels exist to provide, asserted directly: the
+    outcome space must be exhaustive. Any future early return that forgets to
+    count is a silent hole in every ratio an operator builds on this metric."""
+    app_off = create_app(_settings((_WORM_SEARCH_SCOPE,), backend="jsonl_chained"))
+    app_on = create_app(_settings((_WORM_SEARCH_SCOPE,), backend="jsonl_chained_s3_worm"))
+    before = {o: _outcome_total(o) for o in ("ok", "rejected", "error", "disabled")}
+
+    window = {
+        "start_time": "2026-03-15T00:00:00+00:00",
+        "end_time": "2026-03-16T00:00:00+00:00",
+    }
+    await _get(app_off, window)  # disabled
+    await _get(app_off, {})  # rejected
+    with mock_aws():
+        client = boto3.client("s3", region_name="us-east-1")
+        client.create_bucket(Bucket=_BUCKET, ObjectLockEnabledForBucket=True)
+        await _get(app_on, window)  # ok
+
+    after = {o: _outcome_total(o) for o in before}
+    # Per-label, not just the sum: a bare sum is label-blind and would pass if
+    # all three requests landed under the SAME outcome.
+    assert {o: after[o] - before[o] for o in before} == {
+        "disabled": 1,
+        "rejected": 1,
+        "ok": 1,
+        "error": 0,
+    }

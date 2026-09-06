@@ -83,6 +83,49 @@ All notable changes to QueryGate are documented here.
 
 ### Added
 
+- **The `query_shape` forbidden-content screener is depth-bounded and fails
+  closed** — `AUDIT_WORM_SEARCH_MAX_QUERY_SHAPE_DEPTH` (default 64, hard
+  ceiling 256). `query_shape` is the one event field the schemas'
+  `extra="forbid"` cannot constrain, so a crafted or corrupted archived line
+  could nest deeply enough to raise out of the screener's walk, turning a WORM
+  search into a masked 500 that also discarded every genuine record the page
+  had already accumulated. Over the cap now counts `malformed` — the same
+  outcome a denylisted key gets, never "screened clean". **Upgrade impact:**
+  none for realistic content; `Policy.max_where_depth` defaults to 5, an order
+  of magnitude under the cap. Raise the variable if you archive unusually
+  nested query shapes.
+- **The WORM audit archive tier now runs against any S3-API-compatible object
+  store, not AWS S3 alone** — `AUDIT_WORM_S3_ENDPOINT_URL` (empty by default,
+  meaning AWS S3 resolved by region exactly as before) points both the flush
+  monitor and the managed search at the same endpoint, so a self-hosted or
+  air-gapped deployment can have the immutable archive copy and not only the
+  local hash-chained ledger. The store **must** implement S3 Object Lock:
+  retention is still sent as Object Lock headers, so a store that ignores them
+  would accept the writes and produce ordinary deletable objects — QueryGate
+  logs an `audit.worm.custom_endpoint` warning at startup whenever the override
+  is set with the WORM backend enabled. Google Cloud Storage and Azure Blob are
+  **not** reachable this way; their immutability models are their own APIs
+  rather than S3 Object Lock. QueryGate runs no live test against any
+  third-party store — verify COMPLIANCE-mode retention against yours before
+  relying on the archive. **Upgrade impact:** none. Leaving the variable unset
+  preserves existing AWS behaviour exactly.
+- **A deny-by-default third-party licence gate over every locked Python package**
+  (`make license-check`, `scripts/check_licenses.py`), emitting
+  `docs/THIRD_PARTY_LICENSES.md` — the standard answer to the "list your third-party
+  components and their licences" question on a vendor security questionnaire. It runs in
+  the default test suite and in `make release-check`, and `make sbom` now copies the
+  report into `dist/` under `SHA256SUMS`, so it reaches a consumer with the release.
+  Strong copyleft (GPL/AGPL) fails in either dependency group and cannot be waived; weak
+  copyleft (MPL/LGPL) needs an individually recorded exception in
+  `security/copyleft-license-allowlist.json`; and a licence string the gate does not
+  recognise fails rather than being guessed. Each exception carries a machine-checked
+  `facts` block verified against `poetry.lock` and the source tree on every run, so a
+  waiver cannot outlive its own premises. Regenerate with `make license-report`.
+  **Open finding:** `certifi` (MPL-2.0) is in the redistributed set; its review — like all
+  five recorded — is still a draft awaiting confirmation, which the gate prints as a
+  `NOTICE:` on every run. The inventory covers Python packages only; the container image's
+  Debian and `msodbcsql18` layers are not assessed (TODO.md item 196).
+
 - **Two Prometheus counters put the WORM archive's chain-integrity findings on
   `/metrics`** (TODO.md item 177):
   `querygate_audit_worm_search_chain_breaks_total` and
@@ -161,8 +204,8 @@ All notable changes to QueryGate are documented here.
   `admin:audit:worm-search` scope, not implied by general observability
   read access) lets an authorized operator search the archive directly —
   bounded by a mandatory time window (default cap 730 days) and per-request
-  scan limits, with a resumable cursor for a truncated page (except a day
-  listing over the object budget — see TODO item 184). **Upgrade
+  scan limits, with a resumable cursor for a truncated page — including a
+  day listing over the object budget (TODO item 184). **Upgrade
   impact:** none for a deployment that doesn't set
   `AUDIT_SINK_BACKEND=jsonl_chained_s3_worm`; a deployment that does should
   read the fail-open buffering caveat above and monitor
@@ -502,7 +545,8 @@ All notable changes to QueryGate are documented here.
   standalone via `make sbom`. Builds a throwaway virtual environment from exactly
   `poetry.lock`'s `main` dependency group (not an unpinned resolve), generates a
   CycloneDX 1.6 SBOM and a `pip-audit` vulnerability report scoped to that locked set, and
-  writes SHA-256 checksums for the wheel, sdist, and SBOM to `dist/SHA256SUMS`. Any known
+  writes SHA-256 checksums for the wheel, sdist, SBOM, and third-party licence inventory
+  to `dist/SHA256SUMS`. Any known
   vulnerability without a reviewed entry in `security/dependency-audit-allowlist.json`
   fails the release (deny-by-default) — publishing to a registry and cryptographic
   signing remain phase 2, deferred until this project has a real publishing pipeline.
@@ -514,11 +558,11 @@ All notable changes to QueryGate are documented here.
   measures throughput/latency under concurrent load across a worker-count sweep, driving
   the real app over a real socket against a real, separately-spawned `uvicorn` process
   (not `ASGITransport` — a confound specific to concurrency measurement, see
-  `docs/business/LOAD_BENCHMARK.md`). Both are informational (not pass/fail; the
+  `docs/benchmarks/LOAD_BENCHMARK.md`). Both are informational (not pass/fail; the
   single-request tool's `--max-overhead-ms` is the one exception), need a real Postgres,
   and write a fresh, publish-ready `--markdown-out` results snapshot on every run
-  (`docs/business/PERFORMANCE_BENCHMARK_RESULTS.md` / `LOAD_BENCHMARK_RESULTS.md`). See
-  `docs/business/PERFORMANCE_BENCHMARK.md`/`LOAD_BENCHMARK.md` for full methodology.
+  (`docs/benchmarks/PERFORMANCE_BENCHMARK_RESULTS.md` / `LOAD_BENCHMARK_RESULTS.md`). See
+  `docs/benchmarks/PERFORMANCE_BENCHMARK.md`/`LOAD_BENCHMARK.md` for full methodology.
 
 - **Cumulative disclosure budget (optional, off by default)** — bounds the
   multi-query differencing that `min_group_size`'s k-anonymity floor alone does
@@ -605,6 +649,41 @@ All notable changes to QueryGate are documented here.
   unaffected; only the REST run route regressed.)
 
 ### Security
+
+- **The cumulative disclosure budget's per-shape cap was evadable, and the
+  refusal handed over the evasion strategy** (TODO.md items 186 and 187). A
+  prober could mint a fresh shape bucket per probe — and so never trip
+  `max_shape_repeats_per_window` at any configured value — by walking a select
+  alias and its `ORDER BY` reference, renaming a CTE, renaming a table alias
+  inside a nested scope, or reordering a list. Measured at **20 distinct
+  fingerprints for 20 probes**; it now measures 1. `shape_fingerprint` collapses
+  every bare reference to a caller-authored name to one token, resolves table
+  aliases from every scope rather than only the outermost, sorts every list, and
+  ignores sort direction. Separately, the refusal message named which cap
+  tripped, its configured value and the window length — which directly answered
+  "will varying my shape help?" — and is now byte-identical for both caps;
+  `quota_kind` remains on the exception for metrics and the operator breakdown.
+  **Upgrade impact:** shape fingerprints changed, so an in-flight rolling window
+  resets once on deploy. If you set only `max_aggregate_queries_per_window` on
+  the previous advice that the per-shape cap was not load-bearing, both caps are
+  now worth setting.
+- **The disclosure budget's Redis script failed `CROSSSLOT` on Redis Cluster**
+  (TODO.md item 192), turning a deliberately fail-closed privacy control into a
+  hard outage on exactly the aggregate queries it was enabled to protect. It is
+  the only limiter that passes several KEYS to one Lua script; those keys now
+  carry a per-connection hash tag so they land in one slot. Neither `fakeredis`
+  nor a single-node Redis can observe this, so the guard is a source-level
+  assertion. **Upgrade impact:** the Redis key format changed; existing budget
+  keys expire on their own window-length TTL.
+- **A principal policy override could pass `validate-config` and then 500 every
+  query for that principal** (TODO.md item 188). `policy/loader.py` validated a
+  per-principal override against the `default:` layer only, which was harmless
+  until `Policy` gained its first cross-layer validator: a default that sets
+  `min_group_size`, a connection override that removes it, and a principal
+  override that sets a disclosure cap each validated alone, loaded clean, and
+  then raised at request time as a generic 500. Overrides are now validated
+  against every merge base `PolicyStore.get` can actually resolve, so the
+  failure lands at load time with an actionable message.
 
 - **A denied-write-column configured with any capitalization other than
   all-lowercase (e.g. `{"Orders": [...]}`) was silently never enforced,

@@ -214,8 +214,8 @@ order-of-magnitude, not commitments.
 | 181 | `redis_quota.py`'s `Retry-After` is always the full window — the Lua indexes a nested `WITHSCORES` reply | S | 50 |
 | 182 | Observe mode for the disclosure budget — measure before you enforce | S–M | 179, 26 |
 | 183 | Suggest a disclosure-budget threshold from observed behavior, for human approval | M | 182 |
-| 184 | A day holding more segments than `max_objects_scanned` returns a cursor that never advances, so part of the WORM archive is unreachable, a good-faith pager loops forever, and item 177's integrity counters inflate without bound | M | 134 |
-| 185 | `AUDIT_WORM_SEARCH_REQUESTS_TOTAL{outcome="rejected"}` is unreachable for the bound rejections its own comment claims to count, because `build_worm_search_result` validates before calling `search_worm_archive` | S | 134 |
+| 184 | ✅ A day holding more segments than `max_objects_scanned` returns a cursor that never advances, so part of the WORM archive is unreachable, a good-faith pager loops forever, and item 177's integrity counters inflate without bound | M | 134 |
+| 185 | ✅ `AUDIT_WORM_SEARCH_REQUESTS_TOTAL{outcome="rejected"}` is unreachable for the bound rejections its own comment claims to count, because `build_worm_search_result` validates before calling `search_worm_archive` | S | 134 |
 | 186 | The disclosure budget's per-shape cap is evadable — a select-alias *reference* mints a fresh shape bucket per probe (measured: 20 probes, 20 fingerprints), so `max_shape_repeats_per_window` never trips; CTE-rename, nested-alias and list-order vectors share the root cause | M | 179 |
 | 187 | A disclosure-budget refusal tells the caller which cap tripped, its configured value and the window length, contradicting the exception's own stated contract and handing over item 186's evasion strategy | S | 179 |
 | 188 | A principal policy override can fail `Policy` validation at request time and 500 every query for that principal, after `validate-config` accepted it | S | 179 |
@@ -223,9 +223,38 @@ order-of-magnitude, not commitments.
 | 190 | Four claim drifts on outward-facing surfaces unrelated to WORM search: MSSQL cost estimation, four-eyes approval + admin UI, a README self-contradiction, and the unconditional "resumable page" claim | S | — |
 | 191 | `write_preview` is an unfloored, unbudgeted exact-count oracle, so a write-scoped caller can difference around items 88 and 179 | S–M | 93, 179 |
 | 192 | The disclosure budget's Redis script passes multiple KEYS, which fails CROSSSLOT on Redis Cluster — turning a fail-closed control into an outage on the queries it protects | S | 179 |
-| 193 | `docs/product-guide.html` has no freshness gate against `docs/PRODUCT_GUIDE.md`, so the generated copy most likely to be shared goes stale silently | S | — |
-| 194 | Three crafted-or-corrupt WORM lines still escape `search_worm_archive` as a masked 500: a non-ASCII `hash` (reachable by ordinary corruption) and two unbounded recursions | S–M | 134 |
+| 193 | ✅ `docs/product-guide.html` has no freshness gate against `docs/PRODUCT_GUIDE.md`, so the generated copy most likely to be shared goes stale silently | S | — |
+| 194 | ✅ Three crafted-or-corrupt WORM lines still escape `search_worm_archive` as a masked 500: a non-ASCII `hash` (reachable by ordinary corruption) and two unbounded recursions | S–M | 134 |
 | 195 | ✅ Narrow a principal from the general query surface to reviewed templates: `Policy.templates_only` enforcement plus an opt-in, redaction-safe observed-shape recorder (in-process + Redis-backed) that drafts a template from real traffic, with an admin-UI promotion panel | M–L | 48 |
+| 196 | ✅ The container image's non-Python layers have never been licence-assessed: `docs/THIRD_PARTY_LICENSES.md` covers `poetry.lock` only, while the shipped image also carries a Debian `bookworm` userland and Microsoft's `msodbcsql18` under `ACCEPT_EULA=Y` | M | — |
+| 197 | Offline entitlement token for the paid tier (not-before-customers) | S | — |
+| 198 | QueryGate Notary — append-only transparency log for the audit ledger's chain head (not-before-customers) | M | — |
+| 199 | ✅ Human SSO: OIDC authorization-code sign-in for the browser surfaces across eleven provider presets, a built-in local identity provider (scrypt + TOTP) for air-gapped and break-glass use, a deny-by-default file-configured claim→scope mapping, CSRF-bound sessions, and an RFC 8628 device grant for CLI callers | L | 10, 90, 95 |
+| 200 | ✅ Per-surface credential-type policy: an allowlist over `Principal.auth_method` for the console / REST / MCP surfaces, whose default closes the admin control plane to static API keys the moment SSO is enabled | S–M | 199 |
+| 201 | ✅ The WORM archive tier is reachable only against AWS S3 (`endpoint_url` is never set), so on-prem/air-gapped deployments cannot have the immutable copy at all | S | 134 |
+| 202 | The `digests_equal` non-ASCII hazard is unfixed at six `hmac.compare_digest` sites outside `audit/ledger.py` (TOTP code, OIDC state/nonce, CSRF token, PKCE challenge), turning a clean 401/403/422 into a masked 500 | S | 194, 199 |
+| 203 | An unparseable predecessor exempts one chain link on a resumed page (accept-as-given), while the blank-run walk fails closed for the same threat shape | S | 172, 194 |
+| 210 | ✅ Proprietary licence transition: retire the BSL apparatus (LICENSE body, EULA becomes the licence of record with subscription clauses, Change-Date targets + script + test + both CI call sites, and ~30 documents asserting a source-available future) | M | — |
+| 211 | ✅ Subscription layer — the entitlement gate: two enforcement funnels (reads via `_validate_and_compile`, writes at the three write *service* entry points), 402 registered in seven registries, observe/enforce as a signed field, wall-clock high-water mark and serial floor | L | 210, 212 |
+| 212 | ✅ Control plane — accounts, Stripe subscriptions, KMS-signed entitlement issuance, enrolment, append-only issuance ledger, in `control-plane/` with its own lockfile and mirror CI gates | XL | — |
+| 213 | Activation — bind a deployment to a subscription via OAuth2 (Google/Microsoft) + MFA, browser and device flows, control-plane-assigned `deployment_id`, unactivated deployments inert | L | 199, 212 |
+| 214 | Single obfuscated compiled binary — Nuitka feasibility spike first (pydantic-core, SQLAlchemy dispatch, MCP annotation resolution), then reproducible build preserving cosign + SLSA provenance | XL | — |
+| 215 | ✅ One-command install and first-boot self-configuration — no operator-authored file needed to reach activation; safe-by-default starter policy; first connection added through the UI | M | 213 |
+| 216 | ✅ Renewal countdown and lapse UX — banner with day countdown in both UIs under 30 days when auto-renew is off, email, coarse health field, metric, CLI line; accessible by construction | M | 211 |
+| 217 | Customer portal — OAuth2 signup, Stripe Checkout, subscription and deployment management, cancellation flow stating the no-refund terms before confirming, downloads and docs | XL | 212 |
+| 218 | Setup guides and quickstart docs for the SaaS motion — one-screen quickstart, per-target deploy guides, air-gapped guide, troubleshooting, rewritten `CUSTOMER_README.md` and landing/sales copy | M | 215 |
+| 219 | Pre-launch codebase cleanup pass — `repo-audit`, `dep-audit`, `test-gap`, `claim-verify`, `security-invariant-check`; delete BSL dead code; close open defects 192 and 194; full CI matrix green | L | 210 |
+| 222 | The product-guide HTML generator emits a document fragment — no doctype, `lang`, `charset` or viewport meta, so the generated customer-facing page fails WCAG 3.1.1 and its own mobile breakpoint never fires; plus a missing skip link, a split Decision Log list, and the phone-home scan not covering the two shipped `.js` files (load-bearing at item 216) | S | — |
+| 223 | Decide the background catalog refresh's behaviour on a lapsed subscription — the timer-driven reflection path is not subscription-gated while the three caller-initiated ones are; either gate it with a visible state or make the carve-out deliberate and documented | S | 216 |
+| 224 | Bring the pre-existing console surfaces up to the renewal banner's accessibility bar — `#global-banner` is a `hidden` `role="status"` element in both consoles, and neither isolates bidirectional text in database-supplied identifiers | M | 216 |
+| 225 | An entitlement schema-version bump has no compatibility window — `verify.py` rejects any version but its own and the refresh request carries no client version, so the next bump silently removes the countdown from skewed deployments | S | 216 |
+| 226 | `build_provider` in `billing.py` still special-cases construction at the registry, unlike the email registry beside it | XS | 212 |
+| 227 | ✅ ClusterFuzzLite coverage is shallow because `pydantic-core` is native — the model fuzz target plateaued at 31 coverage features over 2.7M executions, so a clean run means "no crash on random bytes", not "the input space was explored" | S | — |
+| 228 | ✅ Microsoft's proprietary `msodbcsql18` ships inside the image, but Apache-2.0 has no third-party pass-through and a public image reaches people who agreed to nothing — **blocks the first public image release** | S | 196 |
+| 229 | The control plane emails customers that lapse causes HTTP 402 refusals — the open-source gateway has no gate, so the sentence describes something that cannot happen; its product-side counterpart and the three agreement tests are gone | M | 228 |
+| 230 | ✅ The hardened image generated an admin API key that was never added to `api_keys`, so `docker run` produced a deployment where every authenticated request 401'd — concealed by a release smoke that sent no credential at all | S | 215 |
+| 221 | Move validator bodies out of the model classes into compilable sibling modules — 30 validators / 602 lines of enforcement logic (join form, window scope, CTE names, set ops, credential shape) currently ship readable because a module defining `BaseModel` cannot be Cython-compiled | M | 214 |
+| 220 | ✅ Deny-by-default at table and column granularity: a `Policy` allow-list with no allow-all fallback, so an empty `allowed_tables` denies instead of allowing. Opt-in (default off) so no existing deployment changes behaviour; the starter policy turns it on | M | — |
 
 ✅ = done (see item body below for exactly what shipped and what, if
 anything, was intentionally left out of scope); a parenthesized phase note
@@ -429,7 +458,8 @@ into a throwaway venv (so the repo's own dev-tooling dependencies never
 pollute the SBOM or the audit), and produces three artifacts in `dist/`:
 a CycloneDX 1.6 SBOM (`querygate-<version>.cdx.json`), a `pip-audit`
 vulnerability report (`querygate-<version>.vuln-report.json`), and a
-`SHA256SUMS` checksum manifest covering the wheel, sdist, and SBOM.
+`SHA256SUMS` checksum manifest covering the wheel, sdist, SBOM, and (since the GTM
+WP1 licence gate) `THIRD_PARTY_LICENSES.md`.
 
 The dependency audit is a real, deny-by-default release gate, not a report
 nobody reads: any known vulnerability in the locked production dependency
@@ -805,7 +835,7 @@ Three runnable MCP integration examples (LangChain/LangGraph, LlamaIndex, OpenAI
 itself is an external vendor engagement and calendar-time cost, not
 solo-engineer effort.**
 
-**Why it matters:** `docs/business/GO_TO_MARKET.md` already lists
+**Why it matters:** an internal go-to-market analysis already lists
 "independent threat-model review, formal certification, or external
 penetration testing" under things not safe to claim yet. No amount of
 internal adversarial testing (item 28) substitutes for third-party
@@ -849,7 +879,7 @@ quota per-replica unless the Redis quota backend is configured (item 50 phase
 shared), the multi-replica zero-downtime config-reload contract, multi-zone/
 multi-region topology, and a backup/restore + RTO/RPO DR procedure. Chart HA
 invariants are asserted against `helm template` in
-`tests/unit/test_helm_ha_deployment.py`. GO_TO_MARKET claims reconciled. The
+`tests/unit/test_helm_ha_deployment.py`. the go-to-market analysis claims reconciled. The
 live multi-region failover *drill* is the operator's step (checklist in HA_DR).
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 56).
@@ -870,7 +900,7 @@ that drives the **real** request-pipeline guardrails (policy validation +
 compiler parameter binding + the AST-only no-raw-SQL structural invariant)
 with no DB/network/LLM, the `querygate-security-benchmark` CLI (`run`/`list`,
 `--json`, exit-0-iff-clean so it can gate CI), and the published report
-`docs/business/SECURITY_BENCHMARK.md`. Current corpus: QueryGate blocks
+`docs/benchmarks/SECURITY_BENCHMARK.md`. Current corpus: QueryGate blocks
 **16/16 (100%)** structural boundary attacks vs. a structurally-modeled
 raw-SQL-passthrough baseline at **0/16 (0%)**, with **2** documented
 inference residuals disclosed (never counted as catches) and sub-millisecond
@@ -891,7 +921,7 @@ scope. Until it ships, this item is not fully `✅ DONE` and stays inline here.
 and QA scenarios (item 36) into a repeatable, publishable comparison, not
 new attack development.
 
-**Why it matters:** `docs/business/GO_TO_MARKET.md`'s adversarial
+**Why it matters:** the go-to-market analysis's adversarial
 five-minute demo is currently a sales narrative performed live. Turning it
 into a repeatable, published benchmark (attack corpus, catch rate, latency
 overhead versus a raw-SQL agent baseline and Google's Toolbox where a fair
@@ -1173,7 +1203,7 @@ upgrade rather than accepted (see the CVE-remediation bullet).
 - **Trust surface** — `SECURITY.md` (disclosure policy + SLAs),
   `docs/SECURITY_POSTURE.md` (customer-facing status table + reproduce-it
   commands + threat-model mapping; the questionnaire artifact), and
-  `docs/business/openssf-best-practices-answers.md` (honest OpenSSF criteria
+  `docs/benchmarks/openssf-best-practices-answers.md` (honest OpenSSF criteria
   self-assessment). README "Security model" gained a posture pointer.
 
 **Honest scope note:** the **OpenSSF Best Practices badge is FLOSS/public-repo
@@ -1204,7 +1234,7 @@ distribution channel today. Both are maintainer decisions, not code work.
 ## P6 — Category-defining moats (from competitive-scan, 2026-07-22)
 
 Items 90–92 promote three of the "breakout four" features from
-`docs/business/MARKET_DOMINATION_ANALYSIS.md` (F1/F5/F3) from strategy prose
+an internal competitive analysis (F1/F5/F3) from strategy prose
 into scoped worklist items. The fourth, F2 (minimum-group-size), already
 shipped as item 88. F4 (safe NL→StructuredQuery) is deliberately **not** an
 item yet: it requires an explicit maintainer decision on model provider/posture
@@ -1230,7 +1260,7 @@ Cost/row-estimate and catalog-sensitivity triggers pause a gated read; approval 
 ## P7 — Governed Writes (flagship structural expansion — decision-gated)
 
 Item 93 is the largest scope expansion on the roadmap and the market's biggest
-unsolved problem (see `docs/business/MARKET_DOMINATION_ANALYSIS.md` §P1). It
+unsolved problem (see the competitive analysis §P1). It
 **crosses the product's read-only line** and therefore **requires an explicit
 maintainer product decision before any implementation** — the write-up below is
 a complete design and worklist, not an approved commitment. It preserves every
@@ -2041,7 +2071,7 @@ formal **extensions framework** with reverse-DNS namespacing — the tasks
 feature moved out of experimental core into `io.modelcontextprotocol/tasks`
 under it. This gives strategic play P2 ("open the contract — publish the
 StructuredQuery AST as an open standard",
-`docs/business/MARKET_DOMINATION_ANALYSIS.md` §7) a standards-blessed vehicle
+an internal competitive analysis §7) a standards-blessed vehicle
 it previously lacked: the AST can be declared as a named, versioned MCP
 extension rather than a product-specific JSON schema.
 
@@ -2085,7 +2115,7 @@ are draft-only by charter.
 
 ### 132. Reconcile stale shipped-status claims left behind by items 90–93 ✅ DONE
 
-Fixed the drift across `GO_TO_MARKET.md`, `README.md`, and `TODO.md` itself
+Fixed the drift across the go-to-market analysis, `README.md`, and `TODO.md` itself
 left behind by items 90–93 (and, surfaced along the way, items 45/50/56/58)
 describing shipped capability as open or partial; a post-build claim-reviewer
 audit caught three further stale spots in the same pass.
@@ -2311,7 +2341,7 @@ original calling principal, no SDK `RequestStateSecurity` wiring) and why.
 ### 152. Sales/landing pages don't reflect items 19 (MySQL) / 134 (WORM retention) shipping ✅ DONE
 
 Reconciled `sales/index.html`, `landing/security.html`, `landing/index.html`,
-`landing/sandbox.html`, `README.md`, and `docs/business/GO_TO_MARKET.md`'s
+`landing/sandbox.html`, `README.md`, and the go-to-market analysis's
 dialect and WORM-retention claims against what items 19/134 phase 1 actually
 shipped (MySQL support; S3 Object Lock WORM retention with the phase-2
 managed-search caveat kept explicit). **Full write-up:**
@@ -2712,7 +2742,7 @@ identical `reset_engines()`-doesn't-dispose gap (item 2).
 ### 176. Three claim-accuracy drifts found while fixing the item-134 stale WORM-search line ✅ DONE
 
 `sales/index.html`'s two sales-guardrail lists, `CUSTOMER_README.md`,
-`docs/business/GO_TO_MARKET.md` and TODO.md's own Quick-scan row for item 134
+an internal go-to-market analysis and TODO.md's own Quick-scan row for item 134
 now describe the shipped `GET /api/v1/admin/observability/worm-search` endpoint
 instead of denying it exists — each scoped to what actually ships: a bounded
 API over the S3 WORM archive, with no UI of its own, no server-side table
@@ -2912,132 +2942,17 @@ threshold an operator has already set by hand without saying so explicitly.
 
 **Effort:** M. **Depends on:** 182, 179 (shipped), 32B/32C (shipped).
 
-### 184. A day holding more segments than `max_objects_scanned` returns a cursor that never advances, so part of the WORM archive is unreachable and both integrity counters inflate without bound
+### 184. A day holding more segments than `max_objects_scanned` returns a cursor that never advances, so part of the WORM archive is unreachable and both integrity counters inflate without bound ✅ DONE
 
-**Renumbered from 179 to 184 on 2026-08-12** when the item-177 branch and the
-disclosure-budget branch were merged into `main`. Both had been cut from the
-same base and each allocated 179 and 180 independently, so the two numbers
-genuinely collided. The disclosure budget kept 179/180 because it is shipped
-code referenced from ~30 files; these two were filed-only, so renumbering them
-was the cheaper and safer side. This is the sole deviation from CLAUDE.md's
-"item numbers are permanent" rule and is recorded in the PRODUCT_GUIDE
-Decision Log. Nothing outside TODO.md/ROADMAP.md/`docs/TODO_ARCHIVE.md`
-referenced the old numbers except two `metrics.py` comments, updated in the
-same merge.
+The day-truncation cursor is now exclusive: it carries an `after` listing marker naming the last key consumed, so a day holding more segments than `max_objects_scanned` pages to exhaustion instead of re-listing its first N keys forever.
 
-**Surfaced 2026-08-11 by three of the four `auditors` reviewers
-(`security-invariant-reviewer`, `architecture-boundary-reviewer`,
-`test-contract-reviewer`, independently) auditing item 177's own commit.**
-Pre-existing since item 134 phase 2 — item 177 neither caused it nor touched
-the code path; it is filed separately because the fix is a **cursor format
-change**, which deserves its own scoping and tests rather than riding in on a
-metrics commit.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 184).
 
-`_list_day_keys` is called with `max_keys=bounds.max_objects_scanned` and no
-`StartAfter`. When one day directory holds strictly more keys than that
-budget it returns the first N with `stopped_early=True`. The key loop then
-consumes exactly those N objects without re-tripping the
-`objects_scanned >= max` guard (checked at the top of each iteration, so it
-fires only at `idx == N`, which is out of range), falls through to
-`if listing_truncated:` and returns
-`next_cursor = _encode_cursor(day, None, 0, fingerprint)` — **the start of the
-same day**, discarding the within-day position. Replaying that cursor sets
-`resume_key = None`, so `start_index` stays 0, the same N keys are listed and
-fetched again, the same events are returned again, and the same cursor comes
-back. Three consequences:
+### 185. `AUDIT_WORM_SEARCH_REQUESTS_TOTAL{outcome="rejected"}` is unreachable for the rejections its own comment claims to count ✅ DONE
 
-1. **Silently unreachable compliance records.** Every segment past key N in
-   that day can never be reached, while the response reports `truncated=True`
-   as if they were merely deferred — a compliance search cannot produce
-   records the archive holds.
-2. **An infinite paging loop** for a caller following `next_cursor` in good
-   faith, at `max_objects_scanned` real S3 GETs per lap.
-3. **Unbounded inflation of item 177's counters.** Each lap re-counts the
-   day's `chain_breaks`/`unverified`, so
-   `querygate_audit_worm_search_chain_breaks_total` climbs with how long the
-   pager ran rather than with how many segments actually broke. Item 177's
-   docs disclose per-scan counting, but this makes the magnitude untrustworthy
-   even within a single logical search.
+`build_worm_search_result` now counts its own bound rejections, so `querygate_audit_worm_search_requests_total{outcome="rejected"}` reaches the missing/over-wide window and out-of-range limit cases `metrics.py` always documented it as covering.
 
-**When it triggers — corrected 2026-08-12 (`claim-reviewer`), and it is worse
-than first filed.** The original note said "not default-triggering", reasoning
-that the default `AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` (2000) exceeds the
-~1440 segments/day a default 60s flush interval produces. That arithmetic is
-per **flushing process**, not per deployment. Segment keys are
-`prefix/YYYY/MM/DD/<timestamp>-<microsecond>.jsonl` and every replica and every
-uvicorn worker runs its own interval-driven `WormFlushMonitor` writing into the
-*same* day prefix. So the per-process ceiling multiplies: two replicas — or one
-pod with `NUM_OF_WORKERS=2` — **can** produce ~2880 objects/day against the 2000
-default, on exactly the topology `deploy/HA_DR.md` recommends, with no knob
-lowered and no interval shortened.
-
-**State the precondition, don't drop it.** ~1440/day/process is an upper bound
-under *sustained* traffic, not a property of the configuration: `flush_once`
-returns immediately on an empty drain, so a segment is written only for an
-interval that actually had an event, and nothing in QueryGate emits audit events
-on a schedule. Reaching the ceiling needs ≥1 auditable event in essentially every
-60s window in each process for a day. A busy multi-replica deployment hits this
-at stock settings; an idle one does not. (An earlier revision of this note
-asserted the stock-settings trigger without that precondition — overstating a
-defect is its own inaccuracy, and the customer-facing copies inherited it.)
-It also triggers on any single-process deployment that lowers the object budget
-below its daily segment count or shortens the flush interval below ~43s.
-
-**What to do (when prioritized):** make the day-truncation cursor exclusive
-rather than day-resetting — add an `after_key` field to the cursor payload
-(the existing fingerprint already protects it, and it is only ever used as a
-`StartAfter` listing marker, never as a raw `GetObject` key, so the module's
-"a cursor key is never used as a raw key path" property is preserved), give
-`_list_day_keys` a `start_after` parameter, emit
-`_encode_cursor(day, key=None, after_key=keys[-1], line=0, ...)` when `keys`
-is non-empty, and pass it through on resume. Keep the current day-start cursor
-only when `keys` is empty.
-
-**Acceptance criteria:** a test putting 5 single-event segments in one day
-with `max_objects_scanned=2` follows `next_cursor` to exhaustion and sees all
-5 events exactly once, with no cursor repeating and the loop terminating; a
-companion test asserts `chain_breaks_total` rises by exactly 1 across a whole
-cursor chain over one broken segment. Both fail today.
-
-**Effort:** M. **Depends on:** 134 (shipped).
-
-### 185. `AUDIT_WORM_SEARCH_REQUESTS_TOTAL{outcome="rejected"}` is unreachable for the rejections its own comment claims to count
-
-**Renumbered from 180 to 185 on 2026-08-12** — same merge-time collision as
-item 184; see that item's note for the full rationale.
-
-**Surfaced 2026-08-11 by `architecture-boundary-reviewer` auditing item 177's
-own commit.** Pre-existing since item 134 phase 2; unrelated to item 177's
-change beyond sitting in the same file.
-
-`build_worm_search_result` — the only production caller, from
-`api/admin_observability_routes.py` — runs `_validate_window` and
-`_validate_limit` **itself**, before deciding whether the backend is enabled
-and before calling `search_worm_archive`. So a missing `start_time`, an
-over-wide window, or an out-of-range `limit` raises there and never reaches
-`search_worm_archive`'s own
-`except QueryValidationError: ...labels(outcome="rejected").inc()`. In
-production that label therefore only ever counts cursor-fingerprint/day-range
-rejections — yet `metrics.py`'s comment on the counter explicitly lists
-"missing/over-wide time range, limit out of range" as what it counts. An
-operator alerting on a spike of bound-violating callers sees nothing.
-
-The existing test
-(`test_a_rejected_request_increments_the_rejected_outcome_not_ok`) passes
-because it calls `search_worm_archive` **directly**, exercising a path
-production never takes — so the gap is invisible to the suite.
-
-**What to do (when prioritized):** either move the counter up into
-`build_worm_search_result` (wrapping its two validation calls in the same
-`except QueryValidationError` + `.inc()`), or narrow `metrics.py`'s comment to
-say "cursor rejections only". The first is preferable — the metric is more
-useful where the rejections actually happen.
-
-**Acceptance criteria:** an integration test hitting
-`GET /api/v1/admin/observability/worm-search` with no `start_time` asserts the
-`rejected` counter rose by 1. Fails today.
-
-**Effort:** S. **Depends on:** 134 (shipped).
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 185).
 
 ### 186. The disclosure budget's per-shape cap is evadable: a select-alias *reference* mints a fresh shape bucket per probe
 
@@ -3247,7 +3162,7 @@ the PRODUCT_GUIDE Decision Log, TECHNICAL_REVIEW, two TODO_ARCHIVE write-ups
 and a test docstring), the unconditional "resumable page" claim (both
 `worm_search.py` bullets, its `WormSearchBounds` docstring, README, QG-40,
 THREAT_MODEL, PRODUCT_GUIDE ×2, the generated HTML, CHANGELOG, TODO_ARCHIVE),
-the two disclosure-budget code docs, MARKET_DOMINATION_ANALYSIS, and the
+the two disclosure-budget code docs, the competitive analysis, and the
 rollback-exemption test (mutation-verified: closing the exemption fails it,
 and a control proves the gate is still on). Verified by re-running
 `scripts/claim_drift_sites.py --all`. **Open: #2, #3, #5, #6, #7** — all four
@@ -3333,7 +3248,7 @@ than folded in because none is about item 134:
    uncommitted work.
 7. **`landing/security.html:502` omits the item-184 non-exhaustive-paging
    caveat** that `CUSTOMER_README.md`, `sales/index.html`,
-   `docs/business/GO_TO_MARKET.md` and README now carry. Omission, not a false
+   an internal go-to-market analysis and README now carry. Omission, not a false
    statement — but the public security page is exactly who needs it.
 
 8. **`src/querygate/execution/disclosure_budget.py:25-34` and
@@ -3341,7 +3256,7 @@ than folded in because none is about item 134:
    targeted probe cap" and say `shape_fingerprint` "closes the evasion at the
    shape layer too" — the two places an engineer reads first, both wrong per
    item 186. *Found 2026-08-12 (round 5).*
-9. **`docs/business/MARKET_DOMINATION_ANALYSIS.md:516-518`** still says
+9. **`an internal competitive analysis:516-518`** still says
    multi-query differencing "stays honestly out of scope"; item 179 bounds it.
    *Found 2026-08-12 (round 5).*
 10. **The four-eyes rollback exemption has no test.** Five surfaces now state it
@@ -3410,93 +3325,17 @@ rather than fakeredis.
 
 **Effort:** S. **Depends on:** 179 (shipped).
 
-### 193. `docs/product-guide.html` has no freshness gate against `docs/PRODUCT_GUIDE.md`
+### 193. `docs/product-guide.html` has no freshness gate against `docs/PRODUCT_GUIDE.md` ✅ DONE
 
-**Surfaced 2026-08-12 by `architecture-boundary-reviewer` and `claim-reviewer`
-auditing the item-179 merge**, which landed with the generated HTML stale
-(regenerated by hand in that pass). **Scope corrected 2026-08-12:** the drift
-was not merge-caused and was larger than first written — besides the two
-Decision Log entries, three whole sections ("The one-walk rule, in plain
-terms", "Performance benchmark", "Load benchmark") had been missing since
-commit `f995e35`, well before either branch. The generated copy drifts on *any*
-`PRODUCT_GUIDE.md` edit, which is precisely why it needs a gate rather than a
-habit.
-Nothing references the generated file outside `Makefile` and its generator;
-there is no test and no CI job comparing it to its source, so it goes stale
-silently — and it is the copy most likely to be *sent to someone*.
+Shipped a drift guard that regenerates the page in memory and byte-compares it, in the default unit suite — plus a negative control proving a markdown edit changes the output, and a section-count assertion pinning the failure mode actually measured (whole sections going missing).
 
-**What to do:** a unit test that renders `docs/PRODUCT_GUIDE.md` through
-`scripts/generate_product_guide_html.py` into a tmpdir and asserts equality with
-the committed HTML, in the same spirit as `scripts/check_worklist.py`'s derived-
-mirror check. Note the generator must be deterministic for this to work; if it
-embeds a timestamp, that has to be excluded or made stable first.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 193).
+### 194. Three crafted-or-corrupt WORM lines still escape `search_worm_archive` as an unhandled exception the route masks as a 500 ✅ DONE
 
-**Effort:** S. **Depends on:** nothing.
+All three crafted-or-corrupt line shapes are now counted rather than raised: a non-ASCII digest, a deeply-nested line at either `json.loads` site, and an over-deep `query_shape` (bounded by `AUDIT_WORM_SEARCH_MAX_QUERY_SHAPE_DEPTH`, default 64, fail-closed).
 
-### 194. Three crafted-or-corrupt WORM lines still escape `search_worm_archive` as an unhandled exception the route masks as a 500
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 194).
 
-**Surfaced 2026-08-12 by `security-invariant-reviewer` and `claim-reviewer`
-independently, auditing item 178's own commit, and measured — not reasoned —
-against the post-fix tree.** All three are **pre-existing** (items 154/172),
-not caused by item 178; what item 178 briefly added was a module-docstring
-sentence asserting they did not exist, corrected in that same commit to name
-them and point here.
-
-Each is the same defect class item 178 closed for `seq`: a line the reader is
-supposed to *count* as `malformed`/`unverified` instead raises out of
-`search_worm_archive`, hits the route's `mask_unexpected()`
-(`api/admin_observability_routes.py`), and returns a generic HTTP 500. The
-cost is availability plus the loss of every genuine record the page had
-already accumulated — nothing leaks (the masked body is
-`PUBLIC_INTERNAL_ERROR`). Because a WORM object is immutable, one bad object
-poisons every future search whose window covers that day, permanently.
-
-1. **A non-ASCII `hash` raises `TypeError` in `hmac.compare_digest`**
-   (`audit/ledger.py`'s `verify_envelope_hash`). `LedgerRecord.hash` is a
-   plain `str` with no hex/ASCII constraint. **This is the one that does not
-   need an attacker:** `_get_object_text` decodes the object body with
-   `errors="replace"`, so a single corrupted byte inside a genuine segment's
-   `hash` field becomes U+FFFD and 500s the endpoint. Measured:
-   `verify_envelope_hash({... "hash": "abc\ufffd"})` raises rather than
-   returning `False`.
-2. **`json.loads` on a deeply-nested line raises `RecursionError`**, which is
-   a `RuntimeError` and so is not caught by the `except json.JSONDecodeError`
-   at either call site (the main line loop and the seed walk). Measured:
-   1,000 nested arrays raises, 900 does not — and that is a ~2 KB line
-   (`"[" * 1000 + "]" * 1000`), four orders of magnitude under
-   `_MAX_OBJECT_BYTES`, so the byte bounds are no defence at all. The
-   available stack inside an async request handler is smaller than in a bare
-   probe, so the production threshold is lower still.
-3. **`_contains_forbidden_content` walks `query_shape` with no depth cap.**
-   Measured through the real function, and the threshold is **shape-dependent**:
-   LIST nesting raises at depth ~480 (300 is fine), while DICT nesting survives
-   to ~1000. The ~2x gap is structural — the list branch is
-   `any(_contains_forbidden_content(item) for item in node)`, costing a
-   generator frame *plus* a call frame per level, where the dict branch costs
-   one. Any cap must therefore be sized against the LIST cost, not the dict
-   one. Reachable past every other guard — the envelope
-   can be genuine, hash-verifying, chain-linked, and schema-valid, since
-   `query_shape` is a `Dict[str, Any]` that `extra="forbid"` cannot constrain.
-
-**What to do (when prioritized).** (1) and (2) are mechanical: make
-`verify_envelope_hash` return `False` for a non-ASCII `hash` (an `.isascii()`
-pre-check, or compare on `.encode()`d bytes) — note it is shared by four
-readers, so the change is theirs too, and `audit/ledger.py`'s own
-`verify_chain` has the SAME `hmac.compare_digest(expected, record.hash)`
-hazard (measured: identical `TypeError`), reachable via `querygate-audit
-verify` against a locally-corrupted ledger, so the real scope is five call
-sites and both readers, not four and one; and widen both handlers to
-`except (json.JSONDecodeError, RecursionError)`. (3) needs **a maintainer
-decision on the depth cap**, which is why this is not a same-session fix: the
-screener is a security control whose `True` means *reject*, so a cap must
-fail closed (over-nested ⇒ `malformed`) and must sit above anything
-`audit/events.py`'s `normalize_query_shape` can legitimately emit — bounded
-by `max_where_depth` plus a constant for `set_op` arms and cte bodies, which
-should be measured rather than assumed. Pin each shape with its own
-regression test, then restore the absolute form of the module docstring's
-standing-contract sentence.
-
-**Effort:** S–M. **Depends on:** 134 (shipped).
 ### 195. The narrowing path: `Policy.templates_only` enforcement plus an observed-shape recorder that drafts a template from real traffic ✅ DONE
 
 Shipped the discovery→narrowing bridge between the general `StructuredQuery`
@@ -3520,3 +3359,1310 @@ dry-run binder bug that made a drafted BETWEEN template fail
 `querygate-validate-config` is fixed.
 
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 195).
+
+### 196. The container image's non-Python layers have never been licence-assessed ✅ DONE (phase 1)
+
+**Why.** `make license-check` (`scripts/check_licenses.py`, GTM WP1, 2026-08-21)
+gates every package in `poetry.lock` and emits `docs/THIRD_PARTY_LICENSES.md`.
+That inventory is deliberately scoped to **Python packages**, and says so in its
+own header — but the artifact QueryGate actually distributes is the container
+image, and `Dockerfile` layers two things the inventory never sees:
+
+- a full **Debian `bookworm`** userland from `python:3.11-slim-bookworm` (glibc
+  under LGPL-2.1, plus the usual GPL-licensed coreutils/bash), and
+- **`unixodbc`** plus Microsoft's **`msodbcsql18`**, installed with
+  `ACCEPT_EULA=Y` — proprietary terms accepted at build time, in the image
+  QueryGate hands to a customer.
+
+Nothing here is presumed to be a problem: redistributing a Debian base image is
+routine and the GPL components are separate programs, not linked into
+QueryGate. The defect is that **it has not been looked at**, while a
+customer-facing document now states a licence position for everything else. A
+security or procurement reviewer who asks "and the OS layer?" currently gets an
+explicit scope disclaimer rather than an answer, and the BSL flip is exactly
+when that question gets asked.
+
+**Definition of done.**
+
+- Enumerate the image's non-Python components and their licences from the built
+  image itself. Trivy already scans those layers in the `image-scan` job but
+  emits only vuln/secret/misconfig findings, no SBOM and no retained artifact —
+  so add `--format cyclonedx` to that existing step rather than introducing a
+  second scanner.
+- Establish whether `msodbcsql18`'s EULA permits redistribution inside a
+  commercial product image, and whether it must be an opt-in layer instead. This
+  is the one that could actually change the Dockerfile: if redistribution is not
+  permitted, the ODBC driver becomes a documented operator-installed step and
+  MSSQL support ships without it in the default image.
+- Fold the result into `docs/THIRD_PARTY_LICENSES.md` (or a sibling document it
+  links to) and delete the scope disclaimer once it is no longer true.
+- Gate whatever is established, in the spirit of the Python-side gate: a new
+  base-image component with an unreviewed licence should fail a build, not be
+  discovered by a customer.
+
+**Not before:** it does not block the flip on its own, but it must have an
+answer before the first paid pilot's security review — the north-star metric.
+Raised by the GTM WP1 licence pass, which found and scoped it rather than
+silently leaving it out.
+
+---
+
+**Phase 1 ✅ DONE 2026-08-21** — the assessment is written up in
+[`docs/CONTAINER_IMAGE_LICENCES.md`](docs/CONTAINER_IMAGE_LICENCES.md), measured
+against a locally built image (124 OS packages; aarch64, so re-take the package
+list on an amd64 build before quoting it to a counterparty).
+
+Two things were found and one is fixed:
+
+- **The driver was shipping with no licence text.** `msodbcsql18` declares
+  `/usr/share/doc/msodbcsql18/LICENSE.txt`, but the slim base image
+  path-excludes `/usr/share/doc/*`, so it never landed. `Dockerfile` now writes
+  a `path-include` before installing, and `scripts/check_release_artifacts.py`
+  fails the release if that line is ever removed while the driver is installed.
+- **The Debian userland is not a problem.** GPL there is aggregation, not a
+  combined work — the position every Debian-derived image relies on. The
+  source-offer obligation is discharged the customary way (unmodified upstream,
+  available from Debian's archives); that customary answer is the one line in
+  the assessment counsel should confirm rather than take on trust.
+
+**Phase 2 — open, and it needs counsel, not code.** Microsoft's EULA §2
+expressly permits redistribution, but §2(b) attaches three conditions and
+QueryGate meets one of them. §2(b)(ii) requires that end users be made to "agree
+to terms that protect it and Microsoft at least as much as this agreement" —
+BSL 1.1 has no pass-through clause, so a user pulling the image agrees to
+nothing on Microsoft's behalf. §2(b)(iii) requires indemnifying Microsoft, which
+nothing currently does. The assessment proposes a third-party-notices file plus
+a pass-through clause as the ordinary fix, with making the driver an opt-in
+layer as the fallback. Fold the indemnity question into the existing
+indemnification/insurance conversation (`GTM_EXECUTION_PLAN.md` §3 Layer 3)
+rather than running a separate one.
+
+### 197. Offline entitlement token for the paid tier — ⛔ SUPERSEDED by items 210-213
+
+**Do not implement this item. It is retained for history only; every design
+decision in it was reversed.**
+
+Its premise was Shape A — the BSL Additional Use Grant's unlimited free internal
+production use — which left no production threshold for a licence to self-check,
+so the token was to be an *entitlement marker for the paid tier*, never a gate.
+That grant was cancelled on 2026-08-23 (an internal commercial plan). QueryGate
+is a paid subscription, and the entitlement now **blocks**: after the paid term
+plus a grace window has fully elapsed, every governed query and write is refused
+with HTTP 402.
+
+Three specific commitments in the original body are now the opposite of the
+product, which is why this item is superseded rather than merely re-scoped:
+
+- *"Soft enforcement only … must never refuse to start and must never block or
+  degrade a query"* — item 211's gate does exactly that, deliberately and
+  disclosed (the EULA §15).
+- *"Zero network calls — no phone-home, ever"* — item 212's control plane is
+  contacted on start-up and roughly daily, carrying the four fields §16.1 of the
+  EULA discloses.
+- *"The source is public under BSL; hiding the check would be theatre"* — the
+  source is not public, and item 214 compiles the enforcement call sites into
+  the shipped artifact.
+
+**What survived**, and where it went: the Ed25519-signed, offline-verifiable,
+locally-checked token shape is the design items 211-213 build on
+(the control-plane plan §3), and the availability objection this item
+raised was answered rather than dropped — a *failed refresh* is never
+fail-closed, cold start fails open, and administration, health and audit
+retrieval survive a lapse. the licence-enforcement analysis carries the reversal
+notice and the enforcement-model survey both items rest on.
+
+### 198. QueryGate Notary — append-only transparency log for the audit ledger's chain head — not-before-customers
+
+**Effort: M. NOT BEFORE CUSTOMERS — do not claim or implement. Originally
+logged per an internal commercial plan §4 (owner decision,
+2026-08-21); pitch it now, build it when a customer asks, not before.**
+
+**Scope unchanged by the 2026-08-23 licence decision** (an internal commercial plan,
+which supersedes that plan), unlike its sibling item 197. Two things did move
+around it: an internal commercial plan §7 lists Notary among the trust-rebuilding measures that
+matter *more* under closed source, and the licensing FAQ names it as a
+forward statement a prospect must not be allowed to mistake for a shipping
+service.
+
+**Why it matters:** the shipped hash-chained audit ledger (item 91) is
+tamper-evident, but `CLAUDE.md`’s "North Star" section and `docs/PRODUCT_GUIDE.md`
+both already record the honest limit: **unkeyed, it is tamper-evident only
+against an externally anchored head** — without a third party attesting to the
+chain head at a point in time, an operator with write access to the ledger
+file can still rewrite history and re-derive a consistent chain from genesis.
+That documented dependency implies a natural product, named for the first
+time in the GTM plan: a hosted service that anchors the head hash
+independently of the operator who could otherwise rewrite it. A customer
+cannot substitute self-hosting it — an anchor a customer runs themselves is
+their own infrastructure attesting to their own logs, which proves nothing;
+third-partyness is the product, the same way the Structural pillar is won by
+construction rather than by policy.
+
+**What it is, when built:**
+- **Receives only chain head hashes** — no queries, rows, schema, or
+  credentials ever leave the customer's network; bytes meaningless in
+  isolation. This does not touch the data plane and does not weaken the
+  Reach pillar.
+- **Asynchronous, never in the request path.** Audit must never depend on
+  Notary's uptime. **The comparison this bullet used to draw at item 197 no
+  longer holds** — the subscription entitlement (items 211-213) *can* block a
+  query, by design and by disclosed contract. Notary is different in kind: it
+  attests to records the customer already holds, so a Notary outage must
+  degrade to "not yet anchored", never to "audit unavailable". An availability
+  dependency on a third-party service, for a control that buys the customer
+  nothing at request time, is a security-review finding.
+- **An append-only transparency log from day one, with published keys.** A
+  notary able to forge or retro-edit an attestation is a security-review
+  finding *about the vendor* — the one failure mode this product cannot
+  afford. Signed receipts, no PII, no data-residency question.
+
+**Definition of done, when this is picked up:** the anchoring client lives
+outside `execution/service.py`'s request path entirely (a background
+publisher reading committed chain heads, never awaited by a query); the
+service itself (receipt issuance, key publication, the transparency log) is
+out of `src/querygate/`'s request-serving surface and scoped as its own
+component; `security-invariant-check` confirms no query/row/schema/credential
+data is ever included in an anchored payload.
+
+### 199. Human SSO: OIDC sign-in for the browser surfaces, a built-in local identity provider, and a file-configured claim→scope mapping ✅ DONE (phase 1)
+
+**Effort: L.** Requested by the maintainer 2026-08-23.
+
+**Why it mattered:** items 10 and 90 already let QueryGate *verify* an IdP's
+JWT, and item 95 published the scope vocabulary to register in that IdP — so an
+agent or a service could authenticate as a human. A **human** could not. Both
+browser surfaces made a person paste a bearer token
+(`admin_ui/app.js`'s `connect()`, `access_ui/app.js`'s), which is a credential
+handling practice no enterprise security review passes: it trains operators to
+copy long-lived tokens between windows, it cannot express "this person is in
+the platform-oncall group", and it leaves no way to end someone's access
+without rotating a key somebody else also holds. The Proof pillar claims
+per-human attribution; before this, the *humans* had no first-class way in.
+
+Three gaps, all closed in phase 1:
+
+1. **No interactive sign-in.** No authorization-code flow, no session, no
+   logout.
+2. **No discovery or provider presets.** An operator hand-wrote
+   `JWT_JWKS_URL`/`JWT_ISSUER`/`JWT_AUDIENCE` per IdP.
+3. **No group→authority mapping.** `jwt_scopes_claim` read one claim as a
+   space-delimited scope string. Entra ID emits app roles in `roles` and groups
+   as opaque GUIDs in `groups`; Keycloak nests realm roles at
+   `realm_access.roles`. None of those are QueryGate scopes, so "sign in with
+   Entra" would have meant "sign in with no authority at all".
+
+**Phase 1 — shipped 2026-08-23.** New `src/querygate/identity/` package:
+
+- **One OIDC implementation, nineteen named providers plus every other one.** `identity/oidc.py` runs
+  authorization-code + PKCE (S256 always — an IdP that cannot do S256 is
+  *refused*, never downgraded to `plain`); `identity/presets.py` holds a
+  behaviour-free `ProviderPreset` per IdP (Entra ID, Okta, Auth0, Google
+  Workspace, Keycloak, authentik, PingOne, PingFederate, OneLogin, JumpCloud,
+  GitLab, AD FS, Amazon Cognito, Cloudflare Access, ZITADEL, Authelia, WorkOS,
+  FusionAuth, Salesforce, plus `generic`) carrying only the issuer template,
+  default scopes, and claim names. Issuer templates interpolate exactly three
+  values — `{tenant}`, `{domain}`, `{region}` — a deliberate ceiling: an IdP
+  needing a fourth uses `generic` with an explicit issuer rather than growing
+  the model a bespoke field per vendor. `identity/discovery.py` reads `.well-known/openid-configuration`,
+  enforcing RFC 8414 §3.3 exact issuer equality and https-only endpoints, TTL
+  cached with one outbound fetch per issuer under contention.
+- **A built-in local identity provider** (`identity/local_store.py`,
+  `local_auth.py`, `passwords.py`, `totp.py`) for deployments with no external
+  IdP and for break-glass access when the IdP is down. `hashlib.scrypt`
+  (N=2^16) rather than a new argon2 dependency; RFC 6238 TOTP against the
+  stdlib; per-account lockout; a fixed dummy verifier so an unknown username
+  costs the same as a real one; a bounded semaphore so parallel logins cannot
+  turn a memory-hard KDF into self-inflicted exhaustion. One locked writer for
+  `users.yaml` (`LocalUserFileRepository`, mirroring `CatalogFileRepository`).
+- **File-configured claim→scope mapping** (`identity/mapping.py`,
+  `examples/identity.example.yaml`). Deny-by-default, grant-only, order-
+  independent; validated against `core/scopes.ALL_SCOPES` and `ROLE_BUNDLES` at
+  load so a typo fails the reload instead of silently granting nothing. Applied
+  to browser sessions **and** — via `JWT_MAPPING_PROVIDER_ID` — to bearer JWTs,
+  so one human holds the same authority through either door.
+- **Sessions that re-derive authority per request.** A session stores the IdP's
+  *claims*, never resolved scopes, and `identity/authenticators.py` maps them
+  fresh on every request — so tightening `identity.yaml` and reloading takes
+  effect on the next request rather than at the next logout. The browser holds
+  an opaque token; the store holds its SHA-256. Every cookie-authenticated
+  request must also carry the CSRF token (`X-QueryGate-CSRF`) — on *every*
+  method, not only unsafe ones, so a new read endpoint cannot become
+  cross-site-reachable by someone judging it "safe".
+- **RFC 8628 device grant** (`identity/device.py`) so a browserless tool gets a
+  short-lived token carrying the approving human's identity, narrowed to the
+  intersection of what it asked for and what the approver holds — and narrowed
+  *again* against the live mapping on each request, so revoking a group
+  deactivates an already-issued token without waiting for expiry.
+- **Admin surface** (`api/admin_identity_routes.py`) under two new scopes,
+  `admin:identity:read`/`admin:identity:write` (deliberately not folded into
+  `admin:config:*`: minting an account is a different privilege from changing
+  what a connection exposes) — local-account CRUD, TOTP enrolment shown exactly
+  once, provider inspection with no `client_secret` field on the model at all,
+  a mapping simulator, and break-glass revocation of a person's sessions and
+  tokens.
+- **Audit.** New `AuthenticationEvent` (`identity.authentication`) joins the
+  `PersistableEvent` union; it has no field capable of holding a password,
+  code, token, or claim set. Adding it also removed a real drift hazard:
+  `api/admin_ui_routes.py` kept its own hand-written frozenset of event types,
+  now derived from the union by `audit.events.persistable_event_types()`.
+- **Both UIs** offer "Continue with <provider>" and a local sign-in form,
+  resume an existing session on load, and sign out server-side. The
+  paste-a-token path still works unchanged.
+
+*Mutation-verified before landing (CLAUDE.md's rule), which paid for itself:
+three enforcement points passed a green 3,289-test suite with no test actually
+pinning them — single-use login flows, login-flow expiry, and store-level
+session expiry. Tests added. It also showed `is_safe_relative_path`'s two
+open-redirect layers are mutually redundant; kept deliberately and documented,
+rather than "simplified" down to one parser's edge cases.*
+
+**Phase 1b — a local development identity provider ✅ DONE 2026-08-23.**
+Requested by the maintainer: *"add local bypass so it works full flow but
+actually its local so i dont need actual SSO set up for it to work."*
+`identity/dev_idp.py` serves QueryGate's own OIDC provider at
+`<sso.base_url>/dev-idp` — real discovery document, real JWKS, real RS256 ID
+tokens signed with a per-process key, and **real PKCE verification** on
+exchange. Nothing in `identity/oidc.py` is bypassed or stubbed: the browser
+takes the same redirect and the callback runs the same state/nonce/signature/
+audience checks. Only *who vouches for the human* is make-believe.
+
+Zero configuration: with no `users:` block the personas are **derived from the
+mapping rules** — one per rule, named by its description, plus one matching
+nothing so deny-by-default is a click away rather than something to construct.
+
+Fenced three independent ways, because it is an authentication bypass by
+definition: the config validator refuses `DEV_IDP_ENABLED=true` outside a local
+`ENVIRONMENT`; `build_dev_idp_router` re-checks rather than trusting it was
+reached legitimately; and the signing key is generated per process and never
+written anywhere, so a leaked dev token dies at the next restart. Each fence has
+its own test in `tests/security/test_sso_boundary.py`.
+
+This also closed the honest gap phase 1 shipped with — the redirect path could
+only be verified in pieces, because verifying it whole meant registering an
+application with a real IdP. `tests/integration/test_dev_idp_full_flow.py` now
+drives login → authorize → callback → session → scope-gated call against a real
+uvicorn server, and it immediately found a real defect: `derive_personas` was
+emitting a dotted claim path (`realm_access.roles`) as a **flat key**, so the
+rule that inspired a persona would not fire on it. Fixed with `nest_claim`.
+
+**Phase 2 — Redis-backed SSO state ✅ DONE 2026-08-23.**
+`identity/redis_sessions.py` adds `RedisSessionStore`, `RedisLoginFlowStore`,
+`RedisDeviceGrantStore`, and `RedisIssuedTokenStore`, wired in the same lifespan
+block as the concurrency/quota/disclosure/observed-shape stores. The failure
+mode this removes is different from theirs: a per-replica session store does not
+multiply a budget, it signs people *out* at random.
+
+**Deliberately Lua-free**, and the reason is the point: a session record is a
+JSON document full of arrays (`groups`, `scopes`, whatever the IdP nested in
+`claims`), which is exactly what item 195 phase 2's `cjson` round-trip trap
+destroys — on real Redis, invisibly under fakeredis. So it takes CLAUDE.md's
+own structural way out: the document is written once and never decoded
+server-side, and `last_seen_at` — the only mutable field — lives in its own key
+a plain `SET` updates. Single-use comes from `GETDEL`, every command touches
+exactly one key (no `CROSSSLOT` possible), and reads **fail closed**: an
+unreachable store means nobody is signed in. Guarded by AST-level assertions
+that no Lua is executed and no multi-key command is issued, since no behavioural
+test can catch either class.
+
+**Phase 3 — `querygate login` CLI ✅ DONE 2026-08-23.**
+`login_cli.py` (`querygate-login`). Prints the user code, opens the
+verification URI, polls honouring `interval` and backing off on `slow_down`,
+and distinguishes denied / expired / timed-out from "the gateway is down".
+Refuses to send a credential over plain http to a non-loopback host. Writes
+nothing to disk by default — it prints an `export` line; `--save` writes
+`~/.querygate/token` created 0600 (via `os.open` with the mode, not a
+write-then-chmod, which would leave a world-readable window). `--quiet` emits
+only the token so `$(querygate-login --quiet)` works.
+`tests/integration/test_login_cli.py` drives it against a real server with a
+timer thread playing the human who approves.
+
+**Phase 4 — SAML 2.0 (DECISION-GATED, do not start).** Deliberately not built:
+every mainstream IdP speaks OIDC, and SAML costs an `xmlsec`/`python3-saml`
+native dependency in the container image plus the XML signature-wrapping attack
+surface — a poor trade against one well-tested code path. Build it only when a
+design partner actually mandates SAML, and record that decision first.
+
+### 200. Per-surface credential-type policy: enabling SSO must actually close the console to shared secrets ✅ DONE
+
+A per-surface allowlist over `Principal.auth_method` (console / REST / MCP) whose default drops static API keys from the admin control plane the moment SSO is enabled.
+
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 200).
+### 201. The WORM archive tier is reachable only against AWS S3, so on-prem and air-gapped deployments cannot have it ✅ DONE
+
+`AUDIT_WORM_S3_ENDPOINT_URL` points both the WORM flush monitor and the managed search at any S3-API-compatible store with Object Lock (MinIO, Ceph RGW), so on-prem and air-gapped deployments can have the immutable archive too — not AWS S3 alone.
+
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 201).
+
+### 202. The `digests_equal` hazard is unfixed at six `hmac.compare_digest` sites outside `audit/ledger.py`, all comparing request-supplied strings
+
+**Filed 2026-08-23 by `architecture-boundary-reviewer` and `claim-reviewer`
+independently**, auditing items 184/194/185/201. **Pre-existing** — the six
+sites landed with the human-SSO work in `620d90d`, one commit before that
+range; item 194 established the repo's answer to this defect class but applied
+it only inside `audit/ledger.py`.
+
+`hmac.compare_digest` accepts two `str`s only when BOTH are ASCII-only, and
+raises `TypeError` otherwise. `audit/ledger.py`'s `digests_equal` (item 194
+defect 1) fixes this for the five ledger sites. Six others compare a string
+that arrives from a request and have no such guard:
+
+- `identity/totp.py:94` — **the reachable one, measured**: the guard is
+  `candidate.isdigit()`, which is `True` for Arabic-Indic digits.
+  `"١٢٣٤٥٦".isdigit()` is `True` with `len == 6`, so a six-character non-ASCII
+  "code" passes the length/digit guard and raises out of `verify_totp`.
+- `identity/oidc.py:143` (`state`, straight off the callback query string) and
+  `:288` (the `nonce` ID-token claim, `isinstance(str)`-checked but not
+  ASCII-checked) — raise instead of `SsoLoginError("state_mismatch"/
+  "nonce_mismatch")`.
+- `identity/authenticators.py:112` and `api/sso_routes.py:251` — a CSRF token
+  read directly from a request header; raise instead of `CsrfMismatchError`/403.
+- `identity/dev_idp.py:185` — the PKCE `code_challenge`.
+
+**Not a bypass, and the severity should not be inflated.** Every one of these
+fails CLOSED: the exception aborts the request, so the security decision is
+still "reject". The cost is availability plus error-class masking — a clean
+401/403/422 becomes a masked 500, and the SSO paths lose their specific
+`error=` code, which is what an operator debugging a federation problem reads.
+
+**Verified clean, do not "fix" these three:** `core/auth.py:114` and
+`identity/passwords.py:118` compare `bytes` (always safe), and
+`execution/approval.py:401` compares a caller-supplied `str` but already sits
+inside `except (ValueError, TypeError, json.JSONDecodeError): return False`.
+
+**What to do:** promote `digests_equal` out of `audit/ledger.py` into `core/`
+— it is a general safety wrapper, not a ledger concept — and use it at the six
+sites. Keep a re-export or update the ledger's imports so item 194's
+`test_hmac_compare_digest_is_called_in_exactly_one_place` still holds, and
+consider widening that source-level guard to the whole `src/` tree, which is
+what would have caught this class in the first place.
+
+**Acceptance criteria:** `verify_totp("١٢٣٤٥٦", secret=...)` returns
+`TotpResult(valid=False)` rather than raising; a non-ASCII CSRF header yields
+403 not 500; a non-ASCII `state` yields `SsoLoginError("state_mismatch")`. All
+three raise today.
+
+**Effort:** S. **Depends on:** 194 (defect 1 shipped), 199 (shipped, phase 1).
+
+### 203. An unparseable predecessor exempts one chain link on a resumed page, while an exhausted blank-run walk fails closed — same threat shape, opposite posture
+
+**Filed 2026-08-24 by `security-invariant-reviewer` (WS-172-9)**, re-reviewing
+the items 184/194/185/201 fixes. **Pre-existing since item 172's WS-172-1
+seed walk**; item 194 defect 2 only made it visible by adding `RecursionError`
+alongside the `json.JSONDecodeError` sibling that already behaved this way.
+
+`_seed_chain_state_from_predecessor` returns `(None, None, False)` — the
+ACCEPT-AS-GIVEN tuple — when the predecessor line is unparseable, so a resumed
+page's first incoming link is never checked. Its blank-run sibling returns
+`(None, None, True)` (fail-closed) for a threat of the same shape, on the
+reasoning that "a genuine segment has zero blank lines, so this only fires
+against a crafted/corrupted object". **A genuine segment also has zero
+unparseable lines**, so the same reasoning argues for the same posture.
+
+**Attack, and its narrowness.** An actor with `s3:PutObject` deletes a record
+from the middle of a segment (no forging, so this bites the keyed-HMAC
+configuration too), which breaks linkage at the following record. Overwriting
+the line immediately BEFORE that record with an unparseable blob makes the
+seed walk return accept-as-given, so a page resuming exactly at the following
+record reports `chain_breaks == 0`. Narrow because the attacker cannot choose
+where the auditor's page boundary falls — though a caller-supplied
+`limit`/`cursor` determine it — and one `malformed` count remains as a weak
+signal.
+
+**What to do:** this is a deliberate decision, not a drive-by — the comment at
+the `RecursionError` handler says so explicitly. The consistent change is
+`return None, None, True` at BOTH the `except (json.JSONDecodeError,
+RecursionError)` branch and the pre-existing sibling, making the resumed
+page's first link a counted `chain_break`. It is false-positive-free by the
+same argument the blank-run case already uses. If instead the exemption is
+deliberately kept, record it in the function's three-way contract docstring as
+an accepted residual alongside WS-172-3 (tail truncation).
+
+**Acceptance criteria:** a segment whose middle record is deleted and whose
+preceding line is unparseable, resumed at the following record, reports
+`chain_breaks == 1`. It reports 0 today.
+
+**Effort:** S. **Depends on:** 172 (shipped), 194 defect 2 (shipped).
+
+---
+
+## SaaS subscription work packages (items 210–219)
+
+Owner decision, 2026-08-23: QueryGate ships **proprietary, closed-source, as a
+paid monthly subscription**. See an internal commercial plan, which supersedes
+`GTM_EXECUTION_PLAN.md` and the Shape A / BSL decision of 2026-08-21 in full.
+
+**Numbering note:** 199–209 were reserved for the concurrent human SSO /
+identity work stream (item 199 and its phases). These items start at 210.
+**201, 202 and 203 have since been allocated** by the concurrent WORM
+audit-archive work (201 shipped and referenced from `core/config.py`,
+`audit/worm_sink.py`, tests and CHANGELOG; 202 is itself an SSO-code defect
+found while auditing it). 204–209 remain free for the SSO stream
+to avoid a collision. Per CLAUDE.md item numbers are permanent and file-global;
+a reserved gap is intentional, like the unused 98.
+
+**Items 197 and 198 are superseded in premise.** 197 (offline entitlement token,
+soft-warn, not-before-customers) is replaced by items 210–213 — the token is no
+longer a receipt that warns, it is a subscription that blocks. 198 (Notary) keeps
+its scope and stays deferred. Both bodies need rewriting as part of item 210.
+
+### 210. Proprietary licence transition — retire the BSL apparatus ✅ DONE
+
+`LICENSE` is now a proprietary notice pointing at the EULA as the
+licence of record; the EULA carries the subscription's commercial clauses in both
+languages; the phone-home guard was narrowed rather than deleted; and the
+licensing claim sweep went from 235 sites to 35 deliberate lookalikes (part
+rewritten, part recorded as whole-document exemptions — see the write-up).
+
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 210).
+
+### 211. Subscription layer — the entitlement gate ✅ DONE (phase 1)
+
+**Effort: L.** Depends on 210 for the licence text, on 212 for real entitlements.
+
+**Why it matters:** this is the wrapper that makes the product a subscription.
+It must stop the product when unpaid without ever becoming an availability risk
+when *we* fail, and without lying in the customer's audit ledger.
+
+**What it is:**
+- **⚠️ Two constraints item 210 already landed as tests. Read these before the
+  first commit, because both fail loudly and neither is negotiable.**
+  1. `tests/security/test_no_phone_home.py` exempts **exactly the package path
+     `src/querygate/subscription/`** from the vendor-hostname and
+     licence-server-vocabulary bans. Anywhere else in `src/querygate/` still
+     fails the build, so the client cannot be started in
+     `execution/` or `core/` "temporarily". The exemption is also **bounded at
+     10 modules** (`_MAX_EXEMPT_MODULES`). The package list below is eight names
+     **plus `__init__.py`, which `rglob("*.py")` counts** — nine, with one slot
+     of head-room. That bound was 8 in the guard's first draft, which would have
+     tripped on this item's own intended package on its first commit; a tripwire
+     that fires before any drift has occurred only teaches people to raise it.
+     If you genuinely need an eleventh module, raise it against a written module
+     list and say why — never to get a suite green.
+  2. The package must declare a module-level
+     **`PAYLOAD_FIELDS`** literal naming every field it transmits, and it must
+     equal `{"org_id", "deployment_id", "connection_count", "seat_count"}` —
+     and the package must satisfy `payload_contract_violations()` in that same
+     file — one literal declaration, no `**` spread into a dict literal, no dict
+     literal passed as `json=`/`data=`/`content=`, and no literal key outside the
+     disclosed set plus transport plumbing. **That checker is already
+     detector-tested against planted bypasses, so it holds the moment this
+     package exists.** What this item still owes is the runtime half: a
+     schema-level test asserting the actual refresh request body's key set, built
+     in the shape of `test_credential_redaction.py` rather than as a mock-call
+     assertion —
+     the four fields the EULA §16.1 discloses and
+     an internal commercial plan §3 publishes. A fifth field is a **disclosure
+     change before it is a code change**: amend the EULA (both languages), the
+     FAQ, and `CLAUDE.md`’s "North Star" section's Reach pillar first.
+- **`src/querygate/subscription/`** — a peer package to `audit/` and `secrets/`:
+  `models.py`, `verify.py` (pure, no I/O), `state.py` (module singleton),
+  `gate.py`, `sources.py` (the registry above; the only modules doing outbound
+  HTTP), `manager.py`, `cache.py`, and **`cli.py` exposed as `querygate-license`
+  in `[project.scripts]`** — `status` renders `SubscriptionStatus` and is the
+  only place that formats the model. That console script does not exist today and
+  two documents already reference it.
+  **`cache.py`'s Protocol is `async def` from the first commit**, per CLAUDE.md
+  and the `admin/observed_shapes.py` precedent, even though the in-process
+  implementation needs no `await` — it is exactly the shape that grows a shared
+  backend under multi-replica, and a sync-then-widened Protocol is what broke the
+  compensation store. **`gate.py`'s read is the one deliberate synchronous
+  exception**: it reads an already-evaluated in-memory `SubscriptionStatus`,
+  never a store, so it adds no await point to the request path — and it must
+  never read `cache.py` directly.
+- **Two enforcement funnels, not one.** Reads:
+  `StructuredQueryService._validate_and_compile` — its own comment already names
+  it as "the four ways an ad-hoc AST reaches a database". Writes: the three write
+  **service** entry points (`WriteExecutionService.execute`,
+  `_execute_many_atomically`, `WritePreviewService.preview`) via one shared
+  helper in `execution/`. **`WriteExecutionService` and `WritePreviewService` are
+  separate classes and `_execute_many_atomically` opens its own `session_scope`;
+  a gate only in `StructuredQueryService` leaves every governed
+  INSERT/UPDATE/DELETE running.**
+  **Do *not* put the write gate in `validation/write_policy_validation`** — it is
+  a pure function of (AST, Policy) with no I/O and no process state. Gating there
+  makes every existing shape-validation unit test depend on the subscription
+  singleton, and makes any non-executing caller (a linter, the admin candidate
+  simulator, a dry-run) receive a 402 for asking whether a *shape* is legal.
+- **Third funnel: schema discovery — decided 2026-08-23, gate it.**
+  `list_tables`, `describe_table` and `search_catalog` reach the live database
+  via `list_live_tables`/reflection and pass through **neither** other funnel —
+  `_validate_and_compile`'s comment is precise that it covers the ways an *AST*
+  reaches a database, and these carry no AST. Same for `catalog/refresh.py`'s
+  background reflection, which must also stop. They are product, not
+  diagnostics, so an expired deployment enumerates nothing. Note this makes
+  "two funnels" three, and the source-level import guard must permit
+  `subscription.gate` at all three.
+- **The forbidden-edge guard is bidirectional.** Acceptable: `execution/` →
+  `subscription.gate`; `api/`/`mcp/` → `core.exceptions` plus one narrow
+  read-only status accessor for item 216; `subscription/` → `core/` and
+  `metrics.py`; the lifespan → `subscription.manager`. **Forbidden in either
+  direction:** `validation/`, `compiler/`, `connections/`, `policy/`, `catalog/`,
+  `schema/`, `query_ast/`, `write_ast/` ↔ `subscription/`. Compilation and
+  session guardrails must not vary by entitlement, and `policy/` importing
+  `subscription/` would put observe/enforce inside the customer-reloadable
+  `Policy` — the customer-settable bypass this design exists to prevent. Also
+  forbid `subscription/` → `execution/`, `validation/`, `audit/`.
+- **Acquisition varies; verification does not.** Two real backends are in scope —
+  HTTP refresh and the air-gapped offline entitlement file — so this is a genuine
+  Protocol + registry case, not ceremony: an `EntitlementSource` Protocol
+  (`async def fetch() -> bytes`) with `HttpEntitlementSource` and
+  `OfflineFileEntitlementSource` behind a `_SOURCES` registry keyed on the
+  configured mode. Without it the offline mode lands as an inline
+  `if cfg.offline_entitlement_file:` in `manager.py` and every downstream
+  question (does the high-water mark apply? what is `RefreshHealth` for a file?
+  how does the serial floor advance?) grows its own branch. `verify.py`'s rules
+  and the serial floor then apply to both by construction.
+- **Two orthogonal state axes**, so the gate can never depend on refresh health:
+  `EntitlementState{VALID,GRACE,EXPIRED}` and
+  `RefreshHealth{OK,DEGRADED,FAILING}`, combined in a frozen
+  `SubscriptionStatus` computed by one pure `evaluate()`. The gate reads
+  `.allows_queries`; health reads `.entitlement`; the CLI renders the model.
+  Nobody else compares a datetime.
+- **`SubscriptionExpiredError` in `core/exceptions.py`**, not in
+  `subscription/` — `api/_errors.py` and `mcp/exceptions.py` import only from
+  `core.exceptions`. It must not subclass `ValueError`/`PolicyViolationError`
+  (existing handling would map it to 422 and label it `policy`). Register it in
+  **seven** places or it degrades silently: `_ACTIONABLE` + a 402 handler
+  (`api/_errors.py`); `_error_code_from_exception` before the `INTERNAL`
+  fall-through (`mcp/exceptions.py`, which also logs a traceback);
+  `classify_rejection` (`metrics.py`); **`public_error_message`
+  (`core/exceptions.py`)** — a closed isinstance allow-list that both transports
+  render every message through, so without it the 402 body is "An unexpected
+  error occurred." and item 216's "the message names the renewal URL" is
+  unsatisfiable; the **`policy_decision` bucket** (`execution/service.py`), or
+  the persisted event records `policy_decision="unknown"`; and
+  **`_DENIAL_GUIDANCE`** (`help/personal_denials.py`), or the caller's
+  self-service explanation reads "the specific reason wasn't recorded". Getting
+  `classify_rejection` alone fixes the metric and stops the WORM ledger blaming
+  `db_error`, but stops three registries short.
+- **Four surfaces swallow the gate, not three.** `_execute_batch_item`,
+  `explain_many` and `WriteExecutionService._batch_error` turn it into a per-item
+  string inside an HTTP 200 — **and `verdict()`/`verdict_many` are worse**: their
+  deliberate, documented catch-all returns HTTP 200
+  `{"allowed": false, "reason": "not-available-to-you"}` and writes
+  `policy_decision="denied"` into the tamper-evident ledger, telling the customer
+  their *policy* refused a query it actually permits, permanently. Re-raise
+  `SubscriptionExpiredError` ahead of every one of them, and check the gate once
+  per request **before** the quota reservation and the concurrency slot, so an
+  expired deployment neither spends a caller's quota nor holds a slot per refused
+  request.
+- **Observe/enforce is a field in the signed entitlement**, on the
+  `CostEstimationMode.OBSERVE/ENFORCE` precedent — not a config flag (a
+  customer-settable bypass), not a build flag (the enforce path would never run
+  in the shipped image), not absent code (go-live day becomes the first
+  execution of a new hot-path call site). Observe emits
+  `querygate_subscription_would_block_total`.
+- **Wall-clock high-water mark, not monotonic.** `time.monotonic()` is
+  boot-relative and cannot be persisted; a fresh container would read a
+  catastrophic regression and expire on first restart. Tolerance in hours;
+  regression enters **grace**, never expiry; absent mark is fail-open; clamp a
+  mark implausibly far ahead; per-process, monotone-max on write; a persistent
+  write failure is visible, not silent. Written by the timer only — never from
+  `audit/logger.py` or an `AuditSink`, both of which run per-query.
+- **A serial floor** (`max_seen_serial`, strictly increasing) is the primary
+  anti-replay control: it needs no trustworthy clock and has no false-positive
+  mode.
+- **Verification:** strict parse (unknown fields at a known `schema_version`,
+  duplicate JSON keys, base64 `validate=True`); verify over the exact decoded
+  bytes then parse; domain-separated signatures; manifest binding; freshness and
+  max-term bounds as compiled-in constants; typed failure reason per rule; **the
+  disk cache holds signed bytes re-verified on every read**, never a parsed
+  structure.
+- **`SubscriptionManager`, not `LeaseManager`** — `CredentialLeaseMonitor`
+  already owns that word and emits `action="lease_refresh"`. Copy its four
+  properties: I/O off the loop, fail-open per iteration, **only the exception
+  type logged never its message**, and a `system:` principal.
+
+**Definition of done:** `security-invariant-check` clean; mutation verification
+on each verification rule individually; `tests/conftest.py`'s autouse fixture
+clears every new process-wide item (verdict, wall-clock mark and its file, the
+serial floor, cache path, manager, task, event, HTTP client, failure counter,
+manifest cache, `app.state`, **and the observe-mode Prometheus counter** — the
+collector lives in the process-global `REGISTRY`, which conftest resets nothing
+in today, so any absolute assertion on it is order-dependent); the bidirectional
+import guard above; **a schema-level test asserting the refresh request body's
+key set is exactly what an internal commercial plan §8 publishes** — built in the shape of
+`test_credential_redaction.py`, not as a mock-call assertion, because that
+sentence is the load-bearing answer to the phone-home objection and is currently
+unbacked; and a test that the rendered 402 body and the MCP error message both
+name the renewal URL.
+
+### 212. Control plane — accounts, Stripe subscriptions, entitlement issuance ✅ DONE (phase 1)
+
+**Effort: XL.**
+
+**Why it matters:** the vendor side. Without it there is no revenue and item 211
+has nothing to verify.
+
+**What it is:**
+- **Lives in `control-plane/`**, its own Poetry project with its own lockfile —
+  Stripe, KMS and session dependencies must not enter the product's lock, SBOM,
+  or `dep-audit` scope. **Mirror CI gates are part of this item**, and the
+  specific root settings matter: the Makefile's `bandit -r src/` and semgrep
+  `src/` scopes mean the mirror must be **new targets, not a widened scope** (or
+  control-plane findings land in the product's SAST job);
+  `tests/unit/test_security_posture_commands.py` asserts **exactly one** semgrep
+  invocation in `ci.yml`, so adding the mirror step fails it with a drift message
+  that looks unrelated; `testpaths = ["tests"]` correctly excludes
+  `control-plane/tests` from a root `pytest` and must **stay** that way, because
+  the natural "fix" drags Stripe and KMS imports into the product test
+  environment; add `"control-plane"` to `check_release_artifacts.py`'s
+  `FORBIDDEN_PARTS` (the cheapest possible guarantee the signing plane can never
+  ship in a wheel or sdist) and to `.dockerignore` (the Dockerfile's COPY
+  allowlist makes the image safe today, but the ignore entry survives a Dockerfile
+  edit). `[tool.poetry] packages` and `--cov=src` need **no** change — say so, so
+  nobody "fixes" them.
+- **Define `deployment_id` once, normatively** — it currently means three things
+  across items 212, 213 and 215. One *logical* deployment holds one entitlement
+  and one cap slot; an ephemeral per-replica `instance_id` rides alongside it.
+  Otherwise a ten-replica Kubernetes Deployment is simultaneously "one deployment
+  refreshing from N sources" (item 213's abuse signal) and ten times the
+  per-deployment refresh rate against a limit sized for one — while a
+  per-container id would consume N cap slots on every rolling deploy and break
+  item 213's rebuild guarantee. Restate item 213's detection heuristic as "N
+  *unrelated* source networks", and note that item 211's high-water mark and
+  serial floor are per-process, so a fleet's floors must converge rather than
+  fight.
+- **Stack:** FastAPI + SQLAlchemy 2 + Alembic + Postgres; Stripe SDK; cloud KMS.
+- **Stripe is the source of truth for paid status.** Do not rebuild subscription
+  lifecycle, dunning, proration, tax, or invoices.
+- **Six tables:** `org`, `subscription`, `entitlement`, `deployment`,
+  `enrolment_token`, `entitlement_issuance` (append-only), plus `webhook_event`
+  for idempotency.
+- **Billing semantics:** monthly prepaid; cancellation is immediate for renewal
+  purposes but the entitlement's `expires_at` stays at the end of the paid
+  period; **no proration, no refund**.
+- **Endpoints:** Stripe webhook (signature-verified, idempotent), `POST /v1/enrol`
+  (one-time token → per-deployment key), `GET /v1/entitlement` (per-deployment
+  bearer key). Admin/minting endpoints bind to a private network behind SSO or
+  mTLS. **Rate-limit per deployment, not per org** — a per-org limit is
+  self-abusable to force refresh failure and ride the fail-open window.
+- **Keys:** offline Ed25519 root on hardware signs a key manifest; issuing keys
+  in KMS with `sign` permission only. **Ed25519 signing is available on GCP
+  Cloud KMS and not on AWS KMS** — verify all vendor facts with a dated note
+  before committing to a provider.
+- **The control plane resolves plan/features from the entitlement, never from
+  the request.** A client must not assert its own tier.
+- **Tier limits are enforced in software — decided 2026-08-23.** The refresh
+  carries `connection_count` and `seat_count` alongside the two identifiers, and
+  the control plane compares them against the entitlement. Three consequences to
+  build, not assume: the counts are *operational facts about the customer's
+  estate*, so item 210's EULA transmission-disclosure clause must name them and
+  state retention; the counts are **reported, never trusted for authorisation** —
+  they drive upgrade prompts and overage flags, and a mismatch is a commercial
+  event, never a reason to block a query; and going over-limit must degrade to a
+  notification and a renewal conversation, since blocking on a miscount would
+  turn a billing disagreement into a production outage.
+
+**Definition of done:** webhook replay and signature tests; enrolment token is
+single-use; issuance ledger is append-only and never updated; no credential,
+query, row, or schema is stored anywhere in the plane; tenancy isolation tests.
+
+### 213. Activation — bind a deployment to a subscription via OAuth2 + MFA
+
+**Effort: L.** Builds directly on item 199's `identity/` package.
+
+**Why it matters:** this is the customer's first five minutes and the moment the
+product becomes theirs. It is also the security boundary: an unactivated
+deployment must be inert.
+
+**Depends on item 199 (`identity/`), which is NOT in this branch** — it is
+uncommitted work on the identity stream. Do not start 213 until 199 merges.
+
+**What it is:**
+- **⚠️ Activation must prove *entitlement to bind this box*, not merely a signed-in
+  identity.** As first drafted this item authenticated a human and then bound the
+  deployment to whatever org that human belongs to — so anyone who reaches a
+  fresh container before the operator (a VPC co-tenant, someone scanning the cloud
+  VM just started, a contractor on the LAN) completes OAuth with **their own**
+  account and becomes administrator of a gateway inside the customer's network
+  that is about to hold production database credentials. Required: the portal
+  issues a **single-use ≥128-bit claim code** at checkout; the activation screen
+  demands it *before* any OIDC redirect starts; the control plane refuses to bind
+  to any org but the code's holder. Add a **local-presence factor** for the
+  browser flow — a one-time secret printed to the container's stdout on first
+  boot — so network reach alone is insufficient.
+- **⚠️ "Nothing else" is unreachable with the gate an implementer will naturally
+  write.** A router-level `Depends` — the pattern the whole `api/` package uses —
+  does **not** cover `app.mount()`ed sub-apps, so the MCP surface and both static
+  UIs stay live; and no request-scoped gate reaches the four lifespan monitors
+  (`HealthMonitor`, `CatalogRefreshMonitor`, `CatalogUsageLearningMonitor`,
+  `CredentialLeaseMonitor`), which dial every configured database and resolve
+  secrets from the secret backend at boot, before any human has authenticated.
+  Required: a **pure-ASGI middleware installed on the app**, a **default-deny
+  closed allowlist** of path prefixes, and a lifespan that starts **no**
+  connection-touching monitor until the activation transition.
+- **Bound the unauthenticated surface.** Activation is the first unauthenticated
+  REST endpoint in the product, and **no per-source rate limiter exists anywhere
+  in the codebase** (the only limiter is per-principal quota, and there is no
+  principal here). It needs: failure counting per source address *and* per claim
+  code with lock-after-N; a slot consumed only on **successful** enrolment, never
+  on attempt; a failed attempt that cannot lock out the legitimate operator; and
+  an explicit `Content-Length` and structural-depth cap before parsing — reuse
+  `mcp/transport_guard.py`'s `_structural_depth_exceeds`, do not write a second.
+- **Reuse the identity *mechanism*, not the store.** `identity/` is
+  deployment-side: its OAuth client lives in the customer's `identity.yaml`, and
+  `sso_enabled` is off by default. Activation must authenticate against **the
+  control plane's own** authorization server (item 212 owns the client and the
+  RFC 8628 endpoints) and must work with `sso_enabled=false` and no
+  `identity.yaml`. Reuse `oidc.py`'s hardened primitives — PKCE-S256, state
+  binding, nonce comparison, asymmetric-only algorithms — as a library. Note
+  `identity/device.py`'s device grant requires approval **in that deployment's
+  admin UI**, which an unactivated deployment does not serve, so it cannot
+  bootstrap activation as-is.
+- **Enforce audience binding** on any token the deployment accepts, the same
+  posture `core/config.py` already requires for the MCP resource server —
+  otherwise a token minted for the internet-facing portal authorises
+  administration of a gateway inside the customer's network. And do **not**
+  register a per-deployment `redirect_uri` at Google/Microsoft: a wildcard
+  covering every customer hostname makes code interception straightforward.
+- **MFA is not currently verifiable on the external path.** MFA enforcement
+  exists only for the built-in local IdP (`local_auth.py`'s `require_mfa`,
+  `totp.py`); there is **no `amr`/`acr` check anywhere** for Google/Microsoft. So
+  either request `acr_values` and verify the `amr` claim carries a second factor,
+  rejecting the session otherwise — preferred, this is the activation boundary —
+  or stop writing "MFA enforced" and say the customer's IdP enforces it.
+- **`deployment_id` is assigned by the control plane**, never proposed by the
+  client, with a **deployment cap** enforced at enrolment.
+- **What binding actually buys, split honestly.** *Enforced:* enrolment count
+  (single-use token means N is a hard ceiling) and per-deployment revocation
+  (each deployment holds a distinct bearer key). *Only detected:* runtime
+  instance count — one enrolled key copied to N containers is invisible.
+- **The persisted deployment key is a credential.** Re-activation without
+  consuming a slot forces it onto a mounted volume; document its location and
+  file mode, state that its compromise equals entitlement theft, and forbid it
+  from entering the config-version store or any audit event.
+- **Emit an activation audit event** carrying org id, deployment id and operator
+  subject — and **never** the enrolment token, the OIDC `id_token`, or the
+  per-deployment key.
+- **Re-activation and transfer**: a documented path for rebuilt hosts, restored
+  backups, and blue/green deploys that does not require a support ticket.
+
+**Definition of done:** activation is reachable and completable from a clean
+`docker run` with no config file; an unactivated deployment provably refuses
+every data path; device flow works on a headless host; re-activation after a
+container rebuild does not consume a new deployment slot.
+
+### 214. Single obfuscated compiled binary — spike first, then build
+
+**Effort: XL, and the spike is the first thing done in the whole programme.**
+
+**Why it matters:** the enforcement story depends on the gate not being one
+editable Python line, and the product's IP is now the business. But this
+codebase is a hostile compilation target and finding that out in month three
+would invalidate the packaging plan.
+
+**What it is:**
+- **Phase 1 — the spike (XS/S, do it first).** Attempt a Nuitka build of the
+  full application and answer: does `pydantic-core` (a Rust extension) survive?
+  Does SQLAlchemy's dynamic dispatch? Do the six MCP tool modules still register
+  — CLAUDE.md documents that `MCPServer` resolves each tool's forward references
+  against the *wrapping* function's `__globals__`, which is exactly the
+  introspection compilers break. Do console-script entry points and
+  `importlib.metadata` still resolve? Report go/no-go with evidence before any
+  further work.
+- **Phase 2 — the build.** Reproducible compile in CI; the subscription layer
+  and the app compiled together so enforcement call sites are inside the
+  artifact; the image is the only distribution channel; cosign signature and
+  SLSA provenance preserved (both already exist in `release.yml`).
+- **Accept and document the costs**: stack traces become far less useful for
+  support, and a native extension complicates the SBOM and pip-audit story that
+  §7 of an internal commercial plan leans on. Decide how support debugging works *before*
+  shipping, not after the first incident.
+- **No obfuscation theatre.** Compilation raises the bar; it does not make the
+  gate unbypassable, and the EULA's anti-circumvention clause (item 210) is the
+  layer that actually holds.
+
+**Definition of done:** the compiled image passes the full test suite and
+`make release-smoke`; a documented support-debugging procedure exists; the spike
+report is committed even if the answer is no.
+
+### 215. One-command install and first-boot self-configuration ✅ DONE (phase 1)
+
+**Effort: M.**
+
+**Why it matters:** "single command or action and it's automatically set up" is
+the promise. Today a deployment needs two YAML files (connections, policy) plus
+env configuration before it does anything.
+
+**What it is:**
+- **One copy-pasteable `docker run`** (plus an equivalent compose file and a
+  Helm values snippet) shown on the checkout success page and in the portal.
+- **⚠️ The image must not ship the anonymous-auth bypass. This is the single
+  highest-severity item in the phase.** `api/auth.py` appends
+  `AnonymousAuthenticator` whenever `cfg.is_local` and no `api_keys` and no JWT
+  — and `is_local` is true for the default environment, the Dockerfile sets no
+  `ENVIRONMENT`, and `_validate_production_auth` only fires on
+  `environment == "production"`. So `docker run <registry>/querygate:latest`, the
+  exact command this item promises, currently yields a deployment where every
+  request resolves to an anonymous principal, FastAPI `debug` is on, and the
+  OpenAPI schema is public — and the first connection added below is then
+  queryable by anyone who can reach the port. Fix: `ENV ENVIRONMENT=production`
+  in the Dockerfile, satisfied by the generated admin credential below, with
+  `debug`/`openapi_url`/`docs_url` off in the shipped image regardless of
+  environment.
+- **First-boot self-configuration**, with the mechanics named rather than
+  implied: secrets generated with `secrets.token_urlsafe`/`os.urandom` (never
+  `random`, never derived from a hostname); written **once, atomically,
+  create-if-absent (`O_EXCL`)** so concurrent workers and replicas cannot race
+  and so a restart never regenerates; to a documented path and file mode on a
+  volume the non-root `querygate` user can actually write; **never regenerated
+  if present**, because silently rotating on a rebuilt image turns an upgrade
+  into an unplanned re-activation and breaks item 213's re-activation guarantee.
+- **Seed-once, then one writer.** First boot seeds `connections.yaml`,
+  `policy.yaml` and an empty `catalog.yaml` **only when absent**, before any
+  store is constructed, and never mutates an existing file. Every subsequent
+  write — including "add the first connection" — goes through the existing
+  `admin/service.py` stage/apply path, which works for a single operator at
+  `require_config_approvals=0`. **Do not add a second connections writer**, and
+  never route catalog content through `ConfigVersionStore`; catalog mutations go
+  through `CatalogFileRepository`'s lock.
+- **Safe-by-default starter policy — decided 2026-08-23: build the real
+  guarantee (item 220).** `Policy.table_allowed` returns `True` when
+  `allowed_tables` is empty — **an empty allow-list means allow-all** — and
+  `denied_tables` has no wildcard, so today the only deny-all lever is
+  `default: {enabled: false}`, which is all-or-nothing. Item 220 adds the
+  no-allow-all-fallback `Policy` field so "enabled, zero tables" becomes
+  expressible; **215 depends on it** and ships the starter policy on top of it.
+  Do not ship the `enabled: false` stopgap as the final answer.
+- **⚠️ "The credential goes straight to the configured secret backend" has no
+  implementation today** and must not be written as if it does. On a fresh
+  install the only registered backend is `env:` (Vault is off by default), which
+  is not writable from a request, and `ConnectionRegistry` has no runtime
+  mutation API. The only otherwise-reachable path writes the literal DSN into
+  `var/config_versions/.../connections.yaml` in plaintext and returns it verbatim
+  from `GET /admin/config/versions/{id}` under **read** scope — laundering a
+  credential through an untyped `str` that `test_credential_redaction.py` cannot
+  see, which engages non-negotiable 2. Therefore: this item ships the **write
+  side** of a secret resolver as a prerequisite; the UI stores only a `${...}`
+  reference in `connections_yaml`; and a literal connection string is **rejected
+  at the boundary**, never persisted.
+- **`querygate-quickstart` is not the bootstrap.** It is a read-only,
+  authenticated HTTP client against an already-running, already-configured
+  gateway that "never writes anything". It stays that way and the setup guide
+  links to it as the last step; first-boot self-configuration is new server-side
+  code.
+
+**Phase 1 shipped 2026-08-28** — the security fix, first boot, the starter
+policy and `docs/INSTALL.md`:
+
+- `HARDENED_IMAGE=1` in the Dockerfile removes the anonymous-auth bypass from the
+  shipped image, and `debug`/`openapi_url`/`docs_url` are off in it regardless of
+  environment. Deliberately a **separate switch from `ENVIRONMENT`**, so an
+  operator setting `ENVIRONMENT=development` for readable logs does not re-open
+  it. `tests/security/test_shipped_image_posture.py` pins all of it, including a
+  source-level assertion that the Dockerfile still sets the flag — without which
+  deleting one ENV line would leave every other test green while the artifact
+  reverted.
+- `src/querygate/bootstrap.py` seeds `connections.yaml`/`policy.yaml`/
+  `catalog.yaml` and generates an admin key, all create-if-absent with `O_EXCL`,
+  mode 0600, before any store is constructed. Never regenerates. A
+  `ThreadPoolExecutor` test proves eight concurrent boots agree on one key — the
+  race a read-then-write would lose intermittently, on exactly the multi-replica
+  deployments hardest to debug.
+- The starter policy sets `require_explicit_allowlist: true` (item 220), so a
+  fresh install reaches nothing. **A test loads the seeded YAML into the real
+  `Policy` model** and caught that the first draft used a field name
+  (`max_select_items`) that does not exist — the seeded file would have failed to
+  load on every first boot.
+- `test_only_the_admin_service_and_bootstrap_write_connections_yaml` asserts the
+  single-writer rule.
+
+**Phase 2, still open:** the write side of a secret resolver (so the first
+connection can be added through the UI rather than by editing YAML), the
+checkout-page/portal snippet, and the Helm values snippet.
+
+**Definition of done:** a clean machine goes from the command to a governed
+query in under ten minutes with no file editing; the flow works identically on
+Docker Desktop, a cloud VM, and Kubernetes; `build_authenticator` under the
+shipped image's own defaults contains **no** `AnonymousAuthenticator`; the
+starter policy denies by the recorded mechanism; a literal (non-`${...}`)
+connection string is rejected by the first-connection flow and never appears in
+any config-version response; first boot never overwrites an existing config;
+and a source-level test asserts `admin/service.py` is the only module that
+writes `connections.yaml`.
+
+### 216. Renewal countdown and lapse UX ✅ DONE
+
+`renewal_state` is now a signed entitlement field resolved by the control plane;
+one `renewal_notice()` decides the threshold for the shared admin/access banner,
+the renewal email, `querygate-license status` and a coarse three-value signal on
+`/health` and a Prometheus gauge that carry no date or day count.
+
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 216).
+
+### 217. Customer portal — signup, checkout, downloads, docs
+
+**Effort: XL.** Depends on 212.
+
+**Why it matters:** the commercial front door. Everything the customer touches
+before the product itself.
+
+**What it is:**
+- **Sign-up and sign-in via OAuth2 (Google/Microsoft) with MFA** — the same
+  identity the deployment activates against, so activation is a recognition
+  rather than a second account.
+- **Stripe Checkout** for the self-serve tiers; **Stripe's hosted billing
+  portal** for payment methods, invoices and cancellation — do not rebuild it.
+- **Post-checkout success page is the install page**: the one-line command, the
+  compose file, the Helm snippet, and a link to the quickstart.
+- **Subscription management**: plan, seats, connections, renewal date,
+  auto-renew toggle, invoices, and the **cancellation flow that states plainly —
+  before confirming — that there is no refund and access runs to the end of the
+  paid period**.
+- **Deployments view**: which deployments are enrolled, last seen, and a
+  revoke/rotate action.
+- **Docs and download links**, versioned, with release notes.
+- **No customer secrets in the portal database** beyond what Stripe and the
+  identity provider already hold.
+
+**Definition of done:** a stranger with a card can go from landing page to a
+governed query without contacting anyone; cancellation, renewal, and card
+failure are all exercised end to end against Stripe test mode.
+
+### 218. Setup guides and quickstart docs for the SaaS motion
+
+**Effort: M.**
+
+**Why it matters:** the existing docs are written for an operator who clones a
+repo and edits YAML. Every one of them is now wrong about how the product is
+obtained and started.
+
+**What it is:** a one-screen quickstart (checkout → command → activate →
+first query); per-target deploy guides (Docker, compose, Kubernetes/Helm, a
+major cloud); connecting the first database; writing a first policy; connecting
+an agent over MCP; the air-gapped/offline-entitlement guide; a troubleshooting
+page whose first entry is "my subscription lapsed"; and a rewrite of
+`CUSTOMER_README.md` and the landing/sales copy to match the new motion.
+
+**Definition of done:** `claim-verify` clean against the new docs; the
+quickstart is verified by following it on a clean machine, not by reading it.
+
+### 219. Pre-launch codebase cleanup pass
+
+**Effort: L, and it is a real item, not a tidy-up afterthought.**
+
+**Why it matters:** the codebase is about to stop being a prototype with a
+public future and start being a product people pay for. Everything a customer
+cannot see still has to be right, because nobody outside can review it any more.
+
+**What it is:** run the repo's own audit skills and fix what they find, rather
+than improvising a definition of clean —
+- **`repo-audit`** — whole-repo invariant drift.
+- **`dep-audit`** — CVEs, lockfile drift, the deny-by-default allowlist.
+- **`test-gap`** — untested code and missing coverage classes.
+- **`claim-verify`** — every doc and marketing claim backed by code and a test.
+- **`security-invariant-check`** over the subscription and activation surfaces.
+- Delete dead code left by the BSL removal; reconcile `ROADMAP.md` to `TODO.md`;
+  archive fully-shipped items per the `ship-item` rules; make
+  `make release-check` and the full CI matrix green.
+- **Resolve the two open defects already logged**: item 192 (the disclosure
+  budget's Redis script passes multiple `KEYS` and fails `CROSSSLOT` on Redis
+  Cluster) and item 194 (three crafted-or-corrupt WORM lines escape
+  `search_worm_archive` as an unhandled exception the route masks as a 500).
+- **Three defects surfaced by the 2026-08-23 review of items 210–219**, logged
+  here rather than lost:
+  - `classify_rejection` returns `"templates_only"` but `_DENIAL_GUIDANCE` has no
+    such key, so a principal narrowed to templates who submits an ad-hoc query
+    gets "the specific reason wasn't recorded" — the least actionable message for
+    the most actionable rejection, and exactly what item 195's dedicated category
+    existed to prevent. Green today because the lookup has a `.get` fallback.
+  - **No shared type binds the rejection vocabulary.** `classify_rejection`,
+    `AuditEvent.error_category`, the `policy_decision` 4-tuple, and
+    `_DENIAL_GUIDANCE` are four parallel free-string maps; any new category
+    silently diverges in three places. The bullet above is one instance and item
+    211 will add the next. A `RejectionCategory(StrEnum)` in `core/` consumed by
+    all four — worth doing **before** 211 lands its value.
+  - `GET /admin/config/versions` and `/versions/{id}` return full
+    `connections_yaml` (which may hold a literal credential) under **read**
+    scope, while `GET /drafts/{id}` requires **write** scope for identical
+    content and encrypts at rest. Raise the versions endpoints to write scope, or
+    project the YAML out of the read-scoped model — the exclusion mechanism
+    already exists in `admin/store.py`. Item 215 makes this materially worse by
+    making literal credentials routine.
+
+**Definition of done:** all five skills report clean or with every finding
+triaged to a decision; `make release-check` and `make release-smoke` green; no
+`✅ DONE` item left unarchived.
+
+### 220. Deny-by-default at table and column granularity: a `Policy` allow-list with no allow-all fallback ✅ DONE
+
+`Policy.require_explicit_allowlist` (default `False`, so nothing changes for an
+existing deployment) turns an empty allow-list from allow-everything into
+deny-everything, at both table and column granularity.
+
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 220).
+
+### 221. Move validator bodies out of the model classes so the enforcement logic can be compiled
+
+**Effort: M. Depends on the item 214 packaging decision.** Owner decision needed
+before starting — this touches the AST enforcement core.
+
+**Why it matters:** item 214's spike measured that a module defining
+`pydantic.BaseModel` subclasses cannot be Cython-compiled at all (pydantic v2's
+metaclass rejects `cyfunction` methods). That leaves **30 validators, 602 lines**
+of real enforcement logic readable in the shipped image:
+
+| Module | Validators | Lines |
+|---|---|---|
+| `query_ast/models.py` | 21 | 396 |
+| `write_ast/models.py` | 4 | 50 |
+| `policy/models.py` | 3 | 50 |
+| `connections/models.py` | 2 | 106 |
+
+Join-form, window-scope, CTE-name, set-op and credential-shape checks — the
+Structural pillar's actual implementation. The *shape* of these models is
+already public (OpenAPI publishes 215 component schemas including every AST
+node), so nothing is lost by leaving the declarations interpreted. The **logic**
+is a different question, and today it ships in the clear.
+
+**What it is:** a mechanical split, per module —
+
+```python
+# query_ast/models.py — stays interpreted; it is the published contract
+@pyd.model_validator(mode="after")
+def _validate_join_form(self):
+    return _validators.validate_join_form(self)
+
+# query_ast/validators.py — compilable, holds the logic
+def validate_join_form(q): ...
+```
+
+- One `validators.py` per model module; the model keeps only the decorator and a
+  one-line delegation.
+- **No behaviour change.** Same functions, same raise sites, same messages.
+- The AST models' recursive-rebuild ordering must survive (see
+  `mcp/tools/__init__.py`'s docstring and item 214) — validators run at
+  validation time, not import time, so this should be inert, but assert it.
+
+**Definition of done:** all four modules split; `pytest -m unit` and
+`-m security` unchanged in count and outcome; each `validators.py` verified to
+Cython-compile with the suite green against the `.so`; a source-level test that
+no `@pyd.*validator`-decorated function in the four model modules contains more
+than a delegation; `security-invariant-check` clean.
+
+**Do not start without the owner's go-ahead** — 30 call sites on the enforcement
+core is not a cleanup, and if item 214 lands on a packaging approach that does
+not need it, the whole item is unnecessary.
+
+### 222. The product-guide HTML generator emits a document fragment, not a page
+
+**Effort: S.** Found by the `ui-a11y-reviewer` during item 210's audit; filed
+rather than fixed there because it is a generator change, unrelated to
+licensing, and it invalidates `docs/product-guide.html` until regenerated.
+
+**Why it matters:** `docs/product-guide.html` is the browsable customer-facing
+copy of `docs/PRODUCT_GUIDE.md` and part of what a prospect is handed.
+`scripts/generate_product_guide_html.py`'s `PAGE_TEMPLATE` begins at `<title>`
+and goes straight into `<style>` — **no doctype, no `<html lang>`, no
+`<meta charset>`, no viewport meta**. Both hand-written siblings
+(`landing/security.html`, `sales/index.html`) get all four right, so this is
+drift in the generator, not a house style.
+
+Three measured consequences:
+
+- **No `lang`** — a WCAG 3.1.1 (Level A) failure; a screen reader announces the
+  page in the user's default voice.
+- **No viewport meta** — the generator's own `@media (max-width: 900px)` block
+  is the only thing that unpins the 288px fixed sidebar and restores
+  `margin-left: 0`. Without the meta tag it never fires on a phone: the page
+  loads at the ~980px fallback viewport, zoomed out, sidebar overlaying content.
+- **No `meta charset`** — the file carries raw UTF-8 em dashes and ellipses. Over
+  `file://` there is no HTTP charset header, so the browser falls back to its
+  locale default.
+
+**Also in scope** (same reviewer, same surface, all pre-existing and none
+caused by item 210):
+
+- **No skip link** in the generated page, so a keyboard user tabs through all
+  eight sidebar nav links before reaching `<main>`. Both hand-written siblings
+  ship one.
+- **The Decision Log renders as two sibling `<ul>` elements**, so a screen
+  reader announces "list, 40 items" then "list, 96 items" for one chronological
+  list. Root cause is `render_blocks`, which terminates a list run on any line
+  that is neither a bullet nor a two-space continuation.
+- **`sales/index.html`'s `summary::after` `+`/`−`** may fold into the
+  disclosure's accessible name in Chrome and Firefox, duplicating the native
+  expanded/collapsed announcement. `content: "+" / ""` suppresses it where
+  supported.
+- **`sales/index.html`'s clipboard write has no `.catch`**, so a
+  permission-denied or insecure-context rejection leaves the button label
+  unchanged and the `role="status"` live region silent.
+- **`generate_product_guide_html.py`'s `inline()` interpolates a link href
+  without quote-escaping** (`html.escape(text, quote=False)` leaves `"`
+  intact). Not exploitable — the sole input is a trusted repo file and no
+  operator- or database-supplied string reaches the generator — but it is a
+  latent break-out in attribute context.
+- **`tests/security/test_no_phone_home.py` scans only `*.py`.**
+  `src/querygate/admin_ui/app.js` and `access_ui/app.js` ship in the package and
+  are outside all three rules. **This becomes load-bearing at item 216**, which
+  puts a renewal URL into those UIs — extend the scan to `.js` before then, or
+  216 will place a vendor URL in shipped source that no guard sees.
+
+**Definition of done:** the generated page has a doctype, `lang`, `charset` and
+viewport; `make product-guide-html` regenerated and
+`test_product_guide_html_freshness.py` green; a skip link; the Decision Log a
+single list; the phone-home scan covering `.js`; the four smaller items above
+either fixed or explicitly declined in this item's body with a reason.
+
+### 223. Decide the background catalog refresh's behaviour on a lapsed subscription
+
+**Effort: S.** Found by `claim-reviewer` during item 216's audit; filed rather
+than fixed there because it is a behaviour decision about a background task, not
+a docs correction, and item 216's own claim has already been narrowed to match
+the code.
+
+**Why it matters:** `check_schema_discovery_funnel` gates `list_tables`,
+`describe_table` and `search_catalog`, so an expired deployment enumerates
+nothing **for a caller**. `CatalogRefreshMonitor.refresh_once` →
+`scan_connection_schema` (`catalog/refresh.py`) reaches `list_live_tables` and
+`get_table_schema` directly on a timer and is not gated. Until 2026-08-28
+`execution/subscription_gate.py`'s docstring claimed it was; that sentence is now
+corrected and the residual is recorded in `docs/THREAT_MODEL.md` §8.
+
+**The decision to make**, which is why this is an item and not a fix: gating a
+background loop has no caller to hand a 402 to. Either
+- the monitor checks the funnel and **stops refreshing** while lapsed, which
+  needs a visible state (a metric, a health field) so "my catalog went stale" is
+  diagnosable rather than mysterious; or
+- the exclusion stays and is a deliberate, documented carve-out — a lapsed
+  deployment reflecting its own schema into its own catalog file discloses
+  nothing to anyone, and the operator can already disable refresh.
+
+**Definition of done:** whichever is chosen, `subscription_gate.py`'s docstring,
+`docs/THREAT_MODEL.md` §8 and the licensing FAQ's lapse table say the same
+thing, and a test pins it.
+
+### 224. Bring the pre-existing console surfaces up to the banner's accessibility bar
+
+**Effort: M.** Both findings are `ui-a11y-reviewer` pre-existing observations
+from item 216's audit, filed rather than fixed there because they change surfaces
+item 216 did not touch and both have their own tests to update.
+
+**Why it matters:** item 216's renewal banner was built to avoid two defects that
+the surfaces beside it still have.
+
+- **`#global-banner` is a `hidden` `role="status"` element** in both
+  `admin_ui/index.html` and `access_ui/index.html`, and `setBanner()` writes
+  `textContent` and *then* clears `hidden` — so the text is written into a
+  `display: none` region and announcement is unreliable across assistive tech.
+  This is the exact anti-pattern `tests/unit/test_renewal_banner_ui.py`'s
+  docstring names; the fix is the same never-hidden wrapper the renewal banner
+  now uses.
+- **No bidirectional-text isolation anywhere in either console.** No `dir="auto"`,
+  `<bdi>`, `unicode-bidi` or U+2068 appears in `admin_ui/` or `access_ui/`.
+  Database- and operator-sourced identifiers are escaped but never isolated:
+  `access_ui/app.js` renders `${connection}.${table}.${column}` into one
+  `<strong>`, and the `.` separators are neutral characters — so a table named
+  with RTL characters visually reorders and the identifier a user reads is not
+  the identifier the policy names. That is a policy-comprehension problem, not a
+  cosmetic one.
+
+**Definition of done:** `ui-a11y-reviewer` clean on both surfaces; a test that
+the global banner's live region is never the element that gets hidden; a test
+that every rendered identifier composed of database-supplied parts is isolated.
+
+### 225. An entitlement schema-version bump has no compatibility window
+
+**Effort: S.** Found by `architecture-boundary-reviewer` during item 216's audit.
+Filed rather than fixed there: item 216's own bump (1 → 2) is safe because no
+entitlement has ever been issued to a customer, so there are no v1 documents to
+strand and a compatibility path for them would be dead code. The *mechanism* gap
+is real for the next bump.
+
+**Why it matters:** gateways are self-hosted and upgrade on the customer's
+schedule, so issuer and deployment will skew. `verify.py` rejects any version but
+its own outright, and `PAYLOAD_FIELDS` is pinned by `test_no_phone_home.py`, so
+the refresh request cannot carry a client version for the issuer to negotiate
+against. On the next bump, a skewed deployment falls back to
+`evaluate(None, ...)` — grace, observe, no `expires_at`, therefore **no renewal
+banner and no countdown** — while `refresh` still reports OK. Fail-open, so no
+outage; also no signal.
+
+Note that the sharpest half of this is already fixed: `manager.py` now caches
+**after** verification, so a document this build cannot read no longer evicts the
+last one it could.
+
+**What it is:** a supported-versions set rather than a single constant, with a
+stated deprecation window; or a client version in the refresh *request* (which is
+a disclosure change — `PAYLOAD_FIELDS`, the licensing FAQ and the EULA's
+§16.1 all name the four fields, so it needs that decision first, not a code
+change).
+
+**Definition of done:** a test that signs a payload at the previous version and
+asserts the current build's behaviour is the decided one, whichever it is.
+
+### 226. `build_provider` in `billing.py` still special-cases construction at the registry
+
+**Effort: XS.** Found by `architecture-boundary-reviewer` during item 216's audit
+as the precedent that item 216's `notifications.py` copied.
+
+**Why it matters:** `notifications.py`'s email registry now maps each name to a
+factory that takes `Settings`, so adding a transport is one entry plus one class.
+`billing.py:build_provider` still branches (`if cls is ManualBillingProvider` /
+`if not webhook_secret`), which is the shape that leaked a second copy of the
+assumption into a call site before. Two registries in one service with different
+construction contracts is the drift worth closing, and the next provider registry
+anyone writes here will copy whichever they read first.
+
+**Definition of done:** `build_provider(name, settings)` with no per-class
+branch; `test_the_registry_constructs_every_provider_from_settings`'s billing
+sibling iterating `known_providers()` with no branching in the test either.
+
+### 227. ClusterFuzzLite coverage is shallow because pydantic-core is native ✅ DONE
+
+Added `fuzz/fuzz_policy_validation.py` targeting `validate_structural_caps`
+plus a seed corpus: **31 → 377 coverage features**, measured.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 227).
+
+### 228. Microsoft ODBC driver redistribution in a PUBLIC image ✅ DONE
+
+The default image no longer ships `msodbcsql18`; MSSQL moved to an opt-in
+`production-mssql` build target, so nothing proprietary is redistributed.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 228).
+
+### 229. The control plane's lapse messaging is now factually wrong, and its product counterpart is gone
+
+**Effort: M. Private control-plane repo only — does NOT block the public
+release.** Found 2026-09-05 by CI on PR #45, which ran the control-plane suite
+for the first time since the entitlement gate was removed.
+
+**Why it matters:** `control_plane/notifications.py`'s `LAPSE_CONSEQUENCE` tells
+a customer, in a renewal email:
+
+> "At expiry, governed queries, writes and schema discovery are refused with
+> HTTP 402 (over MCP, the error code SUBSCRIPTION_EXPIRED). Audit retrieval and
+> configuration changes are not gated."
+
+**None of that happens any more.** The gateway ships Apache-2.0 with no
+entitlement gate, no 402, and no `SUBSCRIPTION_EXPIRED` code. Emailing a
+customer a consequence the software cannot produce is worse than saying nothing,
+and it is exactly the class of claim `claim-verify` exists to catch — this one
+just lives in a repo that skill does not scan.
+
+The breakage is wider than one string. This service was built as one half of a
+pair: `issuance.py` signs an entitlement, `notifications.py` describes what
+happens when it lapses, and three tests existed solely to keep the two codebases
+in agreement on two domain separators, the schema version and the disclosed
+field list. Those tests are removed (they imported a module that no longer
+exists); the *coupling* they guarded is what actually needs rethinking.
+
+**Where the prior design lives:** the 719-line control-plane design document was
+removed in the Apache-2.0 transition, because it describes the entitlement model
+this item retires. It is not lost: it remains in the private repository's history
+at commit `27ce5fe^`, which is frozen as the historical record. Read it before
+redesigning, so the decisions it already settled are not re-litigated.
+
+**Definition of done:** decide what this service is now — `COMMERCIAL.md` says
+Notary (third-party anchoring) and fleet management, neither of which gates a
+query — then make the customer-facing text describe that, and re-establish a
+cross-check against whatever verifier ends up owning the signature format. Until
+then, **do not send a renewal email from this service**: `notice_job.py` will
+happily deliver the false sentence above.
+
+### 230. The shipped image generated an admin key that nothing accepted ✅ DONE
+
+First boot now runs in `create_app` and merges its generated key into
+`api_keys` before the authenticator is built; the hardened image previously
+rejected the key it told the operator to copy.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 230).

@@ -782,9 +782,17 @@ async def _create_probe_tables() -> None:
 
 @pytest_asyncio.fixture
 async def date_probe_tables():
-    await _create_probe_tables()
+    # Creation is INSIDE the try, deliberately. `_create_probe_tables` builds the
+    # Postgres table first and the MSSQL one second, so if the MSSQL server is
+    # absent it raises with the Postgres table already created — and a setup that
+    # raises before `yield` never reaches a `finally` placed after it. That
+    # stranded `date_probe` in the demo database, where it then broke
+    # `test_postgres_schema_discovery.py`'s two exact-table-set assertions on
+    # every subsequent run. CI never saw it (fresh service container per job);
+    # anyone running the tier twice locally did.
     _setup_with_tables(_TABLES + ["date_probe"])
     try:
+        await _create_probe_tables()
         yield
     finally:
         import sqlalchemy as sa

@@ -21,11 +21,12 @@ on:
     tags:
       - "v*"
 
+# Least privilege at the top level; the single job that publishes elevates
+# only what it needs (see `publish.permissions` below). Scorecard's
+# Token-Permissions check penalises workflow-level write scopes even when only
+# one job uses them.
 permissions:
   contents: read
-  packages: write # push to GHCR
-  id-token: write # cosign keyless signing via OIDC
-  attestations: write # SLSA build-provenance attestation (actions/attest-build-provenance)
 
 env:
   # GHCR path is derived from the repo automatically and lowercased by
@@ -37,8 +38,13 @@ jobs:
   publish:
     name: Build, scan, push, and sign the release image
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push to GHCR
+      id-token: write # cosign keyless signing via OIDC
+      attestations: write # SLSA build-provenance attestation
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # Fail fast if the tag (e.g. v0.1.0) doesn't match the version baked into
       # the package/pyproject. scripts/check_release.py already asserts
@@ -54,14 +60,27 @@ jobs:
             exit 1
           fi
 
-      - uses: docker/setup-buildx-action@v3
+      # The licence gate, before anything is built or published. `LICENSE` is a
+      # The EULA is the licence of record for the proprietary subscription
+      # (item 210). Without this, pushing a tag would publish a signed image
+      # whose licence still reads "[LICENSOR LEGAL NAME]" / "[ADDRESS]".
+      # Release mode refuses any unfilled placeholder, in either language --
+      # EULA.he.md's placeholders are Hebrew, so an ASCII-only pattern misses them.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: EULA placeholder gate (pre-tag)
+        run: make eula-check-release
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       # Compute the image tags + OCI labels from the git tag.
       #   ghcr.io/agitmit/querygate:0.1.0   (exact version)
       #   ghcr.io/agitmit/querygate:latest  (only on a non-prerelease tag)
       - name: Compute image tags and labels
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ env.IMAGE }}
           tags: |
@@ -72,7 +91,7 @@ jobs:
       # before anything is published. Cached to GHA so the push step below is a
       # near-instant re-tag, not a rebuild.
       - name: Build image (local, for scanning)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           load: true
@@ -84,7 +103,7 @@ jobs:
       # vuln, leaked secret, or misconfig that isn't a reviewed exception in
       # .trivyignore. A failure here stops the release before publishing.
       - name: Trivy scan (pre-publish gate)
-        uses: aquasecurity/trivy-action@v0.24.0
+        uses: aquasecurity/trivy-action@6e7b7d1fd3e4fef0c5fa8cce1229c54b2c9bd0d8 # v0.24.0
         with:
           image-ref: querygate:release-candidate
           severity: HIGH,CRITICAL
@@ -94,7 +113,7 @@ jobs:
           scanners: vuln,secret,misconfig
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -104,7 +123,7 @@ jobs:
       # the registry digest so we sign by immutable digest, not by tag.
       - name: Push image to GHCR
         id: push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           push: true
@@ -113,7 +132,7 @@ jobs:
           cache-from: type=gha
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       # Keyless signature (Sigstore) bound to this workflow's OIDC identity and
       # recorded in the public transparency log. A customer can later verify the
@@ -136,7 +155,7 @@ jobs:
       #   gh attestation verify oci://ghcr.io/agitmit/querygate@<digest> \
       #     --repo AGitmit/QueryGate
       - name: Attest SLSA build provenance
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@ef244123eb79f2f7a7e75d99086184180e6d0018 # v1
         with:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.push.outputs.digest }}

@@ -7,11 +7,12 @@ instructions override default behavior — follow them exactly.
 
 These are the load-bearing invariants. Each links to the section with the full
 rationale; break one only via a written decision in `docs/PRODUCT_GUIDE.md`'s
-Decision Log (or, for product identity, `docs/business/NORTH_STAR.md`).
+Decision Log (or, for product identity, the [North Star](#north-star--the-product-definition-for-success-the-anchor)
+section below).
 
 1. **No caller-controlled raw SQL, ever.** The only thing a caller submits is a
    validated `StructuredQuery` / write AST. There is no `execute_sql` field,
-   endpoint, or MCP tool, and never will be without a NORTH_STAR decision.
+   endpoint, or MCP tool, and never will be without a recorded product-identity decision.
    → [The one request pipeline](#the-one-request-pipeline), [North Star](#north-star--the-product-definition-for-success-the-anchor)
 2. **No credential on any returned model.** Only `PublicConnectionInfo` leaves
    REST/MCP; `ConnectionProfile` (which holds the connection string) never does.
@@ -54,8 +55,10 @@ only when historical extraction context is explicitly needed.
   the right section and its Decision Log. Skip for pure bug fixes, no-behavior
   refactors, and test-only changes. Its "Maintenance protocol" section has the
   exact rule; the `product-guide-sync` skill runs it.
-- **`docs/business/NORTH_STAR.md`** — canonical definition of the product and how
-  it wins. Every strategy artifact reconciles to it. → [North Star](#north-star--the-product-definition-for-success-the-anchor)
+- **The [North Star](#north-star--the-product-definition-for-success-the-anchor)
+  section below** — the canonical definition of the product and how it wins. It
+  lives here rather than in a separate file so the definition ships with the code
+  that has to honour it.
 - **`TODO.md`** — the live worklist (authority for item *content* and `✅ DONE`
   status). `docs/TODO_ARCHIVE.md` holds full write-ups of fully-shipped items.
   Split to keep routine reads cheap.
@@ -75,8 +78,10 @@ automate these):
 - **Item numbers are permanent and file-global.** Never renumber or reuse one —
   the repo has ~176 internal "item N" cross-refs plus CLAUDE.md and test
   references that must keep resolving. A new item takes the next unused number
-  (check the highest `### N` heading in TODO.md; currently 195 — note 98 was
-  never allocated and is deliberately left unused).
+  (check the highest `### N` heading in TODO.md — do not trust a number written
+  here, it goes stale; 98 was never allocated and is deliberately left unused,
+  and 199–209 are reserved for the human-SSO/identity stream while items 210–219
+  carry the SaaS subscription work).
 - **When an item ships fully** (its `###` heading ends in exactly `✅ DONE`, no
   trailing qualifier): move its full body to `docs/TODO_ARCHIVE.md` in numeric
   order under a `### N.` heading, and leave a stub in `TODO.md` — same heading,
@@ -245,9 +250,9 @@ manufacturing criticism.
 
 ## North Star — the product definition for success (the anchor)
 
-`docs/business/NORTH_STAR.md` is the canonical definition of what QueryGate is
-and how it wins; every strategy artifact (ROADMAP.md, the competitor briefs,
-MARKET_DOMINATION_ANALYSIS.md, marketing) reconciles to it. In one line:
+This section is the canonical definition of what QueryGate is and how it wins;
+every other artifact — `ROADMAP.md`, the docs, the pitch — reconciles to it.
+In one line:
 **QueryGate is the enforcement point that governs *what an agent's query or
 write is allowed to be* — by construction, never by inspecting a string —
 against your existing operational databases, self-hosted, with per-human
@@ -259,11 +264,15 @@ your live operational DB, self-hosted, data never leaves), **Proof**
 The **non-goals are product identity, not gaps** — they are why followers can't
 copy us; adding any needs an explicit recorded decision: no `execute_sql`/raw-SQL
 mode, no execution of model-generated code, no stored-procedure path, no
-mandatory semantic/entity-modeling step, no warehouse of our own. When a
-feature, roadmap re-order, or pitch is unclear, check it against NORTH_STAR.md
+mandatory semantic/entity-modeling step, no warehouse of our own, no GraphQL (or
+any second) query interface, and — added 2026-08-23 with the subscription
+decision — **no hosted query execution**: the vendor control plane may issue
+entitlements and must never execute a query, hold a database credential, or
+receive a row. When a
+feature, roadmap re-order, or pitch is unclear, check it against this section
 (definition → pillars → non-goals → success metric). Success is measured by one
-thing: a paid design partner passing a security review no competitor's passes at
-the operational-query layer.
+thing: a design partner passing a security review no competitor's passes at the
+operational-query layer.
 
 ## Commands
 
@@ -288,8 +297,8 @@ make test-load                         # bounded real-Postgres concurrency load 
 make test-soak SOAK_ROUNDS=100         # repeated guardrail load scenarios
 
 # Formatting
-poetry run black --check src/ tests/    # or: make format-check
-poetry run black src/ tests/            # or: make format
+poetry run black --check src/ tests/ examples/ scripts/   # or: make format-check
+poetry run black src/ tests/ examples/ scripts/           # or: make format
 
 # Demo database (for manual/local verification against a real Postgres)
 docker compose up -d                    # starts querygate-demo-db on localhost:5433, auto-seeded

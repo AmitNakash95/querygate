@@ -187,6 +187,26 @@ default:
 
 connections:
   demo:
+    # --- Deny-by-default (TODO.md item 220) ---------------------------------
+    #
+    # `require_explicit_allowlist: true` flips the meaning of an EMPTY
+    # allow-list from "allow everything" to "deny everything". Without it, the
+    # only deny-all lever in the model is `enabled: false`, which is
+    # all-or-nothing: the moment you enable a connection to run your first
+    # query, every table and column on it is readable up to the numeric caps.
+    #
+    # **Default is `false`**, so no existing deployment changes behaviour by
+    # upgrading. Turn it on deliberately, and then name every table and column a
+    # caller may reach. The starter policy a fresh install ships (item 215) sets
+    # it `true`.
+    #
+    # With it on:
+    #   * an empty `allowed_tables` denies every table;
+    #   * a table with no `allowed_columns` entry (and no `"*"` entry) denies
+    #     every column on it;
+    #   * `denied_*` still wins over `allowed_*`, unchanged.
+    require_explicit_allowlist: true
+
     # Only these tables are queryable at all — anything else is rejected
     # before compilation, even if it exists in the database. `employees` is
     # deliberately left out here: it's known to the connection (see
@@ -277,11 +297,13 @@ connections:
     # Placeholders, NOT recommendations — pick your own from your audit stream.
     # Both caps also require min_group_size above to be set; a policy that
     # configures a budget without a k-floor is rejected at load time.
-    # SET THE PER-TABLE CAP. max_shape_repeats_per_window is currently evadable
-    # (TODO.md item 186): the shape fingerprint does not canonicalize a
-    # referenced select alias, a cte rename, a nested-scope alias, or list
-    # order, so a prober can mint a fresh shape bucket per probe. The per-table
-    # cap below is unaffected and is the load-bearing one until 186 lands.
+    # Set BOTH. They are belt and braces, not alternatives: the per-shape cap
+    # is the targeted probe signal, the per-table cap is the backstop that
+    # catches a prober varying its shape. (TODO.md item 186 closed a period in
+    # which the per-shape cap was evadable by walking a select alias, a cte
+    # name, a nested-scope alias or a list order; the fingerprint now
+    # normalizes all four away. If you configured only the per-table cap on
+    # that advice, the per-shape cap is safe to add now.)
     # max_shape_repeats_per_window: <n>       # one shape, re-run n times
     # max_aggregate_queries_per_window: <n>   # any aggregate on the table
     # disclosure_budget_window_seconds: 3600  # the one real default

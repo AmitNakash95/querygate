@@ -1,0 +1,56 @@
+# The control plane's OWN CI. A separate workflow, not extra steps in `ci.yml`.
+#
+# Two repo facts make that mandatory rather than stylistic (TODO.md item 212):
+#   * `tests/unit/test_security_posture_commands.py` asserts EXACTLY ONE semgrep
+#     invocation in `ci.yml`. Adding a mirror step there fails it with a drift
+#     message that reads as unrelated to whatever you were doing.
+#   * The root Makefile's `bandit -r src/` scope means a widened scope would put
+#     control-plane findings in the PRODUCT's SAST job — failing a customer's
+#     gate on a CVE in software they never receive.
+name: control-plane
+
+# `src/querygate/subscription/**` is in the filter deliberately, and it is the
+# only product path that is. `tests/test_notice_agreement.py` and
+# `test_the_product_verifies_what_we_sign` are the only places the two codebases
+# meet, and both live on THIS side — so without it, editing SCHEMA_VERSION,
+# RENEWAL_NOTICE_DAYS or LAPSE_CONSEQUENCE in the product runs no job that checks
+# the two sides still agree. The guard would have fired on none of the commits it
+# exists to block.
+on:
+  push:
+    paths: &paths
+      - "control-plane/**"
+      - "src/querygate/subscription/**"
+      - ".github/workflows/control-plane.yml"
+  pull_request:
+    paths: *paths
+
+# Least privilege: this workflow only runs the control-plane test suite.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: control-plane
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: Install Poetry
+        run: pipx install poetry==2.4.1
+      - name: Install (control-plane venv only)
+        run: poetry install --no-root
+      - name: Lock is current
+        run: poetry check --lock
+      - name: Format check
+        run: poetry run black --check src/ tests/
+      - name: SAST (this directory only)
+        run: poetry run bandit -r src/ -q
+      - name: Tests
+        # `../src` so the cross-repo contract test can import the product's
+        # verifier — the only place the two codebases meet.
+        run: PYTHONPATH=src:../src poetry run pytest tests/ -q

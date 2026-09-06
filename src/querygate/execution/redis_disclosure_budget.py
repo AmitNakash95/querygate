@@ -94,8 +94,34 @@ return {0}
 """
 
 
+# Every key one `reserve` call passes to the script belongs to the SAME
+# connection — `enforce_disclosure_budget` builds every charge from its own
+# `connection_id` argument — so tagging on the connection puts all of them in one
+# Redis Cluster slot.
+_KEY_PREFIX = "qg:disclosure:"
+
+
 def _redis_key(key: DisclosureBudgetKey) -> str:
-    """Flatten a budget key into one Redis key.
+    """Flatten a budget key into one Redis key, hash-tagged by connection.
+
+    **The hash tag is a correctness requirement, not a nicety (TODO.md item
+    192).** This is the only limiter in the codebase that passes *several* KEYS
+    to one Lua script — one per charge. On Redis Cluster, keys in different hash
+    slots make the whole call fail `CROSSSLOT`, which lands in this limiter's
+    deliberately **fail-closed** branch and refuses every aggregate query on a
+    k-floored connection: a privacy control turned into an outage on exactly the
+    traffic it was enabled to protect. `fakeredis` models no slots at all and a
+    single-node Redis has only one, so **no behavioural test can see this** —
+    which is why `test_every_key_the_script_touches_shares_one_hash_slot` is a
+    source-level assertion instead, the same guard
+    `admin/redis_observed_shapes.py` carries.
+
+    Redis hashes only the span between the first `{` and the first `}` after it,
+    and ignores the tag entirely when that span is **empty** — so the tag is
+    forced non-empty (`or "_"`) rather than trusting the registry to never hand
+    us a blank connection id. Percent-escaping runs *inside* the braces, so a
+    connection id containing `{`/`}` becomes `%7B`/`%7D` and cannot open a second
+    tag.
 
     Every component is percent-escaped before joining. Two of them —
     `principal` (an IdP-issued subject) and `purpose` (a closed-set token the
@@ -109,7 +135,9 @@ def _redis_key(key: DisclosureBudgetKey) -> str:
     and has no such ambiguity; escaping is what keeps the two implementations of
     this Protocol agreeing on key identity.
     """
-    return "qg:disclosure:" + ":".join(quote(part, safe="") for part in key)
+    connection, *rest = key
+    tag = quote(connection, safe="") or "_"
+    return _KEY_PREFIX + "{" + tag + "}:" + ":".join(quote(part, safe="") for part in rest)
 
 
 class RedisDisclosureBudgetLimiter:

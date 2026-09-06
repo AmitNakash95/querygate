@@ -29,6 +29,7 @@ from querygate.execution.disclosure_budget import (
     InProcessDisclosureBudgetLimiter,
     budgeted_occurrences,
     enforce_disclosure_budget,
+    rejection_message,
     resolve_disclosure_budget,
     shape_fingerprint,
 )
@@ -501,7 +502,11 @@ async def test_the_tripped_key_determines_the_reported_kind():
             now=100.0,
         )
     assert excinfo.value.quota_kind == KIND_TABLE
-    assert "aggregate queries" in str(excinfo.value)
+    # The KIND is on the exception object, where the metric and the operator
+    # breakdown read it — and deliberately NOT in the caller-visible message
+    # (TODO.md item 187): telling a prober which cap it hit answers "will
+    # varying my shape help?" for it.
+    assert "aggregate queries" not in str(excinfo.value)
 
 
 @pytest.mark.asyncio
@@ -781,6 +786,35 @@ def test_rest_maps_a_disclosure_rejection_to_429_with_retry_after():
     assert resp.json() == {"detail": "slow down"}
 
 
+def test_the_two_caps_produce_a_byte_identical_refusal():
+    """TODO.md item 187. The per-shape and per-table refusals used to be
+    textually distinct and self-describing, naming the cap, its configured value
+    and the window length — which answers the prober's actual next question
+    ("will varying my shape help?") and hands over item 186's evasion strategy
+    instead of making it be discovered blind.
+
+    Byte-identical is the contract, not merely "similar": any difference between
+    the two is an oracle. Same `retry_after` on both, since that value is already
+    in the `Retry-After` header either way.
+    """
+    shape = rejection_message(KIND_SHAPE, limit=3, window_seconds=600, retry_after=42)
+    table = rejection_message(KIND_TABLE, limit=3, window_seconds=600, retry_after=42)
+    assert shape == table
+
+
+def test_the_refusal_echoes_neither_the_configured_cap_nor_the_window():
+    """The operator's configured values are their own signal — a prober that
+    learns `max_shape_repeats_per_window` knows exactly how many probes each
+    fresh bucket buys it. `quota_kind` stays on the exception object for the
+    metric and the operator breakdown; only the caller is told nothing."""
+    message = rejection_message(KIND_SHAPE, limit=37, window_seconds=1234, retry_after=42)
+    assert "37" not in message
+    assert "1234" not in message
+    assert "shape" not in message.lower()
+    assert "table" not in message.lower()
+    assert "42" in message  # retry_after is already in the Retry-After header
+
+
 def test_rejection_message_names_neither_the_table_nor_the_shape():
     """Which table is close to its disclosure budget is itself a disclosure
     channel, and echoing the shape back would confirm to a prober exactly which
@@ -842,3 +876,311 @@ async def test_both_caps_produce_two_independent_charges(monkeypatch):
     await enforce_disclosure_budget(_agg(), policy, connection_id="demo", principal_subject="agent")
     kinds = {kind: limit for _key, limit, kind, _weight in seen["charges"]}
     assert kinds == {KIND_TABLE: 9, KIND_SHAPE: 2}
+
+
+# ---------------------------------------------------------------------------
+# TODO.md item 186 — the per-shape cap was evadable by varying a caller-authored
+# name or a list order. Each test below walks one measured vector; each is
+# paired with a control proving the mechanism still separates genuinely
+# different shapes, because collapsing EVERYTHING would also make them pass.
+# ---------------------------------------------------------------------------
+
+
+def _unfiltered_agg(**overrides) -> StructuredQuery:
+    """An aggregate on `employees` with no WHERE clause, so each test below
+    varies exactly the one thing it is about."""
+    base = {
+        "from": "employees",
+        "select": [{"fn": "count", "col": "employees.id", "as": "n"}],
+        "group_by": ["employees.department"],
+    }
+    base.update(overrides)
+    return StructuredQuery.model_validate(base)
+
+
+def test_walking_a_select_alias_and_its_order_by_reference_mints_no_new_bucket():
+    """Item 186's own measured repro. Twenty probes differing only in the select
+    alias `n1…n20` and its `order_by` reference — with the predicate literal
+    sliding, which is the actual differencing attack — produced **20 distinct
+    fingerprints** on the shipped item-179 tree, so
+    `max_shape_repeats_per_window` never tripped at any value.
+
+    `_canonicalize` stripped the alias *definition* and rewrote *dotted* refs,
+    but a bare `n7` is neither.
+    """
+    fingerprints = {
+        shape_fingerprint(
+            _unfiltered_agg(
+                select=[{"fn": "count", "col": "employees.id", "as": f"n{i}"}],
+                order_by=[{"col": f"n{i}", "dir": "desc"}],
+                where={"col": "employees.salary", "op": "gt", "value": 120000 + i},
+            )
+        )
+        for i in range(20)
+    }
+    assert len(fingerprints) == 1
+
+
+def test_the_fingerprint_still_separates_genuinely_different_shapes():
+    """The control for every collapse above: a fingerprint that returned a
+    constant would pass all of them and make the per-shape cap meaningless in the
+    other direction."""
+    distinct = {
+        shape_fingerprint(_unfiltered_agg()),
+        shape_fingerprint(
+            _unfiltered_agg(select=[{"fn": "avg", "col": "employees.salary", "as": "n"}])
+        ),
+        shape_fingerprint(_unfiltered_agg(group_by=["employees.region"])),
+        shape_fingerprint(
+            _unfiltered_agg(where={"col": "employees.salary", "op": "gt", "value": 1})
+        ),
+    }
+    assert len(distinct) == 4
+
+
+def test_reordering_the_select_list_mints_no_new_bucket():
+    a = _unfiltered_agg(
+        select=[
+            {"fn": "count", "col": "employees.id", "as": "a"},
+            {"fn": "avg", "col": "employees.salary", "as": "b"},
+        ]
+    )
+    b = _unfiltered_agg(
+        select=[
+            {"fn": "avg", "col": "employees.salary", "as": "b"},
+            {"fn": "count", "col": "employees.id", "as": "a"},
+        ]
+    )
+    assert shape_fingerprint(a) == shape_fingerprint(b)
+
+
+def test_reordering_and_terms_mints_no_new_bucket():
+    salary = {"col": "employees.salary", "op": "gt", "value": 1}
+    region = {"col": "employees.region", "op": "eq", "value": "x"}
+    tenure = {"col": "employees.tenure", "op": "eq", "value": "x"}
+    assert shape_fingerprint(_unfiltered_agg(where={"and": [salary, region]})) == shape_fingerprint(
+        _unfiltered_agg(where={"and": [region, salary]})
+    )
+    # Control: a different predicate COLUMN is a different disclosure.
+    assert shape_fingerprint(_unfiltered_agg(where={"and": [salary, region]})) != shape_fingerprint(
+        _unfiltered_agg(where={"and": [salary, tenure]})
+    )
+
+
+def test_flipping_the_sort_direction_mints_no_new_bucket():
+    asc = _unfiltered_agg(order_by=[{"col": "employees.department", "dir": "asc"}])
+    desc = _unfiltered_agg(order_by=[{"col": "employees.department", "dir": "desc"}])
+    assert shape_fingerprint(asc) == shape_fingerprint(desc)
+
+
+def test_renaming_a_cte_mints_no_new_bucket():
+    """`max_cte_count` defaults to 3, so this vector is on by default. It needed
+    its own handling: `effective_name_map` maps a cte name to ITSELF (the scope's
+    `from_table`), so the dotted table-alias rewrite was a no-op for `src0.salary`
+    and the rename walked straight through.
+    """
+    fingerprints = set()
+    for i in range(10):
+        fingerprints.add(
+            shape_fingerprint(
+                StructuredQuery.model_validate(
+                    {
+                        "ctes": [
+                            {
+                                "name": f"src{i}",
+                                "query": {
+                                    "from": "employees",
+                                    "select": ["employees.department", "employees.salary"],
+                                    "where": {
+                                        "col": "employees.salary",
+                                        "op": "gt",
+                                        "value": 100000 + i,
+                                    },
+                                },
+                            }
+                        ],
+                        "from": f"src{i}",
+                        "select": [{"fn": "count", "col": f"src{i}.salary", "as": "n"}],
+                        "group_by": [f"src{i}.department"],
+                    }
+                )
+            )
+        )
+    assert len(fingerprints) == 1
+
+
+def test_a_cte_over_a_different_base_table_is_still_a_different_bucket():
+    """Control for the cte collapse: it must erase the NAME, not the body."""
+
+    def cte_over(table: str, column: str) -> StructuredQuery:
+        return StructuredQuery.model_validate(
+            {
+                "ctes": [{"name": "s", "query": {"from": table, "select": [f"{table}.{column}"]}}],
+                "from": "s",
+                "select": [{"fn": "count", "col": f"s.{column}", "as": "n"}],
+                "group_by": [f"s.{column}"],
+            }
+        )
+
+    assert shape_fingerprint(cte_over("employees", "department")) != shape_fingerprint(
+        cte_over("orders", "region")
+    )
+
+
+def test_renaming_a_table_alias_inside_a_nested_scope_mints_no_new_bucket():
+    """`_canonicalize` built its alias map from the OUTERMOST scope only, so a
+    dotted reference inside an `exists_subquery` (or a set-op arm, or a cte body)
+    was never rewritten."""
+    fingerprints = set()
+    for i in range(10):
+        fingerprints.add(
+            shape_fingerprint(
+                _unfiltered_agg(
+                    where={
+                        "op": "exists",
+                        "exists_subquery": {
+                            "from": "orders",
+                            "from_alias": f"o{i}",
+                            "select": [f"o{i}.id"],
+                            "where": {"col": f"o{i}.total", "op": "gt", "value": 5 + i},
+                        },
+                    }
+                )
+            )
+        )
+    assert len(fingerprints) == 1
+
+
+def test_renaming_a_select_alias_inside_a_set_op_arm_mints_no_new_bucket():
+    """The arm's `having` REFERENCES the arm's own alias, which is the part that
+    matters: an alias definition alone is stripped as volatile wherever it sits,
+    so a test that only renames the definition passes even when nested collection
+    is broken. `_collect_authored_names` has to walk into the arm."""
+    fingerprints = set()
+    for i in range(10):
+        fingerprints.add(
+            shape_fingerprint(
+                _unfiltered_agg(
+                    set_op={
+                        "op": "union",
+                        "arms": [
+                            {
+                                "from": "orders",
+                                "select": [{"fn": "count", "col": "orders.id", "as": f"z{i}"}],
+                                "group_by": ["orders.region"],
+                                "having": {"col": f"z{i}", "op": "gt", "value": 3},
+                            }
+                        ],
+                    }
+                )
+            )
+        )
+    assert len(fingerprints) == 1
+
+
+def test_renaming_a_select_alias_inside_a_cte_body_mints_no_new_bucket():
+    """Same vector one level down, through a cte body's own `order_by`."""
+    fingerprints = set()
+    for i in range(10):
+        fingerprints.add(
+            shape_fingerprint(
+                StructuredQuery.model_validate(
+                    {
+                        "ctes": [
+                            {
+                                "name": "s",
+                                "query": {
+                                    "from": "orders",
+                                    "select": [{"fn": "count", "col": "orders.id", "as": f"c{i}"}],
+                                    "group_by": ["orders.region"],
+                                    "order_by": [{"col": f"c{i}", "dir": "desc"}],
+                                },
+                            }
+                        ],
+                        "from": "s",
+                        "select": [{"fn": "count", "col": "s.region", "as": "n"}],
+                        "group_by": ["s.region"],
+                    }
+                )
+            )
+        )
+    assert len(fingerprints) == 1
+
+
+def test_a_set_op_arm_over_a_different_table_is_still_a_different_bucket():
+    def arm_over(table: str, column: str) -> StructuredQuery:
+        return _unfiltered_agg(
+            set_op={
+                "op": "union",
+                "arms": [
+                    {
+                        "from": table,
+                        "select": [{"fn": "count", "col": f"{table}.id", "as": "z"}],
+                        "group_by": [f"{table}.{column}"],
+                    }
+                ],
+            }
+        )
+
+    assert shape_fingerprint(arm_over("orders", "region")) != shape_fingerprint(
+        arm_over("invoices", "region")
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_cross_connection_joined_table_is_charged_under_the_requesting_connection():
+    """Item 186's first scoping residual, pinned so a future change to it is
+    deliberate rather than accidental.
+
+    `budgeted_occurrences` names the joined table by name only; the charge key's
+    connection component comes from `enforce_disclosure_budget`'s own
+    `connection_id` argument. So the *same physical table* reachable through two
+    connections carries two independent budgets, and the k-anonymity floor that
+    the budget defends is the **requesting** connection's, not the joined
+    table's. Not a bypass on its own — every path still has *a* budget — but a
+    caller with access to both connections gets 2x the probes against one table.
+    """
+    query = StructuredQuery.model_validate(
+        {
+            "from": "employees",
+            "select": [{"fn": "count", "col": "employees.id", "as": "n"}],
+            "joins": [
+                {
+                    "table": "orders",
+                    "type": "inner",
+                    "on": ["employees.id", "orders.employee_id"],
+                    "connection": "warehouse",
+                }
+            ],
+            "group_by": ["employees.department"],
+        }
+    )
+    occurrences = budgeted_occurrences(query)
+    # The occurrence map is connection-free: the joined table is named, and the
+    # requesting connection is stamped on later.
+    assert {table for table, _fingerprint in occurrences} == {"employees", "orders"}
+
+    charged: list = []
+
+    class _Recorder:
+        async def reserve(self, charges, *, window_seconds, now=None):
+            charged.extend(charges)
+
+    policy = _budget_policy(max_aggregate_queries_per_window=10)
+    import querygate.execution.disclosure_budget as module
+
+    previous = module._active_limiter
+    module._active_limiter = _Recorder()
+    try:
+        await enforce_disclosure_budget(
+            query, policy, connection_id="primary", principal_subject="agent"
+        )
+    finally:
+        module._active_limiter = previous
+
+    connections = {key[0] for key, _limit, _kind, _weight in charged}
+    assert connections == {"primary"}, (
+        "the joined table's own connection is not part of the key — if this ever "
+        "changes, item 186's scoping residual has been closed and its note in "
+        "docs/THREAT_MODEL.md \u00a78 should go with it"
+    )

@@ -26,7 +26,7 @@ them in, and why that order maximizes product growth and ROI.**
 
 ## The strategy this order encodes
 
-**This order serves the North Star (`docs/business/NORTH_STAR.md`).** Every item
+**This order serves the North Star (`CLAUDE.md`’s "North Star" section).** Every item
 here advances one of QueryGate's three pillars — **Structural** (no raw SQL/DML +
 query-shape policy), **Reach** (live operational DB, self-hosted, data never
 leaves), **Proof** (per-human attribution + tamper-evident audit) — or closes a
@@ -36,7 +36,7 @@ no competitor's passes.** A re-sequence must cite which pillar or gap it serves.
 An item that advances none of them is a signal to question the item, not the
 order.
 
-The 2026-07-22 competitive scan (`docs/business/MARKET_DOMINATION_ANALYSIS.md`,
+The 2026-07-22 competitive scan (an internal competitive analysis,
 `docs/business/COMPETITORS.md`) reached one conclusion that drives the whole
 sequence: **QueryGate's white space is real, but the thing that converts
 "promising architecture" into "must-buy" is proof, not more features — and the
@@ -81,6 +81,117 @@ an agent was explicitly told to work on that number. Continue to the next
 independently eligible item, or stop if roadmap order/dependencies leave none.
 Never steal or auto-expire a claim based on its timestamp. Remove your own
 claim when the work ships or before explicitly handing the item back.
+
+### Phase S — Ship as a paid SaaS product (gates everything else)
+
+Owner decision, 2026-08-23: QueryGate is **proprietary, closed-source, sold as a
+paid monthly subscription**. See an internal commercial plan, which supersedes
+`GTM_EXECUTION_PLAN.md` and the Shape A / BSL decision of 2026-08-21 in full.
+
+This phase precedes Phase 0 not because it is more valuable, but because it is
+**gating**: until the product can be bought, installed, activated and enforced,
+no amount of moat deepens revenue. Items 199–209 are reserved for the concurrent
+human-SSO/identity stream; these start at 210.
+
+**Sequencing rules inside this phase:**
+
+- **214's spike runs first, before anything else in the phase.** If this
+  codebase cannot be compiled (pydantic-core is a Rust extension, the MCP SDK
+  resolves tool annotations against the wrapping function's `__globals__` at
+  registration time), the whole packaging plan changes shape and we need that
+  answer in week one.
+- **210 unblocks every doc-touching item** — until the BSL apparatus is gone,
+  every licensing claim in the repo contradicts the product.
+- **211 ships in `observe` mode.** Enforcement going live is a control-plane
+  action (issuing `enforcement: enforce`), never a code change — so the gate is
+  exercised on real deployments before it can stop a query.
+- **217 is blocked on a legal entity existing** (Stripe will not onboard
+  without one). That is not a code dependency and cannot be worked around.
+
+- [ ] **214** — Single obfuscated compiled binary. **Spike ✅ done
+  (2026-08-24) — see the compiled-binary spike.** Technically GO: all four
+  risk areas identical to the interpreter with `--standalone
+  --include-package=querygate`, after fixing the MCP registration bug the spike
+  found. **No longer *legally* blocked — the toolchain changed.** Technically still
+  unproven: PyInstaller has not been run at all, and only two modules have been
+  verified end to end under Cython. Nuitka is AGPLv3+ (refused by
+  `make license-check`), but §9 evaluated **Cython + PyInstaller**: both
+  licence-clean. The modules Cython cannot compile (pydantic models) are largely
+  published as OpenAPI/MCP schemas — but **not their ~28 validators**, which are
+  enforcement logic and stay readable (spike §9.3). A real residual, not zero.
+  Next, none of it gated on the owner: extract response models out of
+  `execution/service.py` (12) and `write_execution.py` (2) so the enforcement
+  funnels become compilable; add `-X annotation_typing=False` plus a per-module
+  compile list; verify the suite against a mixed `.so`/`.py` tree; then
+  PyInstaller-bundle. Still open: Linux/Docker, the ODBC path, and a
+  support-debugging procedure.
+  **⚠️ Sequencing correction (2026-08-27): 214 cannot COMPLETE before 211.** Its
+  own phase 2 requires "the subscription layer and the app compiled together so
+  enforcement call sites are inside the artifact", which does not exist yet. The
+  spike — the part this phase's rules said must run first — is done, so 214 stays
+  listed here for continuity but is **not the next eligible item**; work the
+  remaining owner-ungated packaging tasks opportunistically and finish it after
+  211 lands.
+- [x] **210** — Proprietary licence transition; retire the BSL apparatus.
+  ✅ **Shipped 2026-08-27.** *Unblocked every other item that touches licensing
+  text.* Two things it landed that later items must not undo: the phone-home
+  guard is **narrowed to `src/querygate/subscription/`, not deleted** (with the
+  package's declared payload constant pinned to the four disclosed fields; the
+  request-body assertion is item 211's own DoD), and five cancelled-plan
+  documents plus `.github/cla/` are exempt from the claim-drift sweep **only
+  while their superseded banners are present** — asserted by
+  `tests/unit/test_claim_drift_exemptions.py`.
+- [ ] **212** — Control plane: accounts, Stripe subscriptions, entitlement
+  issuance. *The vendor side; without it 211 has nothing to verify. Ordered
+  before 211 because 211's own dependency column names it.*
+- [ ] **211** — Subscription layer: the entitlement gate (two funnels, reads and
+  writes). *The wrapper that makes it a subscription. Ships in observe mode.
+  Its observe-mode shell can be built against a fixture entitlement, so it may
+  start in parallel once 212's payload format is frozen.*
+- [ ] **213** — Activation: bind a deployment to a subscription via OAuth2 +
+  MFA. **Unblocked — the note that this was blocked is stale.** Item 199 phase 1
+  merged in `620d90d` and is on this branch: `src/querygate/identity/` carries 17
+  modules including `oidc.py`, `sessions.py`, `device.py` and `totp.py`, with six
+  test files. Verified 2026-08-28.
+  *Reuses 199's mechanism, not its store: `identity/` is deployment-side and
+  governs who may use the gateway; activation is vendor-side and governs whether
+  it may run at all.*
+- [x] **220** — Deny-by-default at table/column granularity (a `Policy`
+  allow-list with no allow-all fallback). **Blocks 215.** *Today an empty
+  `allowed_tables` means allow-**everything**, so the "safe-by-default starter
+  policy" 215 promises is inexpressible. Opt-in, default off, so no existing
+  deployment shifts behaviour.*
+- [ ] **215** — One-command install and first-boot self-configuration.
+  *"Single command and it's set up" is the promise; today it needs two YAML
+  files plus env configuration.*
+- [x] **216** — Renewal countdown and lapse UX. *Depends on 211.*
+- [ ] **217** — Customer portal: signup, checkout, downloads, docs.
+  **Blocked on the legal entity.**
+- [ ] **218** — Setup guides and quickstart docs for the SaaS motion.
+- [x] **230** — Wire first boot's generated admin key into api_keys; the hardened
+      image rejected it, so the one-command install was unusable
+- [ ] **229** — Control plane: lapse messaging describes a gate that no longer
+      exists; realign the service to Notary/fleet (private repo; does not block
+      the public release)
+- [x] **228** — Resolve msodbcsql18 redistribution in a public image (blocks
+      the first public image release; repository and wheel unaffected)
+- [x] **227** — Deepen ClusterFuzzLite: add a fuzz target whose work is in
+      Python, since pydantic-core is native and coverage feedback on the
+      model target is measured shallow (31 features / 2.7M execs)
+- [ ] **221** — Move validator bodies out of the model classes so the
+  enforcement logic can be compiled. *Measured residual from 214's spike: 30
+  validators / 602 lines of Structural-pillar logic ship readable, because a
+  module defining `BaseModel` cannot be Cythonized. Mechanical but touches the
+  AST core — **owner decision before starting**, and unnecessary if 214 lands
+  somewhere that does not need it.*
+- [ ] **219** — Pre-launch codebase cleanup pass. *Runs `repo-audit`,
+  `dep-audit`, `test-gap`, `claim-verify`, `security-invariant-check`, and
+  closes the two open defects (192, 194).*
+
+**Superseded by this phase:** item **197** (offline entitlement token,
+soft-warn, not-before-customers) is replaced in premise by 210–213 — the token
+now blocks rather than warns. Item **198** (Notary) keeps its scope and stays
+deferred; it is not part of shipping the subscription.
 
 ### Phase 0 — Moat & proof (highest ROI: wins the security review)
 
@@ -227,6 +338,47 @@ claim when the work ships or before explicitly handing the item back.
   directly unblocks SSO-based pilot onboarding. **Depends on 10 + 90 (both
   shipped).*** ✅ **Shipped** (full-vocabulary RFC 9728 `scopes_supported` +
   generated `docs/SCOPE_CATALOG.md` with role bundles, drift-tested).
+- [ ] **199** — Human SSO: OIDC sign-in for the browser surfaces, a built-in
+  local identity provider, and a file-configured claim→scope mapping. *Added
+  2026-08-23 at the maintainer's request. Items 10/90/95 let an agent or
+  service authenticate as a human; a **human** still had to paste a bearer
+  token into the admin UI, which is the credential-handling practice a security
+  review flags first. Completes the "bring your IdP" story the Proof pillar
+  claims.* ✅ **Shipped (phase 1)** — one OIDC authorization-code + PKCE
+  implementation across nineteen named provider presets (plus a first-class
+  `generic` path for any other OIDC issuer) with discovery, a built-in
+  local IdP (scrypt + TOTP + lockout) for air-gapped and break-glass use,
+  deny-by-default claim→scope mapping applied to browser sessions *and* bearer
+  JWTs, CSRF-bound sessions that re-derive authority per request, an RFC 8628
+  device grant for CLI callers, `admin:identity:*` administration, and a new
+  redaction-safe `identity.authentication` audit event. ✅ **Phase 1b** — a
+  built-in development identity provider so the real redirect flow runs with no
+  external IdP to register (fenced to local environments three independent
+  ways). ✅ **Phase 2** — Redis-backed session/login-flow/device stores, so SSO
+  works across replicas. ✅ **Phase 3** — `querygate-login`, the device-grant
+  CLI. **Only phase 4 remains open** in TODO.md: SAML 2.0, decision-gated until
+  a design partner mandates it.
+
+- [ ] **203** — decide the seed walk's posture for an unparseable predecessor:
+  fail closed like the blank-run sibling, or record the exemption as an
+  accepted residual. *Added 2026-08-24 by the re-review; pre-existing since
+  item 172.*
+- [ ] **202** — promote `digests_equal` to `core/` and apply it at the six
+  `hmac.compare_digest` sites outside the ledger (TOTP code, OIDC state/nonce,
+  CSRF token, PKCE challenge) — each turns a clean 401/403/422 into a masked
+  500 today. *Added 2026-08-23 by the items 184/194/185/201 audit;
+  pre-existing from the SSO work in 620d90d.*
+- [x] **201** — `AUDIT_WORM_S3_ENDPOINT_URL`, so the WORM archive tier
+  works against any S3-API-compatible store with Object Lock (MinIO, Ceph
+  RGW) and not AWS S3 alone — the Reach pillar, not cloud breadth.
+  *Added 2026-08-23, filed and shipped together with items 184/194/185.*
+- [x] **200** — Per-surface credential-type policy. *Added 2026-08-23 by
+  maintainer review of item 199: SSO was available but not enforced, so a
+  static API key still opened the admin console and every action through it was
+  attributable to a config entry rather than a person.* ✅ **Shipped** — an
+  allowlist over `Principal.auth_method` for the console / REST / MCP surfaces,
+  whose default drops shared secrets from the control plane the moment SSO is
+  enabled. **Depends on 199.**
 
 ### Phase 2 — Enterprise procurement unlocks (pull-driven — do when a partner's security team engages)
 
@@ -320,7 +472,7 @@ claim when the work ships or before explicitly handing the item back.
   same-session fix.*
 - [x] **152** — Sales/landing pages don't reflect items 19 (MySQL)/134 (WORM
   retention) shipping. *Surfaced 2026-08-06 by `claim-reviewer` while
-  auditing items 19/128/134/144 — `GO_TO_MARKET.md` was updated correctly,
+  auditing items 19/128/134/144 — an internal go-to-market analysis was updated correctly,
   the public pages weren't; run `pitch-sync`.*
 - [x] **153** — `CHANGELOG.md` has no `[Unreleased]` entry for items 19
   (MySQL) or 134 (WORM retention). *Surfaced 2026-08-06 by `claim-reviewer`
@@ -528,7 +680,7 @@ claim when the work ships or before explicitly handing the item back.
   but risks becoming "click here to buy unlimited disclosure", and item 179's
   own false-positive rate is uncalibrated — decide from real usage data, not
   taste.* **Depends on 92, 179.**
-- [ ] **184** — a day holding more segments than `max_objects_scanned` returns
+- [x] **184** — a day holding more segments than `max_objects_scanned` returns
   a cursor that never advances: part of the WORM archive becomes silently
   unreachable, a good-faith pager loops forever, and item 177's integrity
   counters inflate without bound. *Surfaced 2026-08-11 by three of the four
@@ -538,7 +690,7 @@ claim when the work ships or before explicitly handing the item back.
   format change (`after_key` + `StartAfter`), M effort, not a metrics-commit
   drive-by.* **Filed as item 179 on the item-177 branch; renumbered on merge
   (2026-08-12) — see TODO.md's note at item 184.** **Depends on 134.**
-- [ ] **185** — `AUDIT_WORM_SEARCH_REQUESTS_TOTAL{outcome="rejected"}` is
+- [x] **185** — `AUDIT_WORM_SEARCH_REQUESTS_TOTAL{outcome="rejected"}` is
   unreachable for the bound rejections its own comment claims to count,
   because `build_worm_search_result` validates before calling
   `search_worm_archive`. *Surfaced 2026-08-11 by
@@ -583,7 +735,7 @@ claim when the work ships or before explicitly handing the item back.
   deny-by-default and separately granted), but it makes `INFERENCE_RISKS.md`'s
   "bounded since item 179" read broader than it is; the docs half is
   unambiguous, the flooring half is a product decision.* **Depends on 93, 179.**
-- [ ] **194** — three crafted-or-corrupt WORM lines still escape
+- [x] **194** — three crafted-or-corrupt WORM lines still escape
   `search_worm_archive` as an unhandled exception the route masks as a 500 (a
   non-ASCII `hash` in `hmac.compare_digest`, plus unbounded recursion in
   `json.loads` and in `_contains_forbidden_content`). *Surfaced 2026-08-12 by
@@ -769,7 +921,7 @@ position.
   `tests/integration/test_prepared_statement_reuse.py`).
 - [ ] **18** — Stored-procedure catalog. *Extends read coverage where customers
   already encapsulate logic in procs.* **Moved to Decision-gated (2026-07-28):**
-  conflicts with the NORTH_STAR permanent non-goal "no stored-procedure /
+  conflicts with the permanent non-goal "no stored-procedure /
   arbitrary-procedural-SQL path" — see that section below. Left `[ ]` and in
   its original phase position for history; the automated walk skips it there.
 - [x] **57** — Pluggable dialect-adapter architecture. *The enabler that turns
@@ -811,7 +963,7 @@ position.
   headers would leak query semantics to intermediaries.* **Depends on 128, 127.**
 - [x] **132** — Reconcile stale shipped-status claims left behind by items
   90–93. *Surfaced by the `auditors` claim review on 2026-07-30. Cheap, and it
-  is outward-facing: GO_TO_MARKET.md understates four shipped capabilities, and
+  is outward-facing: an internal go-to-market analysis understates four shipped capabilities, and
   item 93's body still points an implementer at a module deleted in July.*
 - [x] **133** — Caller-facing, quota-metered verdict endpoint (play P4).
   *Added 2026-07-30 by `competitive-scan`; scope corrected the same day by
@@ -819,7 +971,7 @@ position.
   item 39 draft-aware and already accepting a `StructuredQuery`) — what is
   unscoped is the **non-admin, caller-facing, quota-metered** verdict about the
   **calling** principal, which is what a gateway needs. Filed in Adoption rather
-  than Moat by the same test applied to item 128: NORTH_STAR files P4 under the
+  than Moat by the same test applied to item 128: the North Star files P4 under the
   leverage moves (turn competitors into distribution), not the three pillars,
   and its gateway value compounds once 128/130 land. Reuse the shared evaluator;
   do not extend `explain`; design it against the discovery-oracle channels
@@ -862,13 +1014,21 @@ position.
 - [x] **50 (phase 2)** — Per-principal rate limits / query quotas over time. ✅
   **Shipped** (`RedisQuotaLimiter` — cross-replica shared quota budget via Lua,
   closing the per-replica-multiplication gap).
-- [ ] **193** — `docs/product-guide.html` has no freshness gate against its
+- [x] **193** — `docs/product-guide.html` has no freshness gate against its
   markdown source. *Surfaced 2026-08-12 by `architecture-boundary-reviewer` and
   `claim-reviewer` when the item-179 merge landed with the generated copy stale
   — by three whole sections plus two Decision Log entries, and stale since
   `f995e35` rather than merge-caused (regenerated by hand in that pass). Filed here rather than in Phase 3 because it is derived-artifact
   tooling, not a governance control — the same shape as
   `scripts/check_worklist.py`'s mirror check, and equally cheap.*
+
+- [ ] **196** — the container image's non-Python layers (Debian `bookworm` plus
+  Microsoft's `msodbcsql18` under `ACCEPT_EULA=Y`) have never been
+  licence-assessed. *Surfaced 2026-08-21 by the GTM WP1 dependency-licence pass,
+  which gates every package in `poetry.lock` and states this scope limit in its
+  own report rather than implying it is covered. Not flip-blocking; needed before
+  the first paid pilot's security review, which is the north-star metric. The
+  `msodbcsql18` EULA question is the one that could change the Dockerfile.*
 
 ---
 
@@ -918,15 +1078,25 @@ surface them for a human, never auto-start them.
 - **P2 · Open the StructuredQuery AST as a standard.** A standards-governance
   commitment, not just engineering.
 - **18 · Stored-procedure catalog.** Added 2026-07-28 (`roadmap-next` walk):
-  `docs/business/NORTH_STAR.md` lists "No stored-procedure /
+  `CLAUDE.md`’s "North Star" section lists "No stored-procedure /
   arbitrary-procedural-SQL path" as a permanent non-goal — product identity,
   not a gap — and CLAUDE.md's non-negotiable #8 requires an explicit recorded
-  NORTH_STAR decision before adding anything the non-goals list forbids.
+  product-identity decision before adding anything the non-goals list forbids.
   TODO.md item 18's own body ("when prioritized... a real security review
   given procedures can have side effects") was written before that non-goal
   was reconciled against it. Needs a maintainer decision — reverse the
   non-goal with a recorded rationale, or close item 18 as will-not-build —
   before any implementation.
+- **197 · Offline entitlement token for the paid tier.** Added 2026-08-21
+  (GTM WP4, owner decision) — Shape A removed the production ceiling the
+  licence key existed to self-check, so this is now an entitlement token for
+  the paid tier, not pre-launch work. Gated on a paying customer needing it;
+  ships alongside item 198. Not-before-customers — do not claim or implement.
+- **198 · QueryGate Notary.** Added 2026-08-21 (GTM WP4/§4, owner decision) —
+  an append-only transparency log anchoring the audit ledger's chain head
+  (hashes only, asynchronous, never in the request path). Pitch it now, build
+  it only when a customer asks. Not-before-customers — do not claim or
+  implement.
 
 ## Coordination-gated (partly non-code — an agent can prep, not finish)
 

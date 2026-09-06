@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compose a single, always-current procurement evidence page (TODO.md item
 147) from artifacts that already exist: `docs/SECURITY_POSTURE.md`,
-`docs/COMPLIANCE_MAPPING.md`, `docs/business/SECURITY_BENCHMARK.md`,
+`docs/COMPLIANCE_MAPPING.md`, `docs/benchmarks/SECURITY_BENCHMARK.md`,
 `SECURITY.md`'s disclosure program, and the current dependency-audit
 allowlist status (`security/dependency-audit-allowlist.json`).
 
@@ -17,6 +17,8 @@ any source doc or the allowlist:
 from __future__ import annotations
 
 import json
+import os
+import re
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,7 +35,7 @@ _SOURCES: list[tuple[str, Path]] = [
     ("Compliance control mapping", ROOT / "docs" / "COMPLIANCE_MAPPING.md"),
     (
         "Adversarial benchmark report",
-        ROOT / "docs" / "business" / "SECURITY_BENCHMARK.md",
+        ROOT / "docs" / "benchmarks" / "SECURITY_BENCHMARK.md",
     ),
     ("Responsible disclosure program", ROOT / "SECURITY.md"),
 ]
@@ -48,6 +50,37 @@ def _load_allowlist() -> list[dict]:
     if not ALLOWLIST_FILE.is_file():
         return []
     return json.loads(ALLOWLIST_FILE.read_text(encoding="utf-8"))
+
+
+_LINK = re.compile(r"\]\((?P<target>[^)\s]+)\)")
+
+
+def _repoint_links(text: str, source_dir: Path) -> str:
+    """Rewrite a source doc's relative links so they still resolve from
+    `docs/TRUST_EVIDENCE.md`.
+
+    Every source below is correct *in its own location* — `SECURITY.md` sits at
+    the repo root and links `docs/THREAT_MODEL.md`; `docs/benchmarks/
+    SECURITY_BENCHMARK.md` links `../THREAT_MODEL.md`. Embedding them verbatim
+    into a file in `docs/` broke all of those, and the trust packet is the one
+    document a prospect's security reviewer is most likely to actually click
+    through. Rewrite each relative target to be relative to `OUTPUT.parent`
+    instead; absolute URLs and bare anchors are left alone."""
+
+    def rewrite(match: re.Match[str]) -> str:
+        target = match.group("target")
+        if target.startswith(("http://", "https://", "mailto:", "#")):
+            return match.group(0)
+        path, sep, anchor = target.partition("#")
+        if not path:
+            return match.group(0)
+        resolved = (source_dir / path).resolve()
+        repointed = os.path.relpath(resolved, OUTPUT.parent)
+        if path.endswith("/") and not repointed.endswith("/"):
+            repointed += "/"
+        return f"]({repointed}{sep}{anchor})"
+
+    return _LINK.sub(rewrite, text)
 
 
 def _slug(title: str) -> str:
@@ -102,9 +135,10 @@ def build_document(*, version: str, generated_at: str) -> str:
             raise SystemExit(f"trust page source is missing: {path}")
         parts.append(f"## {title}")
         parts.append("")
-        parts.append(f"*Source: [`{path.relative_to(ROOT)}`]({path.relative_to(ROOT)}).*")
+        href = os.path.relpath(path, OUTPUT.parent)
+        parts.append(f"*Source: [`{path.relative_to(ROOT)}`]({href}).*")
         parts.append("")
-        parts.append(path.read_text(encoding="utf-8").strip())
+        parts.append(_repoint_links(path.read_text(encoding="utf-8").strip(), path.parent))
         parts.append("")
     return "\n".join(parts) + "\n"
 

@@ -347,7 +347,7 @@ can't hide inside a subquery either.
 instead of a dozen times is a rounding error next to the query itself. Policy
 validation is fast for a different reason: it is a pure in-memory comparison
 against config with no network call and no database round trip, so a violating
-query dies before a connection is touched (see `docs/business/PERFORMANCE_BENCHMARK.md`
+query dies before a connection is touched (see `docs/benchmarks/PERFORMANCE_BENCHMARK.md`
 for the measured end-to-end overhead, and regenerate it on your own hardware
 rather than quoting a number). The one-walk rule buys **correctness that
 survives the next ten AST features**, which is a different and more valuable
@@ -1300,9 +1300,33 @@ archive: a required, capped time range plus `event_type`/`connection_id`/
 `pii_customers` in the last 18 months" is answerable even once the local
 file has long since rotated that window out. Every bound (window width,
 objects scanned, wall-clock timeout, page size) is enforced server-side —
-an over-wide or missing range is rejected outright, a bound hit mid-scan
-degrades to a truncated, resumable page rather than an unbounded scan — except
-a day listing over `max_objects_scanned`, whose cursor does not advance (item 184).
+an over-wide or missing range is rejected outright, and a bound hit mid-scan
+degrades to a truncated, resumable page rather than an unbounded scan. That
+resumability is now unconditional: a day listing cut short by
+`max_objects_scanned` returns a cursor carrying an exclusive `after` marker
+naming the last segment it consumed, so the next page starts strictly beyond
+it (item 184). Before that fix such a cursor pointed back at the start of the
+same day, which made every segment past the budget unreachable, looped a
+good-faith pager, and re-counted that day's integrity findings on every lap.
+
+The archive tier is not AWS-only. `AUDIT_WORM_S3_ENDPOINT_URL` (empty by
+default, meaning AWS S3 proper) points both the flush monitor and the managed
+search at any S3-API-compatible store that implements Object Lock, so an
+on-prem or air-gapped deployment can have the immutable copy too, not just the
+local hash-chained ledger (item 201). **QueryGate has verified no specific
+third-party store.** MinIO and Ceph RGW both document S3 Object Lock support,
+but unlike the Postgres/MSSQL/MySQL dialect claims — each backed by a live CI
+job against a real engine — there is no `minio-live` equivalent here, so that
+is a vendor claim rather than a tested one. Verify COMPLIANCE-mode retention
+against your own store before relying on the archive. Both clients read the same config field, so an
+archive is never written to one store and searched at another. It is an
+endpoint override, **not** an "any object store" adapter: retention is still
+sent as S3 Object Lock headers, so a store without Object Lock would produce
+ordinary deletable blobs while the deployment believed they were immutable —
+QueryGate logs a startup warning whenever the override is set for exactly that
+reason. Google Cloud Storage and Azure Blob are **not** reachable this way;
+their immutability models (Bucket Lock, immutable Blob Storage) are their own
+APIs rather than S3 Object Lock, and each would need a real second backend.
 
 **MCP as an OAuth 2.0 resource server (opt-in).** For deployments that put the
 MCP surface behind a real authorization server, QueryGate can run it as a
@@ -1586,10 +1610,13 @@ or worked around.
 > Credentials never sit on any returned model, and that's asserted against the
 > live API schema, not by convention. And none of it is "trust us": every
 > guarantee is backed by a deny-by-default CI gate (static analysis, dependency
-> audit, SBOM, image and secret scanning, OpenAPI fuzzing, and a 260-case
+> audit, SBOM, image and secret scanning, OpenAPI fuzzing, and a 704-test
 > adversarial suite), and reviewers get a reproducible packet where each claim
-> names the command that reproduces it. The published container image is signed
-> (cosign keyless) and carries SLSA build provenance, both consumer-verifiable.
+> names the command that reproduces it. The release pipeline signs the container
+> image (cosign keyless) and attaches SLSA build provenance, both
+> consumer-verifiable — but **neither step has run yet**: the only tag, `v0.1.0`,
+> predates both by four days, so say "wired and CI-exercised, not yet exercised
+> on a published tag" and cut a signed tag before quoting it to a prospect.
 > We're also upfront about the edges — no third-party pentest yet. The whole
 > subject is three things: **structural guarantees, continuous and reproducible
 > proof, and honesty about the gaps.**
@@ -1880,7 +1907,7 @@ summary.
 
 The gates fall into three groups:
 
-- **The access boundary itself.** The adversarial security suite (260 cases,
+- **The access boundary itself.** The adversarial security suite (704 tests,
   `make test-security`) encodes specific known bypass classes as regressions —
   denied-column inference, undeclared-table smuggling, predicate-as-SQL,
   schema-discovery leaks, policy-cap breaches, audit no-leak. On top of that,
@@ -1946,7 +1973,7 @@ documented inference residuals** it does *not* block (it never counts those as
 catches), which is the point: an honest, rerunnable benchmark is more
 persuasive than an asserted one. The published methodology, results, and the
 factual (capability-level, non-live) Google MCP Toolbox comparison live in
-[`docs/business/SECURITY_BENCHMARK.md`](business/SECURITY_BENCHMARK.md). A
+[`docs/benchmarks/SECURITY_BENCHMARK.md`](benchmarks/SECURITY_BENCHMARK.md). A
 *live* LLM/Toolbox head-to-head is a scoped phase-2 follow-up that needs
 external infrastructure; see the [Decision Log](#decision-log) for why the
 baseline is a declared structural model rather than a live competitor run.
@@ -2415,10 +2442,15 @@ Two caps, each `None` (off) by default, each applying per **(principal,
 connection, declared purpose, table)** over a rolling window:
 
 - `max_shape_repeats_per_window` — how many times one query shape may be re-run
-  against one table. Intended as the targeted probe cap, but **currently
-  evadable** (item 186) — the fingerprint does not canonicalize a referenced
-  select alias, a cte rename, a nested-scope alias, or list order, so a prober
-  can mint a fresh bucket per probe. Do not set this cap alone until that lands.
+  against one table. The targeted probe cap. It was **evadable as item 179
+  shipped** (item 186, closed 2026-08-21): the fingerprint did not canonicalize a
+  referenced select alias, a cte rename, a nested-scope alias, or list order, so
+  twenty probes differing only in `count(*) AS n1…n20` measured as twenty
+  distinct buckets and the cap never tripped. It now collapses a bare reference
+  to any caller-authored name to one token, resolves table aliases from every
+  scope, and sorts every list — the same twenty probes measure as one. Note this
+  **changed existing fingerprints**, so an in-flight rolling window reset once on
+  deploy.
 - `max_aggregate_queries_per_window` — how many aggregate queries may touch one
   table however the shape varies. The blunt backstop that catches a prober who
   varies its shape to dodge the first cap.
@@ -3011,6 +3043,271 @@ and MCP, so an operator configures their identity provider once
 (`AppConfig`'s `jwt_*` fields in `core/config.py`) and it applies to every
 way into QueryGate.
 
+### Human sign-in: SSO, a local identity provider, and claim→scope mapping
+
+**Files:** `src/querygate/identity/`, `src/querygate/api/sso_routes.py`,
+`src/querygate/api/admin_identity_routes.py` (TODO.md item 199)
+
+Everything above authenticates a **credential** — an API key or a JWT that a
+service or an agent already holds. This section is about authenticating a
+**person**. Before item 199, a human using the admin or access UI had to paste
+a bearer token into a dialog. That works, and it is the first thing a security
+reviewer objects to: it trains operators to copy long-lived tokens between
+windows, it cannot express "this person is in the platform-oncall group", and
+there is no way to end one person's access without rotating a key other people
+also hold.
+
+The whole subsystem is off by default (`SSO_ENABLED=false`). Turning it on
+changes no existing credential path.
+
+**One protocol, nineteen named providers, and every other one.** QueryGate implements OpenID Connect's
+authorization-code flow with PKCE exactly once (`identity/oidc.py`). What
+differs between Entra ID, Okta, Auth0, Google Workspace, Keycloak, authentik,
+PingOne, PingFederate, OneLogin, JumpCloud, GitLab, AD FS, Amazon Cognito,
+Cloudflare Access, ZITADEL, Authelia, WorkOS, FusionAuth and Salesforce is
+*data*, not control flow: a `ProviderPreset` (`identity/presets.py`) carries the
+issuer URL template, the scopes to request, and which claim holds groups and
+roles. A preset has no behaviour — no subclass, no hook, no per-provider branch
+— and any IdP without one is fully supported through the `generic` preset by
+naming its issuer. Issuer templates interpolate exactly three operator-supplied
+values (`{tenant}`, `{domain}`, `{region}`), a deliberate ceiling: an IdP whose
+issuer needs a fourth moving part uses `generic`, rather than the model growing
+a bespoke field per vendor. So an operator writes three fields:
+
+```yaml
+providers:
+  - id: entra
+    preset: entra_id
+    tenant: "00000000-0000-0000-0000-000000000000"
+    client_id: "11111111-1111-1111-1111-111111111111"
+    client_secret: "${QG_ENTRA_CLIENT_SECRET}"
+```
+
+…and `identity/discovery.py` reads the rest from the IdP's
+`.well-known/openid-configuration`. That document is treated as untrusted input
+from a *named* party: its `issuer` must equal the configured issuer exactly
+(RFC 8414 §3.3 — the check that stops a compromised well-known path from
+repointing the flow at a different IdP), every endpoint must be https, and the
+response is size- and time-bounded and TTL-cached.
+
+**What makes the flow safe.** Each of these is enforced, not assumed, and each
+has a test that fails if it stops happening:
+
+- **PKCE S256, always** — never `plain`, never omitted, even for a confidential
+  client. An IdP that does not advertise S256 is *refused* rather than
+  downgraded.
+- **`state` bound to a server-side, single-use record**, and to *this browser*
+  via a short-lived flow cookie. A replayed callback finds nothing.
+- **`nonce` compared against the ID token in constant time** — what stops an ID
+  token obtained elsewhere being injected into this session.
+- **Asymmetric signatures only.** Every HMAC family and `none` are refused
+  before verification, so the classic algorithm-confusion forgery (sign HS256
+  using the IdP's public key as the MAC secret) cannot verify.
+- **`redirect_uri` derived from configuration**, never from the request's Host
+  or `X-Forwarded-*` headers, so a forged host cannot steer an authorization
+  code.
+- **`return_to` must be site-relative.** `//evil.example`, `/\evil.example`,
+  and any absolute URL are refused — the open-redirect guard.
+
+**Groups become authority through a file, not through code.** An IdP knows who
+someone is; it does not know what a QueryGate scope means, and QueryGate does
+not know what a customer's group GUIDs mean. `identity/mapping.py` is the one
+place those vocabularies meet, and it is deliberately configuration:
+
+```yaml
+mapping:
+  rules:
+    - provider: entra
+      claim: groups                 # Entra security-group object IDs
+      equals: "22222222-2222-2222-2222-222222222222"
+      grant_roles: ["Operator"]     # a bundle from docs/SCOPE_CATALOG.md
+```
+
+It is **deny-by-default**: a person who matches no rule signs in successfully
+and holds *zero* scopes — a known human with no authority, which is the safe
+end state. Rules only grant, never revoke, so order is irrelevant and the
+outcome is a pure function of (provider, claims). Scope and role names are
+validated against `core/scopes.py` at load, so a typo fails the reload loudly
+instead of silently granting nothing. Claim paths are dotted, so Keycloak's
+nested `realm_access.roles` needs no special case.
+
+The same mapping applies to bearer JWTs when `JWT_MAPPING_PROVIDER_ID` is set —
+so one human holds the same authority whether they arrive through the browser
+or their agent presents an IdP token. A person's rights should not depend on
+which door they came through.
+
+**Sessions store claims, not scopes.** This is the design decision with the
+most operational consequence. A session record holds the claim set the IdP
+asserted; `identity/authenticators.py` re-derives scopes from the *live*
+mapping on every request. So tightening `identity.yaml` and reloading takes
+effect on the **next request**, including for people already signed in — it
+does not wait for a logout or a token expiry. The browser holds an opaque
+random token; the store holds only its SHA-256, so a dump of the session store
+yields nothing a browser could present.
+
+Every cookie-authenticated request must also carry the session's CSRF token in
+`X-QueryGate-CSRF` — on *every* method, not only unsafe ones. A cookie without
+that header is not a weaker credential; it is not a credential. The strict rule
+costs nothing (both UIs are `fetch`-driven and always send it) and removes the
+class of bug where a newly added read endpoint becomes cross-site-reachable
+because someone judged it "safe".
+
+**A built-in local identity provider**, for deployments that have no external
+IdP — air-gapped installs, an evaluation before SSO is wired, and break-glass
+access for when the IdP itself is down. It is not a user-management product; it
+holds exactly enough to authenticate a person and hand their groups to the
+mapping. Passwords are verified with `hashlib.scrypt` rather than a new argon2
+binding — the local IdP exists partly *because* a deployment cannot pull in
+more surface, so it should not be the reason QueryGate grows a native
+dependency. TOTP is RFC 6238 against the stdlib. Per-account lockout is what
+actually bounds online guessing (the KDF bounds offline cracking); an unknown
+username is still checked against a fixed dummy verifier so response time does
+not reveal whether an account exists; and a semaphore caps concurrent
+derivations so a memory-hard KDF cannot become self-inflicted exhaustion.
+`users.yaml` has one locked writer (`LocalUserFileRepository`), the same
+discipline `catalog/repository.py` uses, and holds verifiers only — no field
+anywhere can hold a plaintext password.
+
+**Giving a CLI your identity: the device grant.** `identity/device.py`
+implements RFC 8628, so a browserless tool can act as a human without that
+human pasting a token into it. The tool asks for a code, the person approves it
+in a browser they are already signed in to, and the tool receives a short-lived
+QueryGate token carrying *their* subject. The property that matters is that
+this can only ever **narrow**: the issued token's scopes are the intersection
+of what the tool asked for and what the approver actually holds — and that
+ceiling is intersected *again* with the approver's live mapped scopes on every
+request. Revoke a group in `identity.yaml`, reload, and an already-issued
+device token loses the scope immediately, without waiting for expiry. Browser
+session cookies are deliberately **not** accepted on the MCP transport; device
+tokens are. MCP is an agent transport, and an ambient cookie credential has no
+place on it.
+
+**Administration** lives under two new scopes, `admin:identity:read` and
+`admin:identity:write` — deliberately not folded into `admin:config:*`, because
+minting an account that can approve a change is a different privilege from
+making one. The surface is scope-gated rather than session-gated, so a
+provisioning script with an API key can use it too. A password verifier and a
+TOTP secret can be *set* through it and never read back; a TOTP secret is shown
+exactly once, at enrolment. There is also a mapping simulator ("what would
+these claims earn?") so an operator finds out before rollout, not after, and a
+break-glass revocation that ends one person's sessions and device tokens at
+once.
+
+**Audit.** Sign-ins, sign-outs, device approvals, and local-account changes are
+recorded as `identity.authentication` events through the same durable sink as
+query and config events, so one trail answers both "who queried what" and "how
+did that person come to be trusted". The event has no field capable of holding
+a password, a code, a token, an ID token, or the claim set — failures are
+recorded as a stable `error_category`, never an exception string.
+
+**Trying it without an identity provider: the development IdP.** Wiring an IdP
+is the slowest part of evaluating SSO — register an application, get a client
+secret, add a redirect URI, configure a groups claim, wait for a tenant admin.
+That cost falls on the people who benefit least from paying it: a developer
+changing a policy screen, or someone evaluating QueryGate in their first hour.
+So QueryGate can serve its own provider. Set `DEV_IDP_ENABLED=true`, add a
+`kind: dev` provider to identity.yaml, and `<base_url>/dev-idp` publishes a real
+discovery document, a real JWKS, and real RS256 ID tokens signed with a key
+generated at process start.
+
+Nothing about the flow is stubbed: the browser takes the same redirect, the
+callback runs the same state/nonce/signature/audience checks, and the dev
+provider **verifies the PKCE challenge for real** — a provider that skipped it
+would let the flow "work" locally while hiding a client that never sent a
+verifier, which is exactly the class of bug it exists to surface early. The only
+make-believe part is *who vouches for the human*: this provider vouches for
+anyone who clicks a button.
+
+It needs no persona configuration. With no `users:` block, the sign-in page is
+built **from your mapping rules** — one persona per rule, labelled with that
+rule's description, plus one that matches nothing so you can watch
+deny-by-default happen. Checking "does my Entra group mapping actually grant
+what I think" stops requiring Entra.
+
+Because it is an authentication bypass by definition, it is fenced three
+independent ways: the config validator refuses it outside a local
+`ENVIRONMENT`, the router builder re-checks rather than trusting it was reached
+legitimately, and the signing key is per-process and never written anywhere, so
+a leaked dev token dies at the next restart. `ENVIRONMENT=production` will not
+boot with it enabled.
+
+**Giving a terminal your identity: `querygate-login`.** The client half of the
+device grant. It prints a short code, opens the browser, polls (honouring
+`interval` and backing off on `slow_down`), and hands back a short-lived token
+carrying the approver's identity. It is the alternative to what every
+CLI-plus-API story otherwise degrades into: a long-lived shared key in a shell
+profile, attributable to nobody. Nothing is written to disk unless `--save` is
+passed, and `--quiet` prints only the token so `$(querygate-login --quiet)`
+works.
+
+**Running more than one replica.** SSO state — sessions, in-flight logins,
+device grants, issued tokens — moves to Redis automatically when
+`CONCURRENCY_BACKEND=redis`, alongside the concurrency limiter, quota store,
+disclosure budget, and observed-shape store. The failure it removes is
+different from theirs: a per-replica session store does not multiply a budget,
+it signs people *out* at random, because the replica answering the next request
+never saw them log in.
+
+`identity/redis_sessions.py` uses **no Lua at all**, and that is a design
+decision rather than a simplification. A session record is a JSON document full
+of arrays, which is precisely the payload a `cjson.decode`/`encode` round trip
+corrupts on real Redis while looking fine under fakeredis (the trap item 195
+phase 2 shipped into review). So the document is written once and never decoded
+server-side, and `last_seen_at` — the only mutable field — lives in its own key
+that a plain `SET` updates. Single-use semantics come from `GETDEL`; every
+command touches exactly one key, so `CROSSSLOT` is impossible on a Cluster; and
+reads fail **closed**, because an authentication store that fails open is not
+an authentication store.
+
+### Which credential types a surface accepts
+
+**Files:** `src/querygate/core/auth_policy.py` (TODO.md item 200)
+
+Authentication answers *who is this*. There is a second question the codebase
+could not previously express: **is this an acceptable way to prove it, here?**
+
+Before this, every configured scheme worked everywhere. Enabling SSO added a
+door beside the static API key rather than closing it — so an operator who had
+done the whole IdP integration still had a shared secret that opened the admin
+console, and every action taken with it was attributable to a config entry
+rather than to a person. That is exactly the property the Proof pillar claims,
+left to convention.
+
+The control is a per-surface allowlist over `Principal.auth_method`, across
+three surfaces: **console** (everything under `<api_v1_prefix>/admin`),
+**rest** (the remaining REST API), and **mcp**.
+
+```bash
+CONSOLE_AUTH_METHODS='["sso_session"]'          # humans, through the browser
+REST_AUTH_METHODS='["jwt","sso_device_token"]'  # IdP-issued or human-approved
+MCP_AUTH_METHODS='["jwt","sso_device_token"]'
+```
+
+The default is the part that matters: **turning SSO on closes the console to
+shared secrets.** An operator who has integrated an identity provider has
+already said humans are identified by that provider; continuing to honour a
+static key on the console would contradict the thing they just configured. So
+with `SSO_ENABLED=true`, `api_key` and `anonymous` are dropped from the console
+unless the deployment names them explicitly — which turns keeping one into a
+reviewable decision instead of an ambient default. A deployment with SSO off is
+untouched, and the REST/MCP surfaces stay permissive, because agents and
+services legitimately authenticate with tokens.
+
+Two implementation choices are load-bearing:
+
+- **Enforcement is on the *resolved* principal, not on which authenticators got
+  built.** A credential scheme added later is therefore governed automatically
+  instead of silently inheriting access to every surface.
+- **Every return path is checked.** `api/auth.py` resolves a principal through
+  three paths — session cookie, device token, then the synchronous bearer chain
+  — each with its own early return. Mutation testing found the session path
+  unguarded before this shipped; a policy enforced on only the last one would
+  have been bypassable by exactly the credential types SSO introduced.
+
+A refusal is **403, not 401**: the caller authenticated fine, and retrying with
+the same kind of credential will never succeed. The message names what *is*
+accepted, since that is deployment policy the person is entitled to know.
+
 ### REST transport
 
 **Files:** `src/querygate/api/auth.py`, `src/querygate/api/routes.py`,
@@ -3045,8 +3342,8 @@ below:
 - `POST /{connection}/query/{admission_id}/cancel` — request cancellation of
   a `queue_mode=async` execution; free while still queued, gated on
   `Policy.allow_query_cancellation` for a running query (see
-  [Agent-visible capacity waiting](../README.md#agent-visible-capacity-waiting)
-  in the README for the full contract).
+  [Agent-visible capacity waiting](FEATURE_REFERENCE.md#agent-visible-capacity-waiting)
+  for the full contract).
 - `POST /{connection}/query/batch` — the same, for a list of queries against
   one connection in a single call.
 - `POST /admin/reload-config` — hot-reload connections/policy/catalog from
@@ -3177,9 +3474,14 @@ server actually registers.
 `mcp/server.py` builds one shared `MCPServer` instance (`mcp_server` — `mcp`
 SDK v2, formerly `FastMCP`; TODO.md item 128's `2026-07-28` protocol
 conformance) and, on startup, calls `discover_and_register_tools()`
-(`mcp/tools/__init__.py`), which imports every non-underscore-prefixed
-module under `mcp/tools/` — so registering a new tool is just adding a file
-there, decorated with `@mcp_server.tool(...)`. That server is exposed as its
+(`mcp/tools/__init__.py`), which imports each module named in that package's
+explicit `TOOL_MODULES` tuple — so registering a new tool means adding the file,
+decorating it with `@mcp_server.tool(...)`, **and adding its name to
+`TOOL_MODULES`**. It used to be a filesystem glob, which registered nothing at
+all in a frozen or compiled build: no `.py` files on disk meant zero tools
+advertised, with no error (TODO.md item 214).
+`tests/unit/test_mcp_tool_registration.py` fails if the tuple and the directory
+disagree in either direction. That server is exposed as its
 own ASGI app (`streamable_http_app()`), wrapped in `MCPAuthMiddleware`, and
 mounted into the main FastAPI app at `cfg.mcp_mount_path` (default `/mcp`)
 by `setup_mcp()`.
@@ -3559,7 +3861,7 @@ behavior.
 needs `make compose-up` first) answers the question a design partner asks
 before routing real traffic through the gateway: how much latency does this
 add, and does it slow down database access? Full methodology in
-`docs/business/PERFORMANCE_BENCHMARK.md`; the runner is
+`docs/benchmarks/PERFORMANCE_BENCHMARK.md`; the runner is
 `querygate.performance_benchmark`.
 
 It times the same query at three tiers — raw SQL direct against Postgres
@@ -3575,7 +3877,7 @@ benchmark, it needs a real database, so it can't run in the default
 `pytest -m unit` suite; its own integration test does run automatically in
 CI's `postgres-live` job on every push/PR (checking the harness works end to
 end, not asserting a specific latency number), while the published figures in
-`docs/business/PERFORMANCE_BENCHMARK.md` come from a manual, regenerate-it-
+`docs/benchmarks/PERFORMANCE_BENCHMARK.md` come from a manual, regenerate-it-
 yourself run.
 
 ### Load benchmark: does per-request cost hold up under concurrent traffic?
@@ -3584,7 +3886,7 @@ yourself run.
 `make compose-up` first) is the performance benchmark's sibling — the second
 half of the same design-partner question ("does this add latency, *and does
 it slow down under real traffic, and does adding capacity fix it*?"). Full
-methodology in `docs/business/LOAD_BENCHMARK.md`; the runner is
+methodology in `docs/benchmarks/LOAD_BENCHMARK.md`; the runner is
 `querygate.load_benchmark`.
 
 It reuses the performance benchmark's seeded table and scenarios, and sweeps
@@ -3620,7 +3922,7 @@ improvement at all — same code, different result). Run it on an otherwise
 idle machine and treat one run as one sample, not a certified number.
 
 **Every run of either benchmark also writes a fresh, publish-ready Markdown
-results snapshot** (`docs/business/LOAD_BENCHMARK_RESULTS.md` /
+results snapshot** (`docs/benchmarks/LOAD_BENCHMARK_RESULTS.md` /
 `PERFORMANCE_BENCHMARK_RESULTS.md`, overwritten each time, `--markdown-out`
 to redirect or `--no-markdown` to skip) — data only, no interpretation, so
 there's always a shareable artifact ready the moment a run finishes, without
@@ -3642,8 +3944,8 @@ formatter — it removes style bikeshedding by only allowing one output
 format):
 
 ```bash
-poetry run black --check src/ tests/ examples/   # make format-check — fails if anything is unformatted
-poetry run black src/ tests/ examples/            # make format — rewrites files in place
+poetry run black --check src/ tests/ examples/ scripts/   # make format-check — fails if anything is unformatted
+poetry run black src/ tests/ examples/ scripts/          # make format — rewrites files in place
 ```
 
 CI is defined in `.github/workflows/ci.yml` and runs four jobs on every pull
@@ -3703,6 +4005,28 @@ A release is cut with two gates, run in order:
   Any known vulnerability that isn't a specifically reviewed, justified
   entry in `security/dependency-audit-allowlist.json` **fails the release**
   — deny-by-default, not silently ignored;
+- gates the **third-party licence inventory** (`make license-check`,
+  `scripts/check_licenses.py`). `docs/THIRD_PARTY_LICENSES.md` records the
+  licence of every Python package in `poetry.lock`, split by whether
+  QueryGate redistributes it (the `main` group — what the published
+  container image contains, and what a `pip install` resolves transitively
+  from PyPI, subject to environment markers and pip's own resolution)
+  or merely builds and tests with it. Deny-by-default three times over:
+  strong copyleft (GPL, AGPL) is blocking in either group and can't be
+  waived at all; weak copyleft (MPL, LGPL) needs a specifically reviewed
+  entry in `security/copyleft-license-allowlist.json`; and a licence string
+  the gate doesn't *recognise* is a failure rather than a guess, so a new
+  copyleft dependency can't slip in on a fuzzy match. The same check runs
+  in the unit suite, so a `poetry add`/`poetry update` that pulls in a
+  copyleft dependency fails at test time, not at release time. Each reviewed
+  exception carries a machine-checked `facts` block (which packages require
+  it; whether QueryGate declares it directly; whether any module under
+  `src/querygate/` imports it) verified against
+  the lockfile and the source tree every run, so a waiver can't outlive its
+  own premises — but a green gate is still not a settled legal question, and
+  every unconfirmed review prints a `NOTICE:` line on each run. `make sbom`
+  copies the report into `dist/` under `SHA256SUMS`, so it reaches a consumer
+  with the release rather than separately;
 - writes `dist/SHA256SUMS` so a downloaded artifact set can be checksummed
   against what CI actually produced.
 
@@ -4027,8 +4351,10 @@ report. Every guarantee is backed by an open-source, deny-by-default check
 that runs in CI on every change: static analysis (Bandit + Semgrep), a
 dependency-CVE audit of the exact shipped set (pip-audit), a CycloneDX SBOM
 per release, container-image scanning (Trivy), full-history secret scanning
-(gitleaks), and OpenAPI fuzzing (Schemathesis) on top of the 260-case
-adversarial suite. A regression that weakened any of them fails the build.
+(gitleaks), and OpenAPI fuzzing (Schemathesis) — plus two first-party
+deny-by-default gates: the adversarial regression suite and a third-party
+licence inventory over every locked Python package
+(`docs/THIRD_PARTY_LICENSES.md`, `make license-check`). A regression that weakened any of them fails the build.
 For a reviewer under NDA, `docs/SECURITY_POSTURE.md` is a reproducible packet
 — every claim names the command that reproduces it. The published image is
 signed (Sigstore/cosign keyless) with a SLSA build-provenance attestation,
@@ -4042,6 +4368,374 @@ Chronological list of notable technical/architectural decisions and the
 reasoning behind them, newest first. Added to incrementally as work happens
 — see the maintenance protocol above.
 
+- **2026-09-02 — QueryGate is Apache-2.0, and the entitlement gate is removed
+  from the gateway entirely.** This reverses the 2026-08-23 proprietary
+  subscription decision. The reasoning is that the product's success metric is a
+  security review, and for a self-hosted gateway that holds every database
+  credential, "you cannot read the source" is the most expensive objection there
+  is — while the three pillars' moat is architectural (no raw-SQL path, live
+  operational reach, per-human proof), not secrecy. Competitors are structurally
+  trapped by their own product identity, so publishing the source costs little
+  competitively.
+
+  **What follows, and why the gate had to go rather than merely default off.**
+  Under an OSI licence a licence check enforces nothing — anyone may fork it out,
+  and `subscription_enabled` already defaulted to false — while being the single
+  most quotable thing in the repository. An open-source *security* product
+  containing code that refuses to serve queries on billing state would make the
+  kill switch the entire launch conversation. So `subscription/`, the three
+  enforcement funnels, `SubscriptionExpiredError` and its 402, the renewal
+  banner, and 12 config fields were deleted outright (4,761 lines).
+  `tests/security/test_no_phone_home.py` reverts to its original absolute — no
+  outbound call from anywhere in the shipped source — which is a *stronger*
+  claim than the four-field disclosure it replaces, and is now asserted
+  positively rather than implied.
+
+  **The commercial model moves, it does not disappear.** The control plane stays
+  private and its products become Notary (third-party anchoring of the audit
+  chain head — paid because a self-hosted anchor attests to your own logs and so
+  proves nothing) and fleet management. `COMMERCIAL.md` states this publicly from
+  the first commit so the funding model is legible rather than a later surprise.
+  The "no hosted query execution" non-goal is unchanged and now doubly binding.
+
+  **Known cost, recorded rather than glossed:** the image ships Microsoft's
+  proprietary `msodbcsql18`, and Apache-2.0 has no third-party pass-through
+  clause while a public image reaches people who agreed to nothing. That went
+  from *partly met* to *not met* and **blocks the first public image release**
+  (item 228). The repository and the wheel are unaffected.
+
+- **2026-08-28 — Whether a subscription will renew itself is a *signed* field,
+  and the countdown that reads it is decided in one function (item 216).** A
+  deployment cannot see a billing subscription, so `renewal_state`
+  (`auto_renewing` / `cancelling` / `payment_failing`) is resolved by the
+  control plane from the billing record and signed into the entitlement
+  alongside `enforcement`. The alternative — inferring it deployment-side from
+  refresh behaviour — would warn the customer that their access is ending every
+  time *we* had an outage, which is the exact failure an internal commercial plan §5 promises
+  cannot happen. It is three values rather than a boolean because "your payment
+  failed" and "you cancelled" call for different actions, and one bool renders
+  them identically.
+
+  The countdown itself lives in `renewal_notice()` and nothing else compares a
+  date: the banner, the email, the CLI line and the coarse public signal all
+  derive from it. The trigger is `renewal_state != auto_renewing` **and** under
+  30 days — and the conjunction is load-bearing, not belt-and-braces. The
+  entitlement term is 30 days, so a healthy monthly subscription is *always*
+  inside the window; a day-count trigger alone would banner every deployment
+  forever.
+
+  **The unauthenticated surfaces say strictly less, and `/metrics` counts as
+  unauthenticated.** `/health` carries a three-value enum (`ok` /
+  `renewal_due` / `expired`) and the Prometheus gauge carries the same one;
+  neither carries a date, a day count, a plan or an org id. `metrics_require_auth`
+  defaults to true but `false` is supported, so a `days_remaining` gauge would
+  tell any scanner when a named customer's gateway stops serving. Grace collapses
+  into `renewal_due` for the same reason: the operator action is identical, and
+  the distinction is a commercial fact about the customer rather than an
+  operational one. An expired subscription is also deliberately **not** a 503 —
+  the process is healthy and refusing on a billing decision, and reporting
+  "unavailable" would make an orchestrator restart the pod in a loop.
+
+  The renewal *email* is sent by the control plane, not the gateway. The
+  self-hosted product has no customer email address, no SMTP credentials and no
+  outbound path but the licence refresh; giving it an SMTP client would add an
+  egress channel to every customer's network to say something we already know.
+  `EmailProvider` follows the same Protocol + registry shape as `BillingProvider`,
+  and `console` is a real provider that runs the whole pipeline before a mail
+  account exists.
+
+- **2026-08-28 — An empty allow-list can now mean deny-everything, and the flag
+  that does it defaults to off (item 220).** `Policy.table_allowed` returned
+  `True` on an empty `allowed_tables`, and `column_allowed` followed the same
+  convention, so the only deny-all lever in the model was `enabled = False` —
+  all-or-nothing. The moment an operator enabled a connection to run their first
+  query, every table and column on it was readable up to the numeric caps. For a
+  product whose entire pitch is governing *what a query is allowed to be*, that
+  is the wrong default, and it made item 215's "safe-by-default starter policy"
+  literally inexpressible. `require_explicit_allowlist` flips the empty-list
+  meaning. **It defaults to `False`, and that is the load-bearing half of the
+  decision**: flipping the meaning of a live security control under every
+  existing deployment is the change that breaks a customer at 3am, so this is a
+  new opt-in guarantee rather than a silent tightening. The starter policy sets
+  it `True`; existing policies are untouched until someone opts in. Two details
+  worth keeping: the `"*"` column wildcard still works under the flag, because an
+  operator who wants deny-by-default at the table level but not the column level
+  is the common case and a flag that forbids it is a flag nobody turns on; and
+  the field is registered in `INVERTED_GUARDRAIL_FIELDS`, since `True` is the
+  *tighter* posture — an existing guard caught the omission, and without it the
+  access diff would have reported a deny-by-default cutover as a loosening,
+  which is precisely the review an operator would be relying on.
+
+- **2026-08-27 — The licence of record moves from `LICENSE` to the EULA, and
+  "no outbound calls, ever" is retired rather than defended (item 210).** The
+  repository was wired end to end for a Business Source Licence flip — two CI
+  jobs, three Make targets, a script, a test and roughly thirty documents — that
+  the owner cancelled on 2026-08-23 in favour of a proprietary paid
+  subscription. Three choices inside the reconciliation are non-obvious.
+  **First, `LICENSE` is kept and rewritten rather than deleted**: `pyproject.toml`'s
+  `license-files`, `check_release_artifacts.py`'s wheel/sdist/image assertions
+  and the `Dockerfile`'s `COPY LICENSE` all require the file to exist, so it
+  becomes a *notice* that reserves all rights and points at
+  the EULA, never a grant. That distinction is now asserted, not
+  conventional — `test_eula.py` fails if `LICENSE` stops naming the EULA or
+  regains a BSL parameter. **Second, `tests/security/test_no_phone_home.py` was
+  narrowed, not deleted.** Items 211-213 add a client that *does* call the
+  vendor, which turns the file red mid-item, and the cheapest reaction would
+  have been to remove it — taking with it two assertions that are worth *more*
+  under a subscription. The exemption is a package path (`src/querygate/
+  subscription/`), never a loosened pattern, so a `LICENSE_SERVER_URL` anywhere
+  else still fails the build; the exemption's width is itself bounded; and the
+  package's **declared** payload constant is pinned to exactly the four fields the
+  EULA discloses (a declaration, not the request body, and it does not run until
+  that package exists — the wire assertion is item 211's own Definition of Done), so a fifth field is a disclosure change before it is a code change.
+  A pattern-level exemption would have been simpler and would have silently
+  unguarded the entire tree. **Third, the marketing claim was replaced rather
+  than hedged.** "No telemetry of any kind … no outbound calls to us, ever … no
+  kill switch, no time bomb, and no check that can refuse to start or block a
+  query" is now false in every clause, and softening it would have produced a
+  document that is technically defensible and reads as evasive. the licensing FAQ
+  instead states plainly that there is a term and the software enforces it, then
+  bounds it precisely (a failed refresh never blocks; cold start fails open;
+  ~45 days of warnings; health, metrics, licence status and audit retrieval
+  survive a
+  lapse; the EULA owes a replacement entitlement if our service is the reason
+  you lapsed). The EULA gained the clauses that make those bounds contractual
+  rather than promises — including a **post-termination audit-retrieval
+  carve-out**, without which the product would permit an act its own licence
+  forbade, worst in exactly the regulated sectors it is sold into. A seventh
+  non-goal, **no hosted query execution**, is recorded in `CLAUDE.md`’s "North Star" section with
+  it: the subscription creates commercial pressure toward "we'll run it for
+  you", which would destroy the Reach pillar outright, so it is written down
+  rather than assumed.
+
+- **2026-08-23 — A WORM search cursor resumes a truncated day EXCLUSIVELY,
+  and digest comparison fails closed instead of raising.** Three WORM-archive
+  defects shipped together because they share one failure mode: a bound that
+  reads as enforced while silently doing nothing. (1) Item 184 — the cursor
+  gained an `after` field, an exclusive `StartAfter` listing marker. The
+  alternative considered was re-listing the day and skipping by index alone,
+  which keeps the cursor format stable; it was rejected because the skip target
+  may itself sit past `max_objects_scanned`, so the bug would survive at a
+  deeper budget. **The first attempt applied that reasoning to only one of the
+  day's exits and shipped a partial fix** — four reviewers caught it
+  independently, with a reproduction showing three of five records unreachable
+  and the final page still reporting `truncated=False`. Every cursor emitted
+  inside a day now carries the marker its own listing was produced with, and
+  the scan refuses to advance off a day whose listing is incomplete; the
+  index-skip path survives only as the resolution step within a re-listed
+  window, which is now always the same window the cursor was issued against. `after` is only ever handed to `list_objects_v2` as `StartAfter`,
+  never dereferenced as a raw `GetObject` key, which preserves the module's
+  "a cursor key is never used as a raw key path" property; it is rejected as
+  an invalid cursor if it is not a string, since it is attacker-reachable in
+  a hand-crafted cursor. Cursors issued before this change simply have no
+  `after` and resume at their day's start, exactly as they did when issued.
+  (2) Item 194 defects 1-2 — `audit/ledger.py` gained `digests_equal`, used
+  by all five `hmac.compare_digest` sites across both readers rather than
+  patching only the site the report named. `compare_digest` accepts two
+  `str`s only when both are ASCII, and every digest field is an unconstrained
+  `str` reached through a body decoded with `errors="replace"` — so one
+  corrupted byte permanently 500-ed every future search covering that
+  immutable object. A non-ASCII digest can never equal a hex digest we
+  computed, so `False` is the answer `compare_digest` would give if it could.
+  Both `json.loads` handlers also widened to `RecursionError`, which is a
+  `RuntimeError` and so was never covered by `except json.JSONDecodeError`.
+  (3) Item 185 — an `outcome="rejected"` increment was ADDED to
+  `build_worm_search_result`, where window/limit rejections actually happen
+  (the one inside `search_worm_archive` correctly remains, for cursor
+  rejections),
+  rather than narrowing `metrics.py`'s comment to match the broken behaviour;
+  the metric is more useful where the rejections are. Item 194's third defect
+  (`_contains_forbidden_content`'s uncapped walk) was closed on 2026-08-24
+  with the owner's decision: **cap 64, fail closed, and expose it as a config
+  variable** (`AUDIT_WORM_SEARCH_MAX_QUERY_SHAPE_DEPTH`). Two details are
+  load-bearing. The cap returns `True` (reject) on over-depth, not `False` —
+  the screener's `True` means *reject*, so the opposite choice would have
+  turned a resource bound into a screening bypass, and a test pins that
+  direction specifically. And the config field is bounded ABOVE at 256 rather
+  than left free: the cap exists to keep the walk clear of the interpreter's
+  recursion limit, so an operator raising it without limit would reintroduce
+  the defect it closes. A test exercises the walk at exactly that ceiling in
+  the expensive LIST form, so the maximum configurable value is proven
+  survivable rather than merely plausible.
+
+- **2026-08-23 — Enabling SSO closes the console to shared secrets, by
+  default.** The conservative choice was a permissive default with an opt-in
+  allowlist, so nothing could break. It was rejected: a control nobody turns on
+  protects nobody, and the deployments most likely to leave the default are
+  exactly the ones that just finished an IdP integration and believe their
+  console is now SSO-gated. Making the default follow from `SSO_ENABLED`
+  means the belief is true. The blast radius is bounded — deployments without
+  SSO are untouched, the REST and MCP surfaces stay permissive so
+  service-to-service callers are unaffected, and an operator who needs a
+  console key names it explicitly.
+- **2026-08-23 — API keys were restricted per-surface rather than removed.**
+  Deleting them outright was considered and is the cleaner story. It breaks two
+  real cases: the quickstart (which is how anyone evaluates the product at all),
+  and unattended agents, which have no browser to approve a device grant and
+  would need the customer's IdP to issue client-credentials tokens before they
+  could run at all. A per-surface allowlist gets the same outcome where it
+  matters — no shared secret on the control plane — without a cliff for callers
+  that have no alternative yet.
+
+- **2026-08-23 — QueryGate ships an identity provider that authenticates
+  anybody, and fences it three ways rather than not shipping it.** A local
+  development bypass is the kind of feature that becomes a breach headline, so
+  the instinct is to refuse it. The counter-argument won: without one, the
+  redirect flow can only be verified in pieces (verifying it whole needs a real
+  IdP registration), and every developer who touches an SSO-gated screen invents
+  their own shortcut, unreviewed. Shipping one deliberate bypass with three
+  independent fences — a config validator, a re-check in the router builder, and
+  a signing key that never leaves memory — is safer than N improvised ones. It
+  paid for itself immediately: the end-to-end test it enabled found a real
+  defect (`derive_personas` emitting a dotted claim path as a flat key) that
+  every unit test had missed.
+- **2026-08-23 — The development provider verifies PKCE, and personas come from
+  the mapping rules.** Both are the same instinct: a fake that is too
+  accommodating hides bugs. Skipping PKCE would let the flow succeed locally
+  with a client that never sent a verifier; hand-written personas would drift
+  from the mapping they exist to exercise. Deriving personas from the rules
+  means the sign-in page is always a live description of who the mapping
+  actually recognises, including one persona that matches nothing.
+- **2026-08-23 — The cross-replica SSO stores use no Lua, on purpose.** The
+  natural implementation is a script that reads a session, updates a field, and
+  writes it back. CLAUDE.md records why that would be a latent production-only
+  defect: `cjson` turns every empty JSON array into an empty object on real
+  Redis but not under fakeredis, and a session document is full of arrays. Rather
+  than write the script carefully, `identity/redis_sessions.py` removes the
+  possibility — the document is opaque and never decoded server-side, and the one
+  mutable field lives in its own key. Enforced by an AST-level test, since no
+  behavioural test can catch the class.
+- **2026-08-23 — Preset issuer templates take exactly three variables.** Adding
+  `{region}` covered Amazon Cognito; the next vendor would have wanted a fourth,
+  and the one after a fifth, until `IdentityProviderProfile` carried a field per
+  IdP. Three is the ceiling, and `generic` — an explicit `issuer` — is a
+  first-class path rather than a fallback, so an unlisted IdP is supported on day
+  one without a code change.
+
+- **2026-08-23 — Human SSO sessions store the IdP's *claims*, not resolved
+  scopes.** The obvious implementation resolves a person's scopes once at
+  login and caches them on the session. It is also the one that makes
+  revocation a lie: tightening a claim→scope rule would take effect at that
+  person's next *logout*, which could be days. `identity/authenticators.py`
+  therefore re-derives authority from the live `IdentityMappingStore` on every
+  request, from the claims the IdP asserted. The same rule is applied to
+  device-grant tokens, whose approved scope list is treated as a *ceiling* that
+  is intersected with the approver's current mapping — so a token can only ever
+  shrink from its approval, never grow. The cost is bounded (dict lookups over
+  a rule set capped at 2,048) and the session carries a size-capped claim set
+  rather than an unbounded one. Recorded because the caching version looks
+  strictly cheaper and is strictly worse.
+- **2026-08-23 — A session cookie without the CSRF header is not a credential
+  at all, on every method.** The conventional rule exempts "safe" methods from
+  CSRF. QueryGate does not, because the exemption is a standing invitation to a
+  future bug: someone adds a read endpoint that discloses something, judges it
+  safe by its verb, and it becomes cross-site-reachable by any page that can
+  make the browser send the cookie. Both UIs are `fetch`-driven and always send
+  the header, so the strict rule costs nothing real. The single exemption is
+  `GET /auth/session`, which *issues* the token — safe because QueryGate
+  installs no CORS middleware, so a credentialed cross-origin fetch cannot read
+  the response body.
+- **2026-08-23 — SSO is OIDC-only; SAML 2.0 is refused until a partner
+  mandates it.** Every mainstream IdP speaks OIDC, so one implementation covers
+  the field. SAML would cost an `xmlsec`/`python3-saml` native dependency in
+  the container image and the XML signature-wrapping attack surface, roughly
+  doubling both the work and the security-review burden for a protocol no
+  currently-plausible partner requires. Logged as TODO.md item 199 phase 4,
+  decision-gated: build it when a design partner actually mandates it, and
+  record that decision first. Relatedly, the *local* identity provider uses
+  `hashlib.scrypt` rather than argon2 for the same reason — a fallback that
+  exists for air-gapped deployments must not be the thing that grows a native
+  dependency.
+- **2026-08-23 — Two enabled OIDC providers must declare distinct
+  `subject_prefix` values; one provider must not.** Different issuers can
+  assert the same opaque `sub`, so a multi-IdP deployment needs namespacing.
+  Applying a prefix *always* would have been the tidy answer and is wrong: it
+  would decouple a person's browser identity from their agent's bearer-token
+  identity, splitting their `policy.yaml` entry and their audit trail in two.
+  So the default is the raw claim, and `IdentityConfigStore` raises at load
+  only once a second OIDC provider is enabled — forcing the operator to decide
+  exactly when a collision becomes possible, and not before.
+
+- **2026-08-21 — Open-core is rejected; the whole product goes BSL, not a
+  carved-out core.** ⚠️ **The open-core half of this entry stands; the BSL half
+  was superseded on 2026-08-23 — see the 2026-08-23 entry below.** Retained
+  unedited because the reasoning for rejecting open-core is what survived the
+  reversal, and it is load-bearing for why the proprietary product is *whole*
+  rather than split. an internal publication plan Phase 0 had left
+  this "a later, reversible decision." an internal commercial plan
+  §1 **supersedes that keep-it-reversible posture** and rejects open-core
+  outright, consciously, because the reasoning changed rather than being
+  forgotten: the features a split would hold back — per-human attribution,
+  the tamper-evident ledger, policy enforcement — **are the three pillars
+  themselves**, not a peripheral add-on a free tier could plausibly do
+  without. Splitting them is lose-lose — either the differentiators are given
+  away for free (the split bought nothing) or the free tier is crippled
+  enough that the 90-minute evaluation the whole go-to-market motion depends
+  on fails outright. BSL dissolves the tension instead of choosing a side of
+  it: everything is visible, runnable, and evaluable under one licence, and
+  the restriction is on **resale** — providing QueryGate itself to third parties on a hosted, managed, or embedded basis — never on **capability or scale** — the
+  right axis for an enforcement product, since a crippled security tool is
+  dismissed rather than evaluated. Revisit only via a product-identity-level
+  decision, the same bar CLAUDE.md non-negotiable #8 sets for the non-goals
+  list.
+- **2026-08-21 — The product's category name is deliberately left undecided,
+  and "agent database firewall" is rejected as a candidate.** A category name
+  is worth choosing carefully, because whoever names one tends to own it —
+  but an internal commercial plan §5.3 sets one hard constraint any
+  candidate must clear first: **the name must not imply inspection.** The
+  firewall/inspection mental model is exactly what `CLAUDE.md`’s "North Star" section
+  ("by construction, never by inspecting a string") and the flagship essay
+  exist to demolish, so a name that reintroduces it would undercut the
+  product's own positioning at the naming layer. "Agent database firewall"
+  was considered and rejected for two independent reasons, both checked
+  against existing usage rather than assumed: it collides with entrenched
+  incumbent categories on search (Oracle Audit Vault and Database Firewall,
+  Imperva SecureSphere own "database firewall"; Pipelock, Radware, and A10
+  already use "AI agent firewall" in active vendor positioning), and — the
+  more important reason — it *is* the inspection model, the one this product
+  is built to reject. No category name goes into `CLAUDE.md`’s "North Star" section until a
+  candidate clears this constraint.
+- **2026-08-21 — The dependency-licence gate records copyleft findings rather
+  than blocking on them, and scopes itself to Python packages.** Ahead of the
+  then-planned source-available licence flip (cancelled 2026-08-23 — the gate
+  outlived its premise and matters more under closed source, since a reciprocal
+  licence in the redistributed set is harder to satisfy, not easier),
+  `make license-check`
+  (`scripts/check_licenses.py`) now gates every package in `poetry.lock`
+  deny-by-default and emits `docs/THIRD_PARTY_LICENSES.md`. Three choices in it
+  are deliberate and non-obvious. **First, the authority is the lockfile, not
+  the ambient virtualenv** — for existence *and* for version. Every off-the-shelf
+  licence scanner reports whatever happens to be installed; this repo's own
+  `.venv` carried a stale `sniffio` that such a tool would have reported as a
+  QueryGate dependency, and reading a licence from a release the report does not
+  name would hide a relicensing that happened in exactly that bump. This mirrors
+  the rule `scripts/generate_sbom.py` already states for the SBOM. **Second,
+  strong copyleft (GPL/AGPL) is unwaivable in either group, while weak copyleft
+  (MPL/LGPL) passes on a recorded review** — and a recorded review that is still
+  a `draft` *passes the gate* while printing a `NOTICE:` on every run. The
+  alternative, failing the build until a lawyer answers, would redden every
+  unrelated CI run for weeks; the cost is that a green gate is not evidence a
+  licence question is closed, which is why the report leads with a count of
+  unconfirmed records and why the status row in `docs/SECURITY_POSTURE.md` is
+  amber rather than green. Promoting an unconfirmed redistributed finding to a
+  hard failure remains available and is the owner's call. What *is* mechanised
+  is the factual half: each record carries a `facts` block (its requirers,
+  whether QueryGate declares it directly, and whether any `src/querygate/`
+  module imports it) checked against the lockfile
+  and source tree on every run, so the unverifiable part is confined to the
+  legal reading and cannot quietly expand to cover stale evidence. The five
+  packages whose licence cannot be read from a local install are re-read from
+  PyPI nightly (`--verify-overrides`), so no record rests permanently on a
+  hand-typed snapshot; that mode needs network, so it stays out of the
+  per-commit gate deliberately. **Third, the inventory
+  covers Python packages only.** The published container image also layers a
+  Debian userland and Microsoft's `msodbcsql18` under `ACCEPT_EULA=Y`; that is
+  stated as an explicit scope limit in the report rather than silently implied
+  to be covered, and clearing it is tracked as TODO.md item 196 — needed before
+  the first paid pilot's security review. Related: the redistribution
+  boundary itself is the image, not the wheel — a wheel declares dependencies
+  and contains none of them, which is the premise the one open MPL-2.0 question
+  (`certifi`) rests on.
 - **2026-08-17 — Expressiveness is for discovery; narrowness is for
   production. QueryGate ships the bridge between them (item 195).** A standing
   tension had gone unresolved in the docs: the read AST is deliberately
@@ -4111,7 +4805,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   turns a deterministic gate probabilistic, opens a prompt-injection surface
   inside the control plane, and is self-attested by the exact party being
   governed — an agent that would exfiltrate will also write "routine
-  reporting". Adding it would need a NORTH_STAR decision, not just this log.
+  reporting". Adding it would need a recorded product-identity decision, not just this log.
   (3) **Intent as read off the query shape, accumulated over time** — built,
   as item 179.
 
@@ -5580,7 +6274,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   `io.github.agitmit/structured-query-ast` rather than a not-yet-owned domain
   (TODO.md item 131, internal half).** The `2026-07-28` protocol revision's
   SEP-2133 extensions framework gives strategic play P2 ("open the contract",
-  `docs/business/MARKET_DOMINATION_ANALYSIS.md` §7) a standards-blessed
+  an internal competitive analysis §7) a standards-blessed
   vehicle: the read `StructuredQuery` AST and the write
   `Insert`/`Update`/`Delete`/`Upsert` union can be declared as a named,
   versioned artifact instead of just a product-specific JSON schema no one
@@ -5929,11 +6623,12 @@ reasoning behind them, newest first. Added to incrementally as work happens
   exists for, still a real enforced ceiling), and one request's actual S3
   work is separately bounded by `AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` and
   `AUDIT_WORM_SEARCH_REQUEST_TIMEOUT_SECONDS` — a bound hit mid-scan
-  degrades to a truncated, resumable page — except a day listing over
-`max_objects_scanned`, whose cursor repeats that day (item 184) — (an opaque cursor encoding
-  `day`/`key`/`line` plus a fingerprint of the request's own filters, so
-  replaying a cursor against different filters is rejected rather than
-  silently returning a mismatched page) instead of continuing an
+  degrades to a truncated, resumable page (an opaque cursor encoding
+  `day`/`key`/`line`/`after` plus a fingerprint of the request's own filters,
+  so replaying a cursor against different filters is rejected rather than
+  silently returning a mismatched page; `after` is the exclusive listing
+  marker item 184 added so a day cut short by `max_objects_scanned` resumes
+  strictly past the segments already read) instead of continuing an
   expensive/slow scan; **(3) exploits the archive's own key structure
   instead of a full-bucket scan** — `WormFlushMonitor`'s segment keys
   (`audit/worm_sink.py`'s `_segment_key`) are `<prefix>/YYYY/MM/DD/<ts>.jsonl`,
@@ -6214,8 +6909,8 @@ reasoning behind them, newest first. Added to incrementally as work happens
   column `column_masks` merge test); and two stale-claim corrections
   (`docs/SECURITY_POSTURE.md`'s adversarial-suite test count corrected from a
   pre-existing stale 310 to the actual 463, propagated into a regenerated
-  `docs/TRUST_EVIDENCE.md`; `docs/business/PRODUCT_SCORECARD.md`/
-  `MARKET_DOMINATION_ANALYSIS.md` marked stale where they described items
+  `docs/TRUST_EVIDENCE.md`; an internal product scorecard/
+  an internal competitive analysis marked stale where they described items
   137/145 as open gaps that shipped the same day, without attempting a full
   re-score — that's `product-scorecard`'s job, not a side effect of an audit
   response). Full unit (1994), integration (345, excluding `real_db`),
@@ -6260,7 +6955,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   is exactly the kind of thing that must be reliable for a security-review
   artifact. `scripts/generate_trust_page.py` (mirroring `scripts/
   generate_sbom.py`'s shape) instead composes `docs/SECURITY_POSTURE.md`,
-  `docs/COMPLIANCE_MAPPING.md`, `docs/business/SECURITY_BENCHMARK.md`,
+  `docs/COMPLIANCE_MAPPING.md`, `docs/benchmarks/SECURITY_BENCHMARK.md`,
   `SECURITY.md`'s disclosure section, and the live
   `security/dependency-audit-allowlist.json` status into one generated,
   git-committed `docs/TRUST_EVIDENCE.md` (`make trust-page`) — composes the
@@ -6270,7 +6965,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   generator disagree, so "always current" is enforced the same way item 95's
   `docs/SCOPE_CATALOG.md` guard already is, not left as a habit to remember.
   Deliberately no HTML/CSS page: the item's own scope explicitly rules out
-  this becoming a marketing page (that's `pitch-sync`/`GO_TO_MARKET.md`'s
+  this becoming a marketing page (that's `pitch-sync`/the go-to-market analysis's
   job) — a generated Markdown doc is the evidentiary companion, not a
   landing-page replacement for `landing/security.html`.
 
@@ -7823,7 +8518,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   risk misrepresenting a documented capability, which this project forbids. So
   the live baseline is scoped as phase 2; the Toolbox comparison in phase 1 is
   capability-level, drawn from Toolbox's documented design. See
-  `docs/business/SECURITY_BENCHMARK.md`.
+  `docs/benchmarks/SECURITY_BENCHMARK.md`.
 - **2026-07-22 — The tamper-evident audit ledger chains at the sink/envelope
   layer, not on the event model (TODO.md item 91, F5).** Building the
   hash-chained ledger, the choice was where the `prev_hash`/sequence/`hash` live.
@@ -7869,7 +8564,7 @@ reasoning behind them, newest first. Added to incrementally as work happens
   of on the query-semantic guarantee (its moat). The legitimate instinct behind
   the question — *be the enforcement point guarding all access within a client's
   architecture* — is already served on-thesis by the **P4 verdict endpoint**
-  (`NORTH_STAR.md` leverage move #1: any front door, gateway, or app calls
+  (`CLAUDE.md`’s "North Star" section leverage move #1: any front door, gateway, or app calls
   QueryGate for the query-semantic verdict it cannot compute itself) and by the
   **sole-credential-holder deployment** (below), neither of which requires a new
   query language or broadens the AI-agent wedge. Reaching non-AI *apps* is a

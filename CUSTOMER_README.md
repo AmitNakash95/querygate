@@ -422,15 +422,15 @@ cursor-based pagination. It reaches events the local hash-chained file has
 already rotated out, so an 18-month lookback is within the default 730-day
 window cap. Narrowing to a specific table is not a server-side filter —
 filtering is by event type, connection, and principal, and a caller narrows to
-a table over the returned events' `query_shape`. Paging is not exhaustive on
-every deployment: a day holding more segments than
-`AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` returns a cursor that repeats that day
-(TODO.md item 184). Every replica and every worker process writes into the same
-day prefix, so under sustained traffic two such processes can exceed the default
-budget with no knob lowered — this can affect a busy multi-replica deployment as
-configured, not only one that lowered the knob or shortened the flush interval.
-(A segment is written only for a flush interval that actually had an event, so
-an idle deployment does not reach it.) This
+a table over the returned events' `query_shape`. Paging is exhaustive: a day holding more
+segments than `AUDIT_WORM_SEARCH_MAX_OBJECTS_SCANNED` returns a cursor that
+resumes strictly past the segments already read, so following `next_cursor` to
+exhaustion reaches every segment in the window (TODO.md item 184, fixed
+2026-08-23). This matters because every replica and every worker process writes
+into the same day prefix, so under sustained traffic two such processes can
+exceed the default budget with no knob lowered. (A segment is written only for a
+flush interval that actually had an event, so an idle deployment never
+approaches it.) This
 endpoint is an API with no user interface of its own, and it searches only the
 S3 WORM archive. Customers wanting dashboards, correlation with non-QueryGate
 sources, or long-term analytics should still collect the audit stream into

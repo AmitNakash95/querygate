@@ -214,6 +214,7 @@ class WormFlushMonitor:
         interval_seconds: float,
         buffer: Optional[InProcessWormEventBuffer] = None,
         ledger_key: Optional[bytes] = None,
+        endpoint_url: Optional[str] = None,
     ) -> None:
         if not bucket.strip():
             raise ValueError(
@@ -223,6 +224,10 @@ class WormFlushMonitor:
         self._bucket = bucket
         self._prefix = prefix
         self._region = region or None
+        # TODO.md item 201: empty/None means AWS S3 proper. `search_worm_archive`
+        # reads the identical config value, so the archive is never written to
+        # one endpoint and searched at another.
+        self._endpoint_url = endpoint_url or None
         self._retention_mode = retention_mode
         self._retention_days = retention_days
         self._interval = interval_seconds
@@ -249,7 +254,9 @@ class WormFlushMonitor:
         if self._client is None:
             import boto3
 
-            self._client = boto3.client("s3", region_name=self._region)
+            self._client = boto3.client(
+                "s3", region_name=self._region, endpoint_url=self._endpoint_url
+            )
         return self._client
 
     async def start(self) -> None:

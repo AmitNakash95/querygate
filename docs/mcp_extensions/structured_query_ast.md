@@ -25,9 +25,9 @@ another tool vendor can point at a stable artifact instead of reverse-
 engineering the shape from QueryGate's tool schemas or product docs.
 
 It exists because "structured, not raw SQL" is QueryGate's Structural pillar
-(`docs/business/NORTH_STAR.md`) and its durable moat is the *contract*, not
+(`CLAUDE.md`’s "North Star" section) and its durable moat is the *contract*, not
 the implementation — see strategic play P2 in
-`docs/business/MARKET_DOMINATION_ANALYSIS.md` §7. A named extension is
+an internal competitive analysis §7. A named extension is
 citable in a security review and gives other implementers something concrete
 to target, while every actual enforcement decision (policy, schema
 validation, compilation, execution, audit) stays exactly where it already is:
