@@ -1,9 +1,3 @@
-# GENERATED — do not edit. Run `python scripts/gen_public_dependabot.py`.
-#
-# The public distribution of `.github/dependabot.yml`, derived from the private
-# one with the `control-plane/` ecosystem removed (that directory is not part of
-# the public repository, and Dependabot errors on a `directory:` that does not
-# exist). The publication filter swaps this file in under the real name.
 # Dependency update automation.
 #
 # Deliberately conservative: QueryGate's dependency posture is deny-by-default
