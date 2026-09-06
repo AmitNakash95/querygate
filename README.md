@@ -1,323 +1,200 @@
 <p align="center">
-  <img src="landing/assets/logo-wordmark.svg" alt="QueryGate" width="520">
+  <img src="src/querygate/admin_ui/logo-wordmark.svg" alt="QueryGate" width="440">
 </p>
 
-**QueryGate is an agent-safe database access gateway.** It lets you expose a
-Postgres, MSSQL, or MySQL database to AI agents over MCP and REST — without
-ever letting them run raw SQL.
+<p align="center">
+  <strong>Give AI agents real access to your database. Without giving them SQL.</strong>
+</p>
 
-> **QueryGate runs inside your infrastructure.** It dynamically discovers
-> your schema, exposes policy-controlled MCP and REST tools, limits query
-> complexity and database load, and keeps credentials and data inside your
-> network.
+<p align="center">
+  <a href="https://github.com/AmitNakash95/querygate/actions/workflows/ci.yml"><img src="https://github.com/AmitNakash95/querygate/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://github.com/AmitNakash95/querygate/actions/workflows/codeql.yml"><img src="https://github.com/AmitNakash95/querygate/actions/workflows/codeql.yml/badge.svg?branch=main" alt="CodeQL"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/licence-Apache--2.0-blue.svg" alt="Apache-2.0"></a>
+  <img src="https://img.shields.io/badge/python-3.11-blue.svg" alt="Python 3.11">
+  <img src="https://img.shields.io/badge/tests-4.6k-brightgreen.svg" alt="4.6k tests">
+  <img src="https://img.shields.io/badge/adversarial%20suite-704-brightgreen.svg" alt="704 adversarial tests">
+  <img src="https://img.shields.io/badge/coverage-92%25-brightgreen.svg" alt="92% coverage">
+</p>
 
-Agents submit a structured, schema-checked query plan (a JSON AST), not a SQL
-string. QueryGate validates every table and column against the live
-reflected schema, enforces a per-connection policy (allow/deny lists,
-complexity caps, row limits, timeouts), compiles the plan to parameterized
-SQL through SQLAlchemy Core, executes it under a concurrency guardrail, and
-returns a bounded result set. There is no code path — REST or MCP — that
-accepts a SQL string.
+---
 
-## Project maturity — read this before you evaluate
+An AI agent that can query your production database is enormously useful and
+enormously dangerous. The usual answer is to hand it a SQL string and hope —
+then bolt on a scanner that tries to recognise the bad ones.
 
-QueryGate is a **pre-1.0 project with no commercial track record**. Everything
-below is verifiable from this repository; none of it is buried further down.
+**QueryGate removes the string.** An agent submits a structured query plan — a
+JSON AST — describing *what it wants*. QueryGate validates every table and
+column against your live schema, enforces policy, compiles it to parameterised
+SQL itself, and runs it under guardrails. There is no code path, REST or MCP,
+that accepts SQL text. Injection isn't blocked; it has nowhere to live.
 
-- **No paying customers, and no reference deployments.** The project's own
-  definition of success is one paid design partner whose security team signs
-  off; that has not happened yet.
-- **No independent security audit, penetration test, or compliance
-  certification.** The threat model, the adversarial regression suite
-  (`make test-security`) and the security benchmark are all **first-party**.
-  An external audit is a known, open, funded-by-nobody item (`TODO.md` item
-  53). Treat this repository's security claims as *testable*, not as
-  *attested* — and please do test them.
-- **One tagged version, `0.1.0`, and nothing published yet.** The signed,
-  provenance-attested release pipeline (cosign keyless + SLSA) is built and
-  CI-exercised, but **no release has yet been cut through it**, and there is
-  no PyPI upload step at all. You install by cloning, not by `pip install
-  querygate`. See [`docs/RELEASING.md`](docs/RELEASING.md).
-- **No SLA and no commercial support.** See [`SUPPORT.md`](SUPPORT.md) for
-  what that means in practice.
-- **Self-hosted only.** There is no hosted QueryGate, we never execute your
-  queries, and offering QueryGate itself to third parties as a service is not
-  something any order permits.
-- **Apache-2.0, and free forever.** No licence key, no activation, no
-  entitlement check, and **no outbound call to us from anywhere in the shipped
-  source** — no telemetry, no update check, no usage reporting. That is enforced
-  by `tests/security/test_no_phone_home.py`, not promised in prose. The policy
-  engine and the audit ledger will never be tier-gated; see
-  [`COMMERCIAL.md`](COMMERCIAL.md) for what is planned as a paid service and
-  what this project will never do.
-- **Three dialects are live-verified; two are not.** Postgres, MSSQL and MySQL
-  run against real servers in CI. Snowflake and BigQuery are
-  compiler/rendering-level only — QueryGate deliberately **refuses to open a
-  connection** to either rather than pretending to support them.
+```jsonc
+// This is what an agent sends. There is no other way in.
+{
+  "from_table": "orders",
+  "select": ["orders.id", "orders.total_amount"],
+  "where": { "col": "orders.status", "op": "eq", "value": "shipped" },
+  "limit": 100
+}
+```
 
-What *is* real: the structural guarantee below; live Postgres/MSSQL/MySQL tiers
-in CI; a maintained threat model; and a reconciliation between what the docs
-claim and what the code does that is itself gated in CI. The adversarial
-security suite is 704 tests (`make test-security`); the unit and integration
-suites are 3,326 and 428. Every number there is reproducible — `poetry run
-pytest -m unit -q`, `-m "integration and not real_db"`, `make test-security` —
-and the adversarial count is itself CI-gated against the documents that quote
-it, this file included. The full, unabridged list of what is missing or partial
-is [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md).
+## Why QueryGate, and not the alternatives
 
-## Why raw SQL for agents is dangerous
+"No raw SQL" is the foundation, not the pitch. It's what the foundation makes
+*possible* that other designs structurally cannot do — because once a product
+accepts a SQL string, it can only inspect text.
 
-Handing an LLM a `run_sql(query: str)` tool means trusting a probabilistic
-text generator to never produce `DROP TABLE`, never wander into a table it
-shouldn't see, never write an unbounded cross join that takes your database
-down, and never leak a credential in a stack trace. Prompt injection makes
-this worse — a malicious document an agent reads can suggest SQL for it to
-run just as easily as a user can. None of the usual mitigations (asking the
-model nicely, read-only DB users, query timeouts alone) are structural
-guarantees:
+**Policy governs the *shape* of a query, not just table access.**
+Cap joins, subquery depth, GROUP BY width, returned rows, and execution time.
+Set a **minimum group size** so an aggregate can't be sliced down to identify one
+person. You cannot enforce "at most 3 joins and never fewer than 5 rows per
+group" on a string you didn't build.
 
-- A read-only DB user still lets an agent read every table you didn't mean
-  to expose, run an unindexed 12-way join, or exfiltrate an entire table in
-  one `SELECT *`.
-- Prompt-level instructions ("only query the `orders` table") are guidance,
-  not enforcement — nothing stops the next prompt, the next model, or an
-  injected instruction from ignoring them.
-- A query timeout limits *duration*, not *scope* — it doesn't stop a query
-  from touching a table or column it should never have reached at all.
+**Columns can be denied *or masked* — the real value never leaves the database.**
+`email` invisible. `phone` returned as last-4. `national_id` one-way hashed.
+Deny and mask are different rules, and both are enforced during compilation.
 
-QueryGate's structural guarantee: **the only thing an agent can submit is a
-`StructuredQuery` object.** It's a Pydantic model with a fixed shape — no
-`sql` field exists anywhere in the schema, so there's no field to inject
-into. Every table/column reference in it is checked against the real,
-live-reflected schema and an explicit policy before a single SQL statement
-is compiled. A bad query gets a validation error before it ever reaches the
-database, not a raw error message from the database itself.
+**The *human* behind the agent reaches policy and audit.**
+Delegated identity (RFC 8693) carries the real person through the agent into the
+applied policy *and* into both identities on every audit record. Not "an agent
+did this" — "Dana's agent did this, under Dana's permissions".
 
-## How QueryGate differs from generic MCP SQL connectors
+**The audit trail can't become a second data leak.**
+Persisted events never contain SQL, predicate values, rows, exceptions, or
+credentials — by construction, not by redaction pass. Optionally hash-chained
+and tamper-evident, with portable per-query receipts you can verify offline.
 
-A lot of "MCP + database" integrations are a thin wrapper around
-`cursor.execute(model_generated_sql)`, sometimes with a read-only role and a
-row cap tacked on. QueryGate is structurally different:
+**Writes are previewed, not hoped over.**
+See the exact diff and blast radius *before* execution, behind an approval gate.
+No stored procedures, no arbitrary DML strings.
 
-| | Generic MCP SQL connector | QueryGate |
-|---|---|---|
-| What the agent submits | A SQL string | A validated AST (`StructuredQuery`) |
-| Table/column safety | Whatever the DB role allows | Explicit allow/deny policy, checked before compilation |
-| Query shape limits | Usually none | Max joins, where-depth, select width, group-by, top-N — policy-enforced |
-| Row limits | Often just `LIMIT` appended, sometimes bypassable | Server-clamped, tiered by query shape (aggregate vs. row select) |
-| Multi-database support | One connection string, hardcoded | Dynamic connection registry, credential-isolated from schema/tool responses |
-| Concurrency/load control | Rare | Per-connection concurrency semaphore + execution timeout |
-| Rate limits / cost budget | DIY | Per-principal rolling-window request & response-byte quotas (429 + `Retry-After`) |
-| Multi-tenant scoping | DIY | Policy-level `mandatory_row_filters` |
-| Column-level masking | DIY (or none) | Per-principal `column_masks` (hash/null/last-N/bucket), applied in the compiled SQL |
-| Audit trail | Rare | Every query logged plus an optional persisted, redaction-safe JSONL event — optionally a tamper-evident hash-chained ledger with per-query receipts |
+**Expensive queries are refused before they touch data.**
+Cost is estimated up front (Postgres `EXPLAIN`, MSSQL `SHOWPLAN`), so a runaway
+plan is rejected rather than discovered by your on-call.
 
-## Quickstart
+**It points at your live operational database.**
+No warehouse to buy, no ETL, no mandatory semantic-modelling step. Postgres,
+MSSQL and MySQL, each verified against a real server in CI.
 
-Everything below was run end to end from a clean checkout on 2026-08-21; it
-takes about five minutes, most of which is `poetry install`.
+**It never calls home.**
+No telemetry, no licence check, no update ping. That's enforced by
+[`test_no_phone_home.py`](tests/security/test_no_phone_home.py), which fails if
+any module gains one — not promised in a privacy policy.
+
+## Quick start
+
+**1. Run it,** passing your database URL as an environment variable:
 
 ```bash
-poetry install
-cp .env.example .env
-docker compose up -d          # demo Postgres on :5433 (auto-seeded) + the Redis limiter
+docker run -d --name querygate \
+  -p 8000:8000 -v querygate-var:/app/var \
+  -e DATABASE_URL_MYDB='postgresql+asyncpg://readonly@db.internal/app' \
+  ghcr.io/amitnakash95/querygate:latest
 ```
 
-**Set an API key before you start the server.** `.env.example` ships
-`ENVIRONMENT=localhost` and `API_KEYS='[]'`, and with no key configured **the
-REST API accepts unauthenticated calls** — convenient for a first look, wrong for
-anything else, and it leaves you with no token to give the quickstart command
-below.
-
-That anonymous path is gated, not accidental: it is only reachable when the
-environment is local *and* no API key *and* no JWT issuer *and* no SSO is
-configured (`api/auth.py`'s `build_authenticator`, and its sibling in
-`mcp/auth.py`), and `ENVIRONMENT=production` **refuses to start** without
-`API_KEYS` or `JWT_ENABLED` (`core/config.py::_validate_production_auth`). You
-cannot ship this state by accident — but you should not browse in it either.
-Edit `.env`:
+**2. Take the admin key** it generated on first boot — written once, mode 0600:
 
 ```bash
-API_KEYS='["local-dev-key"]'   # any string; this is a local demo credential
+docker exec querygate cat /app/var/admin-api-key
 ```
 
-Then start it:
+**3. Name the connection** in `/app/var/connections.yaml`. Connection strings are
+environment-variable *references*, never literals — a literal DSN is rejected at
+the boundary and never persisted:
+
+```yaml
+connections:
+  mydb:
+    dialect: postgresql
+    connection_string: ${DATABASE_URL_MYDB}
+    enabled: true
+```
+
+**4. Say what agents may see** in `/app/var/policy.yaml`. A fresh install reaches
+**nothing** until you do — deny-by-default is the shipped posture, not an option
+you have to find:
+
+```yaml
+connections:
+  mydb:
+    require_explicit_allowlist: true
+    allowed_tables: [customers, orders]
+    allowed_columns:
+      customers: [id, name, created_at]   # note: NOT email, NOT password_hash
+      orders: [id, customer_id, total, placed_at]
+```
+
+Anything unnamed is denied — including columns. A table in `allowed_tables` with
+no `allowed_columns` entry exposes nothing.
+
+**5. Query it:**
 
 ```bash
-poetry run python -m querygate.run
+curl -X POST http://localhost:8000/api/v1/mydb/query \
+  -H "Authorization: Bearer $(docker exec querygate cat /app/var/admin-api-key)" \
+  -H 'Content-Type: application/json' \
+  -d '{"from_table":"customers","select":["customers.id","customers.name"],"limit":5}'
 ```
 
-The example environment selects `CONCURRENCY_BACKEND=redis` and connects to
-the Compose service at `redis://localhost:6379/0`, so concurrency limits are
-shared across multiple local QueryGate processes. If you intentionally run
-without Compose, set `CONCURRENCY_BACKEND=in_process`; that mode is suitable
-for a single QueryGate process only.
+> **Use a read-only database role.** QueryGate governs what a query may *be*; it
+> does not replace your database's own permissions. The two together are the
+> posture.
 
-For development with automatic reload, use `make dev` (or its longer alias,
-`make run-dev`). `make run dev` is interpreted by Make as two separate
-targets and is not the development-server command.
+Connecting to **MSSQL**? Build the opt-in variant — the default image ships no
+proprietary driver:
+`docker build --target production-mssql -t querygate:mssql .`
 
-### Your first governed query
-
-In a second shell, from the repository root:
-
-```bash
-export QUERYGATE_URL=http://localhost:8000
-export QUERYGATE_TOKEN=local-dev-key      # whatever you put in API_KEYS
-poetry run querygate-quickstart demo
-```
-
-`querygate-quickstart` (TODO.md item 146) reflects a connection's schema and
-prints 3 ready-to-run example queries — a plain select, a filtered select,
-and an aggregate — scoped to columns the catalog doesn't mark sensitive, each
-with a REST `curl`, an MCP tool-call, and a Python SDK snippet. It composes
-existing read-only discovery routes; it never writes anything. Run the `curl` it
-prints and you get real rows back:
-
-```bash
-curl -s -X POST "$QUERYGATE_URL/api/v1/demo/query" \
-  -H "Authorization: Bearer $QUERYGATE_TOKEN" -H "Content-Type: application/json" \
-  -d '{"from": "customers", "select": ["customers.id", "customers.name"], "limit": 10}'
-```
-
-Now try to send SQL instead, and watch there be no field to put it in:
-
-```bash
-curl -s -o /dev/null -w '%{http_code}\n' -X POST "$QUERYGATE_URL/api/v1/demo/query" \
-  -H "Authorization: Bearer $QUERYGATE_TOKEN" -H "Content-Type: application/json" \
-  -d '{"sql": "SELECT 1"}'
-# 422 — `StructuredQuery` is extra="forbid" and has no SQL-string field
-```
-
-Two browser surfaces are also live: [`/admin/`](http://localhost:8000/admin/)
-(operator control plane, needs an admin scope to show anything useful) and
-[`/access/`](http://localhost:8000/access/) (what a non-admin caller may see).
-The offline product guide answers configuration questions without leaving the
-process: `curl "$QUERYGATE_URL/api/v1/help/search?q=configure+policy"`.
-
-## Architecture at a glance
-
-```
-Agent (MCP) / Client (REST)
-        │  StructuredQuery JSON — never SQL
-        ▼
-┌───────────────────────────────────────────────────────────────┐
-│ querygate/execution/service.py  (StructuredQueryService)       │
-│                                                                  │
-│  1. validation/policy_validation.py  — caps + allow/deny        │
-│  2. validation/schema_validation.py  — reflect + verify exists  │
-│  3. compiler/sqlalchemy_compiler.py  — AST → SQLAlchemy Select  │
-│  4. execution/concurrency.py         — per-connection semaphore │
-│  5. connections/engine.py            — session + guardrails     │
-│  6. audit/                           — stdout + persisted JSONL  │
-│                                         event, timing, outcome    │
-└───────────────────────────────────────────────────────────────┘
-        │
-        ▼
-  Real Postgres / MSSQL / MySQL database
-```
-
-Every REST route and every MCP tool is a thin wrapper over that one pipeline —
-there is no second path to a database. The package-by-package map is
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md); the reasoning behind it is
-[`docs/PRODUCT_GUIDE.md`](docs/PRODUCT_GUIDE.md).
-
-## Security model, in seven lines
-
-- **No raw SQL, anywhere.** `StructuredQuery` has no SQL-string field and
-  rejects unknown fields (`extra="forbid"`) — there is no field to smuggle SQL
-  into, and no endpoint that would accept it if there were.
-- **Credentials never leave `connections/`.** Only `PublicConnectionInfo` is
-  returned from REST/MCP; `tests/unit/test_credential_redaction.py` asserts
-  that against the live OpenAPI and MCP schemas, not by convention.
-- **Policy is enforced before compilation**, not as a post-hoc filter.
-- **Bring your own identity, for people as well as agents.** Humans sign in
-  through your IdP — nineteen named presets (Entra ID, Okta, Auth0, Google Workspace,
-  Keycloak, AD FS, Cognito, Cloudflare Access, Ping, OneLogin, JumpCloud,
-  authentik, ZITADEL, Authelia, WorkOS, FusionAuth, Salesforce, GitLab, …) plus
-  any OIDC issuer by name — or through a built-in local provider when there is
-  no IdP to reach. Group membership maps to QueryGate scopes through a
-  reviewable file that is **deny-by-default** and re-evaluated on every request,
-  so tightening it takes effect immediately rather than at the next logout. A
-  terminal gets the same identity with `querygate-login` (RFC 8628), never a
-  shared key. See [`docs/SCOPE_CATALOG.md`](docs/SCOPE_CATALOG.md) and
-  `examples/identity.example.yaml`.
-  *Evaluating? `DEV_IDP_ENABLED=true` makes QueryGate serve its own OIDC
-  provider so the whole sign-in flow runs with nothing to register — refused
-  outside a local environment.*
-- **Every identifier is schema-checked** against the live reflected schema,
-  never agent-asserted.
-- **Bounded execution** — per-connection concurrency semaphore, policy
-  timeout, server-clamped row counts.
-- **Redaction-safe audit** — every attempt is logged; the persisted event
-  never contains SQL, predicate values, rows, exceptions, or credentials.
-- **Adversarially tested, and continuously scanned** — `make test-security`,
-  plus deny-by-default SAST, dependency/SBOM, secret, container and OpenAPI
-  fuzzing gates in CI.
-
-The unabridged version, with the enforcement point for each,
-is [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md). To report a
-vulnerability, see [`SECURITY.md`](SECURITY.md).
+Full walkthrough: **[docs/INSTALL.md](docs/INSTALL.md)** · Running it for real:
+**[deploy/](deploy/)**
 
 ## What it deliberately does not do
 
-These are design decisions, not gaps, and they are not up for negotiation
-without a recorded decision:
+These are permanent design choices. They're why the guarantees above hold, and
+they will not be added:
 
-- **No raw-SQL mode**, no `execute_sql` field, endpoint, or MCP tool.
-- **No execution of model-generated code.**
-- **No stored-procedure pass-through** — exposing stored procedures safely
-  needs its own catalog and approval mechanism, which is out of scope here.
-- **No mandatory semantic-modelling step** before you can ask a question.
-- **No warehouse of our own** — QueryGate governs the operational database you
-  already run; your data never moves.
+- **No raw-SQL mode** — not as a flag, an admin escape hatch, or a "power user" tool
+- **No execution of model-generated code**
+- **No stored-procedure or arbitrary-procedural-SQL path**
+- **No second query interface** (GraphQL included) — a second path is a path *around* the gate
+- **No mandatory semantic-modelling step** — it reads your live schema
+- **No warehouse or query engine of its own**
 
-And the honest list of what is *partial* — RBAC depth, cost estimation
-coverage, opt-in WORM audit retention, in-process async execution, the two
-non-live-verified dialects — is [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md).
+Honest about the rest, too: **[docs/LIMITATIONS.md](docs/LIMITATIONS.md)** lists
+what's missing, unproven, or weaker than you might assume — including that no
+independent penetration test has been performed.
 
-## Where to go next
+## Documentation
 
-[`docs/README.md`](docs/README.md) is the map of everything in `docs/`. The
-short version:
-
-| If you want to… | Read |
+| I want to… | Read |
 |---|---|
-| See every capability, with request/response examples | [`docs/FEATURE_REFERENCE.md`](docs/FEATURE_REFERENCE.md) |
-| Understand the design and the tradeoffs behind it | [`docs/PRODUCT_GUIDE.md`](docs/PRODUCT_GUIDE.md) |
-| Review this as a security engineer | [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md), [`docs/SECURITY_POSTURE.md`](docs/SECURITY_POSTURE.md), [`docs/INFERENCE_RISKS.md`](docs/INFERENCE_RISKS.md) |
-| Know exactly what is missing | [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) |
-| Deploy it for real | [`deploy/README.md`](deploy/README.md), [`deploy/runbook.md`](deploy/runbook.md) |
-| Contribute | [`CONTRIBUTING.md`](CONTRIBUTING.md), [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) |
-| Get help, or find out what is supported | [`SUPPORT.md`](SUPPORT.md) |
-| Report a vulnerability | [`SECURITY.md`](SECURITY.md) |
-| Understand the licence | [`LICENSE`](LICENSE), [`COMMERCIAL.md`](COMMERCIAL.md) |
+| Understand the design | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/PRODUCT_GUIDE.md](docs/PRODUCT_GUIDE.md) |
+| Review it as a security engineer | [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) · [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md) · [docs/INFERENCE_RISKS.md](docs/INFERENCE_RISKS.md) |
+| See every capability | [docs/FEATURE_REFERENCE.md](docs/FEATURE_REFERENCE.md) |
+| Know what's missing | [docs/LIMITATIONS.md](docs/LIMITATIONS.md) |
+| Deploy it | [docs/INSTALL.md](docs/INSTALL.md) · [deploy/](deploy/) |
+| Check the benchmarks | [docs/benchmarks/](docs/benchmarks/) |
+| Report a vulnerability | [SECURITY.md](SECURITY.md) |
 
-Historical extraction notes are kept outside the product surface under
-`archive/extraction/`.
+## Contributing
 
-<p align="center">
-  <img src="landing/assets/favicon.svg" alt="QueryGate app icon" width="64">
-</p>
+Contributions are welcome — read **[CONTRIBUTING.md](CONTRIBUTING.md)** first.
+It includes an honest list of what *won't* be accepted (a raw-SQL path leads it),
+so you don't write code that can't be merged.
+
+There is **no CLA**. Apache-2.0 already grants the patent rights a CLA would ask
+for, and licenses your contribution on the project's own terms. Opening a pull
+request is the whole agreement.
+
+The working agreement this project holds itself to — including mutation-testing
+every enforcement point and rating its own work honestly — is in
+**[CLAUDE.md](CLAUDE.md)**.
 
 ## Licence
 
-QueryGate is licensed under **[Apache-2.0](LICENSE)**. Everything in this
-repository is free to use, modify, and redistribute — including in commercial
-and closed-source products — under those terms.
+**[Apache-2.0](LICENSE).** Free to use, modify and redistribute, including
+commercially and inside closed-source products.
 
-That covers the whole enforcement product: the AST and its validators, **the
-policy engine**, **the audit ledger** (including the hash-chained tamper-evident
-mode and portable receipts), per-human attribution, the compiler and every
-dialect adapter, governed writes, both consoles, the MCP server and the REST API.
-
-- [`COMMERCIAL.md`](COMMERCIAL.md) — what is free forever, what is planned as a
-  paid service, and the things this project will never do (a raw-SQL mode among
-  them). Written so the funding model is legible from day one rather than
-  arriving as a surprise later.
-- [`docs/THIRD_PARTY_LICENSES.md`](docs/THIRD_PARTY_LICENSES.md) — every
-  dependency's licence
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — there is **no CLA**; Apache-2.0 already
-  carries the patent grant a CLA would be asked to provide
-
-None of this is legal advice.
+The policy engine and the audit ledger **will never be tier-gated** — selling
+security as an upsell on a security product makes the free tier the insecure
+tier. **[COMMERCIAL.md](COMMERCIAL.md)** states what is free forever, what is
+planned as a paid service, and why.

@@ -4,6 +4,51 @@ All notable changes to QueryGate are documented here.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-09-06
+
+**QueryGate is now open source under Apache-2.0.** This is the first public
+release. The two changes that matter most to an existing reader:
+
+### Licensing
+
+- **Apache-2.0 replaces the proprietary licence.** `LICENSE` carries the full
+  grant, and `pyproject.toml` declares both PEP 639 signals. `COMMERCIAL.md`
+  states what is free forever — all of this repository, including the policy
+  engine and the audit ledger, neither of which will ever be tier-gated — and
+  what is planned as a paid service (third-party audit anchoring, fleet
+  management, support).
+- **The subscription entitlement gate is removed entirely** (4,761 deletions).
+  There is no licence check, no activation, no HTTP 402, and no
+  `SUBSCRIPTION_EXPIRED` error code. `tests/security/test_no_phone_home.py`
+  reverts to its original absolute — **no outbound call to the project's authors
+  from anywhere in the shipped source** — asserted positively rather than
+  implied.
+
+### Fixed
+
+- **The hardened image rejected the admin key it generated.** First boot created
+  an API key, wrote it at mode 0600, and told the operator to copy it — but
+  nothing added it to `api_keys`, so `docker run` produced a deployment where
+  every authenticated request returned 401. First boot now runs during
+  `create_app`, before the authenticator is constructed. **If you ran a
+  hardened image before this release, the generated key never worked.**
+- **`docs/INSTALL.md`'s first-query example used the wrong endpoint.** It
+  documented `POST /api/v1/query` with a `connection_id` wrapper; the real route
+  is `POST /api/v1/{connection}/query` with the AST as the body.
+
+### Packaging
+
+- **The default container image no longer ships Microsoft's ODBC driver.**
+  Apache-2.0 carries no third-party pass-through clause and a public image
+  reaches people who agreed to nothing, so MSSQL support moved to an opt-in
+  `production-mssql` build target. Postgres and MySQL are unaffected.
+
+### Security tooling
+
+- CodeQL, Dependabot, SHA-pinned GitHub Actions, least-privilege workflow
+  tokens, and continuous fuzzing of the AST boundary via ClusterFuzzLite.
+
+
 ### Changed
 
 - **The MCP server now speaks the final `2026-07-28` protocol revision**
