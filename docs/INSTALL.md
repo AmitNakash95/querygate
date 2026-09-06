@@ -147,10 +147,9 @@ Anything not named is denied. That includes columns: a table in
 
 ```bash
 curl -H "Authorization: Bearer $(docker exec querygate cat /app/var/admin-api-key)" \
-     -X POST http://localhost:8000/api/v1/query \
+     -X POST http://localhost:8000/api/v1/mydb/query \
      -H 'Content-Type: application/json' \
-     -d '{"connection_id":"mydb","query":{"from_table":"customers",
-          "select":["customers.id","customers.name"],"limit":5}}'
+     -d '{"from_table":"customers","select":["customers.id","customers.name"],"limit":5}'
 ```
 
 A query naming `customers.email` returns a policy rejection, not rows. That is
