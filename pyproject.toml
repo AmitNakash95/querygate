@@ -51,7 +51,7 @@ querygate-shapes = "querygate.observed_shapes_cli:main"
 querygate-login = "querygate.login_cli:main"
 
 [project.urls]
-Repository = "https://github.com/AGitmit/QueryGate"
+Repository = "https://github.com/AmitNakash95/querygate"
 Documentation = "https://github.com/AGitmit/QueryGate#readme"
 
 [tool.poetry]
