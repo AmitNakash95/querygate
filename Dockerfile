@@ -1,7 +1,7 @@
 # Base image pinned by digest (Scorecard Pinned-Dependencies). The tag is kept
 # in the comment for readability; Dependabot's `docker` ecosystem bumps the
 # digest weekly, so this is pinned, not frozen.
-FROM python:3.11-slim-bookworm@sha256:0bee7276f83efd4a1ee05bbbf4281d95ed28e079220a9457f25a93e3f1e3c31b AS builder
+FROM python:3.14-slim-bookworm@sha256:9ab8d9c8514b44f90cf0029dd42fdd7e9e211e639c8b995304cc04568dee900f AS builder
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential curl unixodbc-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -40,7 +40,7 @@ RUN poetry install --no-root --only main \
     && rm -rf $POETRY_CACHE_DIR dist
 
 # python:3.11-slim-bookworm, pinned by digest (see the builder stage above).
-FROM python:3.11-slim-bookworm@sha256:0bee7276f83efd4a1ee05bbbf4281d95ed28e079220a9457f25a93e3f1e3c31b AS production
+FROM python:3.14-slim-bookworm@sha256:9ab8d9c8514b44f90cf0029dd42fdd7e9e211e639c8b995304cc04568dee900f AS production
 # TODO.md item 215, and the single highest-severity fix in that phase.
 #
 # Without HARDENED_IMAGE, `docker run <registry>/querygate:latest` — the exact
