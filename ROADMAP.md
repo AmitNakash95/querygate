@@ -168,6 +168,11 @@ human-SSO/identity stream; these start at 210.
 - [ ] **217** — Customer portal: signup, checkout, downloads, docs.
   **Blocked on the legal entity.**
 - [ ] **218** — Setup guides and quickstart docs for the SaaS motion.
+- [x] **230** — Wire first boot's generated admin key into api_keys; the hardened
+      image rejected it, so the one-command install was unusable
+- [ ] **229** — Control plane: lapse messaging describes a gate that no longer
+      exists; realign the service to Notary/fleet (private repo; does not block
+      the public release)
 - [x] **228** — Resolve msodbcsql18 redistribution in a public image (blocks
       the first public image release; repository and wheel unaffected)
 - [x] **227** — Deepen ClusterFuzzLite: add a fuzz target whose work is in

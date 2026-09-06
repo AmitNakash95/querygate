@@ -1610,7 +1610,7 @@ or worked around.
 > Credentials never sit on any returned model, and that's asserted against the
 > live API schema, not by convention. And none of it is "trust us": every
 > guarantee is backed by a deny-by-default CI gate (static analysis, dependency
-> audit, SBOM, image and secret scanning, OpenAPI fuzzing, and a 703-test
+> audit, SBOM, image and secret scanning, OpenAPI fuzzing, and a 704-test
 > adversarial suite), and reviewers get a reproducible packet where each claim
 > names the command that reproduces it. The release pipeline signs the container
 > image (cosign keyless) and attaches SLSA build provenance, both
@@ -1907,7 +1907,7 @@ summary.
 
 The gates fall into three groups:
 
-- **The access boundary itself.** The adversarial security suite (703 tests,
+- **The access boundary itself.** The adversarial security suite (704 tests,
   `make test-security`) encodes specific known bypass classes as regressions —
   denied-column inference, undeclared-table smuggling, predicate-as-SQL,
   schema-discovery leaks, policy-cap breaches, audit no-leak. On top of that,

@@ -15213,3 +15213,44 @@ the real image: 0 `msodbcsql18` packages, no `/opt/microsoft`, 576MB vs 588MB.
 **Accepted cost:** MSSQL users build one extra line instead of pulling a turnkey
 image. A real convenience regression for one of three supported dialects, taken
 over redistributing a proprietary binary to anyone who runs `docker pull`.
+
+### 230. The shipped image generated an admin key that nothing accepted ✅ DONE
+
+**Effort: S. CRITICAL — the one-command install was unusable.** Found
+2026-09-05 by CI on PR #45, and only after the release smoke was fixed to
+authenticate.
+
+**What was broken:** item 215 correctly closed the anonymous bypass for
+`is_hardened_image`, and `bootstrap.first_boot` correctly generated an admin API
+key, wrote it to `/app/var/admin-api-key` at mode 0600, and logged "Copy it now
+and store it in your secret manager". **Nothing ever put that key into
+`cfg.api_keys`.** `read_admin_key` existed, documented itself as "used to
+satisfy production auth", and had unit tests — with no production caller.
+
+So `docker run <registry>/querygate:latest`, the install this product's README
+and `docs/INSTALL.md` both lead with, produced a deployment whose
+`ApiKeyAuthenticator` held an empty key list. Every authenticated request
+returned 401 forever, while the startup log told the operator to copy a key that
+could never work.
+
+**Why nothing caught it:** the release smoke sent no credential on any of its
+nine API calls, so it never exercised authentication at all. Two defects
+concealing each other — the smoke could not fail on auth because it never
+attempted it, and the missing wiring could not surface because nothing
+authenticated. Fixing the smoke exposed the real bug within one CI run.
+
+**The fix:** first boot now runs in `create_app` rather than the lifespan, and
+the key it generates is merged into `api_keys` before
+`build_principal_dependency` reads them. Ordering is the whole fix: the lifespan
+runs when the server starts serving, but the authenticator is constructed during
+`create_app`, so a key generated in the lifespan is always too late.
+
+**Regression test:** `test_the_generated_admin_key_actually_authenticates`
+drives the real app — 401 unauthenticated, 200 with the generated key.
+Mutation-verified: removing the wiring fails it.
+
+**One trap the test documents, because it wasted a debugging cycle:** the
+repository's own `.env` sets `API_KEYS='["admin"]'` and `AppConfig` is a
+`BaseSettings` that reads it. Under that value the operator-supplied key wins,
+first boot's key is never consulted, and a hand-check of the fix passes while
+proving nothing. The test forces `API_KEYS=[]` to reproduce the container.

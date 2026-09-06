@@ -252,6 +252,7 @@ order-of-magnitude, not commitments.
 | 227 | ✅ ClusterFuzzLite coverage is shallow because `pydantic-core` is native — the model fuzz target plateaued at 31 coverage features over 2.7M executions, so a clean run means "no crash on random bytes", not "the input space was explored" | S | — |
 | 228 | ✅ Microsoft's proprietary `msodbcsql18` ships inside the image, but Apache-2.0 has no third-party pass-through and a public image reaches people who agreed to nothing — **blocks the first public image release** | S | 196 |
 | 229 | The control plane emails customers that lapse causes HTTP 402 refusals — the open-source gateway has no gate, so the sentence describes something that cannot happen; its product-side counterpart and the three agreement tests are gone | M | 228 |
+| 230 | ✅ The hardened image generated an admin API key that was never added to `api_keys`, so `docker run` produced a deployment where every authenticated request 401'd — concealed by a release smoke that sent no credential at all | S | 215 |
 | 221 | Move validator bodies out of the model classes into compilable sibling modules — 30 validators / 602 lines of enforcement logic (join form, window scope, CTE names, set ops, credential shape) currently ship readable because a module defining `BaseModel` cannot be Cython-compiled | M | 214 |
 | 220 | ✅ Deny-by-default at table and column granularity: a `Policy` allow-list with no allow-all fallback, so an empty `allowed_tables` denies instead of allowing. Opt-in (default off) so no existing deployment changes behaviour; the starter policy turns it on | M | — |
 
@@ -4658,3 +4659,10 @@ query — then make the customer-facing text describe that, and re-establish a
 cross-check against whatever verifier ends up owning the signature format. Until
 then, **do not send a renewal email from this service**: `notice_job.py` will
 happily deliver the false sentence above.
+
+### 230. The shipped image generated an admin key that nothing accepted ✅ DONE
+
+First boot now runs in `create_app` and merges its generated key into
+`api_keys` before the authenticator is built; the hardened image previously
+rejected the key it told the operator to copy.
+**Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 230).
