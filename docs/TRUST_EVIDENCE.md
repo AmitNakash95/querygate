@@ -1,7 +1,7 @@
 <!-- GENERATED FILE — do not hand-edit. Regenerate with `make trust-page` (scripts/generate_trust_page.py). -->
 # QueryGate — Trust & Evidence Packet
 
-*Generated 2026-09-05 for QueryGate 0.1.0. Composed, read-only, from the checked-in docs and dependency-audit results below (TODO.md item 147) — this file asserts no claim of its own; every statement here is backed by the cited source doc and, where named, a reproducible `make` command. It does not imply any control, certification, or third-party attestation that isn't explicitly stated in a source doc.*
+*Generated 2026-09-06 for QueryGate 0.2.0. Composed, read-only, from the checked-in docs and dependency-audit results below (TODO.md item 147) — this file asserts no claim of its own; every statement here is backed by the cited source doc and, where named, a reproducible `make` command. It does not imply any control, certification, or third-party attestation that isn't explicitly stated in a source doc.*
 
 ## Current dependency audit status
 
