@@ -1,0 +1,75 @@
+# GENERATED — do not edit. Run `python scripts/gen_public_dependabot.py`.
+#
+# The public distribution of `.github/dependabot.yml`, derived from the private
+# one with the `control-plane/` ecosystem removed (that directory is not part of
+# the public repository, and Dependabot errors on a `directory:` that does not
+# exist). The publication filter swaps this file in under the real name.
+# Dependency update automation.
+#
+# Deliberately conservative: QueryGate's dependency posture is deny-by-default
+# (`security/dependency-audit-allowlist.json`, `make dep-audit`), so a bumped
+# lockfile still has to pass the same CVE and licence gates as a hand-edited
+# one. Dependabot opens the PR; the existing gates decide whether it lands.
+#
+# Grouping keeps the PR volume reviewable for a small maintainer team — the
+# failure mode this file is most likely to cause is alert fatigue, not a missed
+# CVE (the scheduled `dependency-audit` job already covers that independently).
+version: 2
+
+updates:
+  # Python runtime + dev dependencies (Poetry-managed; Dependabot reads
+  # pyproject.toml and poetry.lock).
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-and-patch:
+        update-types: [minor, patch]
+    labels: [dependencies, python]
+
+
+  # GitHub Actions are pinned by commit SHA (Scorecard Pinned-Dependencies).
+  # Dependabot understands SHA pins and rewrites both the hash and the trailing
+  # `# vX` comment, which is the only sustainable way to keep pinned actions
+  # current — without this, pinning silently becomes "frozen and stale".
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      actions-all:
+        patterns: ["*"]
+    labels: [dependencies, ci]
+
+  # The TypeScript client builder (clients/typescript, item 51 phase 2).
+  - package-ecosystem: npm
+    directory: /clients/typescript
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    labels: [dependencies, typescript]
+
+  # Base images in the shipped Dockerfile.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    labels: [dependencies, docker]
+    ignore:
+      # The base image must be the interpreter CI actually verifies. Moving it
+      # off 3.11 is a deliberate change that also updates ci.yml's
+      # `python-version` and pyproject's classifiers, so a bot must not make it
+      # alone: Dependabot proposed 3.11 -> 3.14 here, which would have shipped a
+      # runtime no test in this repository has ever run. Digest refreshes of the
+      # pinned 3.11 tag -- the CVE-relevant updates -- still come through.
+      - dependency-name: python
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
