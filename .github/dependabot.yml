@@ -24,17 +24,6 @@ updates:
         update-types: [minor, patch]
     labels: [dependencies, python]
 
-  # The control plane is a separate Poetry project with its own lockfile.
-  - package-ecosystem: pip
-    directory: /control-plane
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 3
-    groups:
-      control-plane-minor-and-patch:
-        update-types: [minor, patch]
-    labels: [dependencies, control-plane]
 
   # GitHub Actions are pinned by commit SHA (Scorecard Pinned-Dependencies).
   # Dependabot understands SHA pins and rewrites both the hash and the trailing
@@ -67,3 +56,14 @@ updates:
       day: monday
     open-pull-requests-limit: 3
     labels: [dependencies, docker]
+    ignore:
+      # The base image must be the interpreter CI actually verifies. Moving it
+      # off 3.11 is a deliberate change that also updates ci.yml's
+      # `python-version` and pyproject's classifiers, so a bot must not make it
+      # alone: Dependabot proposed 3.11 -> 3.14 here, which would have shipped a
+      # runtime no test in this repository has ever run. Digest refreshes of the
+      # pinned 3.11 tag -- the CVE-relevant updates -- still come through.
+      - dependency-name: python
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
