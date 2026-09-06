@@ -253,6 +253,7 @@ order-of-magnitude, not commitments.
 | 228 | ✅ Microsoft's proprietary `msodbcsql18` ships inside the image, but Apache-2.0 has no third-party pass-through and a public image reaches people who agreed to nothing — **blocks the first public image release** | S | 196 |
 | 229 | The control plane emails customers that lapse causes HTTP 402 refusals — the open-source gateway has no gate, so the sentence describes something that cannot happen; its product-side counterpart and the three agreement tests are gone | M | 228 |
 | 230 | ✅ The hardened image generated an admin API key that was never added to `api_keys`, so `docker run` produced a deployment where every authenticated request 401'd — concealed by a release smoke that sent no credential at all | S | 215 |
+| 231 | `write_execution.py` maps every `StatementError` — which in SQLAlchemy includes `DBAPIError`, `OperationalError` and `InterfaceError` — to "violates a database constraint", so a dropped connection or deadlock is reported to the caller, and recorded in the audit event, as the caller's own constraint violation | S | — |
 | 221 | Move validator bodies out of the model classes into compilable sibling modules — 30 validators / 602 lines of enforcement logic (join form, window scope, CTE names, set ops, credential shape) currently ship readable because a module defining `BaseModel` cannot be Cython-compiled | M | 214 |
 | 220 | ✅ Deny-by-default at table and column granularity: a `Policy` allow-list with no allow-all fallback, so an empty `allowed_tables` denies instead of allowing. Opt-in (default off) so no existing deployment changes behaviour; the starter policy turns it on | M | — |
 
@@ -4666,3 +4667,46 @@ First boot now runs in `create_app` and merges its generated key into
 `api_keys` before the authenticator is built; the hardened image previously
 rejected the key it told the operator to copy.
 **Full write-up:** [docs/TODO_ARCHIVE.md](docs/TODO_ARCHIVE.md) (item 230).
+
+### 231. A server fault is reported to the caller as a constraint violation
+
+`execution/write_execution.py` catches `(IntegrityError, DataError,
+StatementError)` around the DML execute and converts all three into one
+`QueryValidationError`: *"the write violates a database constraint or value type
+(not-null, foreign key, unique, or a mistyped value) and was rolled back"*.
+
+`StatementError` is the problem. In SQLAlchemy `DBAPIError` is a subclass of it,
+and so are `OperationalError` and `InterfaceError` — verified against the
+installed library, not assumed. So every driver- and connection-level fault
+takes that branch: a dropped connection, a deadlock, a lock timeout, a
+permission error. The comment directly above the handler states the intent it
+does not achieve — *"is the caller's fault, not a server fault"*.
+
+Observed, not theorised. A `mssql_live` run on 2026-09-06 hit
+`pyodbc.Error ('HY000', 'Connection is busy with results for another command')`
+in `test_delete_against_mssql`, and the caller was told the write violated a
+constraint. A rerun passed, so the trigger is a flaky cursor-state race — but
+the misclassification is deterministic once triggered.
+
+Two things are wrong, and the second is the serious one:
+
+1. **The status is wrong.** A server fault is presented as the caller's fault,
+   so a client retrying sensibly on 5xx sees a 4xx and does not retry.
+2. **The audit record is wrong.** The persisted event carries
+   `error_category: QueryValidationError` and a `rejection_reason` asserting a
+   constraint violation that never happened. Audit accuracy is one of the three
+   pillars — an event that misattributes a cause is worse than one that says
+   less, because it will be believed. Note this is a *truthfulness* defect, not
+   a redaction one: nothing leaks, the message is simply false.
+
+Fix shape: keep `IntegrityError` and `DataError` mapping to
+`QueryValidationError`; let `StatementError` do so only when it is NOT a
+`DBAPIError` (bind-processing errors raise `StatementError` directly, and those
+genuinely are the caller's fault). Everything else propagates as a server error.
+
+Definition of done: a test that raises `OperationalError` from
+`session.execute` and asserts the caller does NOT receive
+`QueryValidationError`, plus one asserting the audit event's `error_category`
+is not `QueryValidationError` for that case. Mutation-verify by reverting the
+handler and confirming both fail. Check `write_preview.py` for the same
+pattern before closing.
