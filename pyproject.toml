@@ -3,7 +3,7 @@ line-length = 100
 
 [project]
 name = "querygate"
-version = "0.1.0"
+version = "0.2.0"
 description = "Agent-safe database access gateway — expose databases to AI agents over MCP and REST without raw SQL."
 authors = [{ name = "Amit Nakash" }]
 readme = "README.md"
