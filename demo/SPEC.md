@@ -24,7 +24,7 @@ wrong, say so in your report — do not silently deviate.
 | Baseline (unsafe) MCP server | **8811** |
 | QueryGate REST + MCP (`/mcp`) | **8010** |
 | Demo control UI + backend | **8900** |
-| Investor deck (static + `/api/*` proxy to :8900) | **8901** |
+| Demo deck (static + `/api/*` proxy to :8900) | **8901** |
 
 Already in use on this machine, do not bind: 5432, 5433, 6379, 8000, 8080,
 13306, 14330.

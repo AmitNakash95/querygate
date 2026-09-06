@@ -33,6 +33,12 @@ _VENDOR_ONLY = ("stripe", "google-cloud-kms", "alembic", "psycopg")
 
 
 def test_the_control_plane_is_its_own_project_with_its_own_lockfile():
+    if not CONTROL_PLANE.is_dir():
+        pytest.skip(
+            "control-plane/ is not part of this distribution — the publication "
+            "filter strips it from the open-source repository. The isolation this "
+            "test guards is enforced where the service actually lives."
+        )
     assert (CONTROL_PLANE / "pyproject.toml").is_file()
     assert (CONTROL_PLANE / "poetry.lock").is_file(), (
         "the control plane must pin its own dependencies; sharing the product's "
