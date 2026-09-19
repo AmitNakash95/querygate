@@ -239,14 +239,14 @@ order-of-magnitude, not commitments.
 | 212 | Reversed with the Apache-2.0 decision (see item 210); lives in a private control-plane service | — | — |
 | 213 | Reversed with the Apache-2.0 decision (see item 210); never built | — | 199, 212 |
 | 214 | Cancelled with the Apache-2.0 decision (see item 210) | — | — |
-| 215 | ✅ One-command install and first-boot self-configuration — no operator-authored file needed to reach activation; safe-by-default starter policy; first connection added through the UI | M | 213 |
+| 215 | ✅ One-command install and first-boot self-configuration — no operator-authored file needed to reach activation; safe-by-default starter policy; first connection added through the UI | M | — |
 | 216 | Reversed with the Apache-2.0 decision (see item 210); not part of this distribution | — | 211 |
 | 217 | Reversed with the Apache-2.0 decision (see item 210); never built | — | 212 |
 | 218 | Superseded by the Apache-2.0 open-core decision (see item 210) | — | 215 |
-| 219 | Pre-launch codebase cleanup pass — `repo-audit`, `dep-audit`, `test-gap`, `claim-verify`, `security-invariant-check`; delete BSL dead code; close open defects 192 and 194; full CI matrix green | L | 210 |
+| 219 | Pre-launch codebase cleanup pass — `repo-audit`, `dep-audit`, `test-gap`, `claim-verify`, `security-invariant-check`; delete dead code; close open defects 192 and 194; full CI matrix green | L | 210 |
 | 222 | The product-guide HTML generator emits a document fragment — no doctype, `lang`, `charset` or viewport meta, so the generated customer-facing page fails WCAG 3.1.1 and its own mobile breakpoint never fires; plus a missing skip link, a split Decision Log list, and the phone-home scan not covering the two shipped `.js` files (load-bearing at item 216) | S | — |
 | 223 | Moot after the Apache-2.0 decision (see item 210) | — | 216 |
-| 224 | Bring the pre-existing console surfaces up to the renewal banner's accessibility bar — `#global-banner` is a `hidden` `role="status"` element in both consoles, and neither isolates bidirectional text in database-supplied identifiers | M | 216 |
+| 224 | Bring the pre-existing console surfaces up to the renewal banner's accessibility bar — `#global-banner` is a `hidden` `role="status"` element in both consoles, and neither isolates bidirectional text in database-supplied identifiers | M | — |
 | 225 | Moot after the Apache-2.0 decision (see item 210) | — | 216 |
 | 226 | Moot after the Apache-2.0 decision (see item 210) | — | 212 |
 | 227 | ✅ ClusterFuzzLite coverage is shallow because `pydantic-core` is native — the model fuzz target plateaued at 31 coverage features over 2.7M executions, so a clean run means "no crash on random bytes", not "the input space was explored" | S | — |
@@ -3440,8 +3440,9 @@ rather than running a separate one.
 
 ### 197. Offline entitlement token for the paid tier — SUPERSEDED
 
-Do not implement. Retained only so the item number stays permanent. Its premise (an entitlement marker for a paid tier) was superseded by the now-also-reversed items 210-213; see item 210.
-
+**Do not implement.** Retained only so the item number stays permanent. Its
+premise (an entitlement marker for a paid tier) was superseded by the
+now-also-reversed items 210-213; see item 210.
 
 ### 198. QueryGate Notary — append-only transparency log for the audit ledger's chain head — not-before-customers
 
@@ -3667,18 +3668,34 @@ A per-surface allowlist over `Principal.auth_method` (console / REST / MCP) whos
 
 ### 202. Non-ASCII input handling around a few HMAC-based comparisons needs hardening
 
-A narrow, fail-closed input-handling gap: a handful of comparisons over caller-supplied strings can raise on non-ASCII input instead of cleanly rejecting it, turning what should be an ordinary 401/403/422 into a masked 500 on a few identity/SSO code paths. Every affected path already fails closed — the residual cost is availability and error-message clarity, not an authorization bypass. Being hardened.
+A narrow, fail-closed input-handling gap: a handful of comparisons over
+caller-supplied strings can raise on non-ASCII input instead of cleanly
+rejecting it, turning what should be an ordinary 401/403/422 into a masked 500
+on a few identity/SSO code paths. Every affected path already fails closed —
+the security decision is still "reject" — so the residual cost is availability
+and error-message clarity, not an authorization bypass. Being hardened.
 
+**Effort:** S. **Depends on:** 194 (defect 1 shipped), 199 (shipped, phase 1).
 
 ### 203. A narrow tamper-detection edge case in resumed audit-chain verification
 
-A specific combination of conditions on a *resumed* page of the audit ledger's chain-verification walk can under-report a chain break instead of counting it, for a caller who already has write access to the underlying storage. A full, non-resumed verification pass is unaffected, and a weaker secondary signal still remains. Being hardened.
+A specific combination of conditions on a *resumed* page of the audit ledger's
+chain-verification walk can under-report a chain break instead of counting it,
+for a caller who already has write access to the underlying storage. A full,
+non-resumed verification pass is unaffected, and a weaker secondary signal
+still remains. Being hardened.
+
+**Effort:** S. **Depends on:** 172 (shipped), 194 defect 2 (shipped).
+
 ---
 
 ## Reversed: proprietary SaaS subscription plan (items 210-219)
 
-A 2026-08-23 decision to ship QueryGate as a paid closed-source subscription was reversed on 2026-08-28. Apache-2.0 replaced the proprietary licence, and the subscription/entitlement/control-plane work below was removed from the open-source core. Retained here only so the item numbers stay permanent and the history is not silently erased.
-
+A 2026-08-23 decision to ship QueryGate as a paid closed-source subscription
+was reversed on 2026-08-28. Apache-2.0 replaced the proprietary licence, and
+the subscription/entitlement/control-plane work below was removed from the
+open-source core. Retained here only so the item numbers stay permanent and
+the history is not silently erased.
 
 ### 210. Proprietary licence transition — retire the BSL apparatus ✅ DONE
 
@@ -3822,7 +3839,7 @@ Specced as part of the (reversed) subscription model (see item 210). Never built
 
 ### 218. Setup guides and quickstart docs — SUPERSEDED
 
-Superseded by the Apache-2.0 open-core decision (item 210); the public quickstart and setup docs ship as part of the README and the release notes instead.
+Superseded by the Apache-2.0 open-core decision (item 210); the public quickstart and setup docs ship as part of the README and release notes instead.
 
 
 ### 219. Pre-launch codebase cleanup pass
@@ -4049,6 +4066,7 @@ The default image no longer ships `msodbcsql18`; MSSQL moved to an opt-in
 ### 229. Control-plane messaging reconciliation after the subscription reversal — TRACKED PRIVATELY
 
 Internal control-plane tracking item (see item 212); not part of this distribution.
+
 ### 230. The shipped image generated an admin key that nothing accepted ✅ DONE
 
 First boot now runs in `create_app` and merges its generated key into

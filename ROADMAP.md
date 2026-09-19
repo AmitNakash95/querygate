@@ -81,10 +81,27 @@ independently eligible item, or stop if roadmap order/dependencies leave none.
 Never steal or auto-expire a claim based on its timestamp. Remove your own
 claim when the work ships or before explicitly handing the item back.
 
-### Phase S — Ship as a paid SaaS product (gates everything else) — REVERSED
+### Phase S — Ship as a paid SaaS product — REVERSED
 
-A 2026-08-23 owner decision to sell QueryGate as a closed-source paid subscription was reversed on 2026-08-28 in favor of the Apache-2.0 open-core model this repository ships under. See CLAUDE.md's North Star section and docs/PRODUCT_GUIDE.md's Decision Log. The subscription/entitlement/control-plane work built under this phase (TODO.md items 210-219) was removed from the open-source core; the surviving commercial products (third-party audit-chain anchoring, fleet management) live in a private control-plane service outside this repository.
+A 2026-08-23 owner decision to ship QueryGate as a closed-source paid
+subscription was reversed on 2026-08-28 in favor of the Apache-2.0 open-core
+model this repository ships under (see CLAUDE.md's North Star section and
+docs/PRODUCT_GUIDE.md's Decision Log). The subscription/entitlement/
+control-plane work this phase tracked (items 210-219) was removed from the
+open-source core; the surviving commercial products live in a private
+control-plane service outside this repository. Retained as a heading only so
+the item numbers stay permanent.
 
+Two still-relevant items that were tracked inside this phase, relocated here so
+they aren't lost:
+
+- [x] **230** — Wire first boot's generated admin key into api_keys; the
+      hardened image rejected it, so the one-command install was unusable.
+- [ ] **221** — Move validator bodies out of the model classes so the
+  enforcement logic can be compiled. *Measured residual: 30 validators / 602
+  lines of Structural-pillar logic ship readable, because a module defining
+  `BaseModel` cannot be Cythonized. Mechanical but touches the AST core —
+  owner decision before starting.*
 
 ### Phase 0 — Moat & proof (highest ROI: wins the security review)
 
